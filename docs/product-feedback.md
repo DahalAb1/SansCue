@@ -1,20 +1,14 @@
 # Product Feedback
 
-The submission requires product feedback for each developer tool, API, or SDK used in the project.
+Complete this template for each developer tool, API, or SDK used. Record actual testing results. [Submission guidance](https://amazonappdev2026.devpost.com/)
 
-Do not fill this file with assumed results. Record only tested behavior.
+## Tool / API / SDK
 
-## Bee
-
-- Tool, API, or SDK:
-- Version or date tested:
-- Purpose in SansCue:
-- Onboarding experience:
+- Name and version:
+- Use in SansCue:
+- Setup experience:
 - What worked well:
-- What needs work:
-- Would you build with it again?:
-- Evidence:
+- What needs improvement:
+- Would we use it again? Yes/No and why:
 
-## Other Tools
-
-Add one section per tool after it is used.
+If entering AWS Builder, describe the AWS services and their integrations here.

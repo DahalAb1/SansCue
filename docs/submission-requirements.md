@@ -1,45 +1,30 @@
-# Submission Requirements
+# Submission Checklist
 
-Source: [official hackathon rules](https://amazonappdev2026.devpost.com/rules), checked on October 3, 2026.
+**Deadline:** October 23, 2026, 2 PM America/Chicago (noon Pacific). **Team target:** October 22.
 
-## Current Eligibility Status
+Checked October 3, 2026. Recheck the linked requirements before submitting.
 
-SansCue is not eligible for final submission yet. Required blockers:
+## Eligibility and project access
 
-- [ ] A working application must exist in this repository.
-- [ ] The code must use data recorded and processed through a Bee device or an Apple Watch running Bee software at runtime.
-- [ ] The demo video must show that Bee data being used to deliver value to a user.
-- [ ] Setup and run instructions must be complete enough for judging and testing.
+From the [official rules, sections 1–4](https://amazonappdev2026.devpost.com/rules):
 
-## Required Before Submission
+- [ ] Register on Devpost, verify both teammates' eligibility, and designate a submission representative.
+- [ ] Create or significantly update the project during August 31–October 23, 2026; explain changes to pre-existing work.
+- [ ] Confirm ownership and permission for third-party tools, data, and media; comply with their licenses.
+- [ ] Provide all source, assets, setup/run instructions, and testing access, including credentials for a private app.
+- [ ] Keep the project freely accessible to judges through November 20, 2026, noon Pacific.
+- [ ] Provide submission materials in English or include translations.
 
-- [ ] Join the hackathon on Devpost.
-- [ ] Verify entrant eligibility under the official rules.
-- [ ] Submit under the Bee primary track.
-- [ ] Provide the GitHub repository URL.
-- [ ] Keep the repository public with a visible open-source license, or make it private and share it with the required reviewers.
-- [ ] Include all source code, assets, and instructions required for the project to run.
-- [ ] Include a text description explaining the project features and functionality.
-- [ ] Include a public YouTube or Vimeo demo video under three minutes.
-- [ ] Show the working project in the demo video.
-- [ ] Do not include third-party trademarks, copyrighted music, or other copyrighted material in the video unless permission is available.
-- [ ] Complete product feedback for every developer tool, API, or SDK used.
-- [ ] Make submission materials English, or provide English translations.
-- [ ] Make the project available free of charge and without restriction for judging through November 20, 2026.
-- [ ] Verify the project is original work and does not violate third-party rights.
-- [ ] Submit before October 23, 2026 at 12:00 PM Pacific Time, which is 2:00 PM America/Chicago.
+For [GitHub access](https://amazonappdev2026.devpost.com/details/faqs):
 
-## Repository Access Requirement
+- [ ] Supply a public repository with a visible open-source license, or a private repository shared with every reviewer listed in the FAQ. Verify accepted invitations if private.
 
-For a public repository, the open-source license must be visible and detectable by GitHub.
+## Bee proof and submission content
 
-For a private repository, the rules require access for `testing@devpost.com` and these GitHub users:
+From the [submission guidance](https://amazonappdev2026.devpost.com/):
 
-- `chris-trag`
-- `knmeiss`
-- `giolaq`
-- `anishamalde`
-- `mosesroth`
-- `emersonsklar`
-
-Do this only if the repository is kept private.
+- [ ] Show code and demo interacting with actual Bee-device or Bee-enabled Apple Watch data through Bee CLI, MCP, or Agent Skills, delivering user value.
+- [ ] Provide a description, GitHub URL, Bee track selection, and any mini-challenge selections and required details.
+- [ ] Upload a public YouTube/Vimeo demo under three minutes showing the working web app and Bee integration.
+- [ ] Complete [product feedback](product-feedback.md) for every developer tool, API, and SDK used.
+- [ ] Complete the required Devpost fields and submit before the deadline.
