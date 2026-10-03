@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Local credentials and environment configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+.aws/
+*.pem
+*.key
+
+# Private recordings and participant data; use synthetic fixtures in source control
+local-data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# JavaScript and build output
+node_modules/
+dist/
+build/
+coverage/
+*.log
