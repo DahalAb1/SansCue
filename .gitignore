@@ -7,8 +7,19 @@
 !.env.example
 !.env.*.example
 .aws/
+.ssh/
+.gnupg/
+.netrc
+.npmrc
+.pypirc
+secrets/
+credentials/
 *.pem
 *.key
+*.p12
+*.pfx
+*.jks
+*.keystore
 
 # Private recordings and participant data
 local-data/
