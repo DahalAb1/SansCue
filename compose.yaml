@@ -1,0 +1,59 @@
+# Local development only. Keep resolved configuration (including passwords) private.
+name: sanscue
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      sessions:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+
+  sessions:
+    build:
+      context: .
+      dockerfile: services/sessions/Dockerfile
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_USER:?Set POSTGRES_USER in deploy/.env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}@sessions-db:5432/${POSTGRES_DB:?Set POSTGRES_DB in deploy/.env}"
+      HTTP_HOST: "0.0.0.0"
+      HTTP_PORT: "3000"
+      RUST_LOG: "info"
+    depends_on:
+      sessions-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://127.0.0.1:3000/readyz"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 10s
+
+  sessions-db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:?Set POSTGRES_DB in deploy/.env}"
+      POSTGRES_USER: "${POSTGRES_USER:?Set POSTGRES_USER in deploy/.env}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}"
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - sessions-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  sessions-db-data:
+    name: sessions-db-data

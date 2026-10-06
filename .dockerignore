@@ -1,0 +1,65 @@
+# Default deny: only source types and explicit build configuration enter context.
+# Add future asset/input types deliberately; never reinclude whole application trees.
+# Docker trims trailing slashes and includes descendants of an allowed parent.
+# Negated paths also match directories. Final descendant exclusions below
+# prevent extension-shaped or manifest-named directories from admitting files.
+# Docker can still traverse excluded parents to find required build inputs.
+**
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!services/sessions/Cargo.toml
+!services/sessions/src/**/*.rs
+!services/sessions/migrations/**/*.sql
+!web/package.json
+!web/package-lock.json
+!web/index.html
+!web/tsconfig.json
+!web/vite.config.ts
+!web/src/**/*.ts
+!web/src/**/*.tsx
+!web/src/**/*.css
+!deploy/Caddyfile
+# Defense in depth for sensitive directories even if they contain source-like files.
+**/.env
+**/.env.*
+**/.aws
+**/.ssh
+**/.gnupg
+**/.netrc
+**/.npmrc
+**/.pypirc
+**/node_modules
+**/dist
+**/target
+**/build
+**/coverage
+**/.git
+**/*.log
+**/local-data
+**/secrets
+**/credentials
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+
+# Never admit descendants of ANY allowed path, even source-like descendants.
+# Keep one terminal exclusion per allowlist entry; the fixture check enforces this.
+Cargo.toml/**
+Cargo.lock/**
+rust-toolchain.toml/**
+services/sessions/Cargo.toml/**
+services/sessions/src/**/*.rs/**
+services/sessions/migrations/**/*.sql/**
+web/package.json/**
+web/package-lock.json/**
+web/index.html/**
+web/tsconfig.json/**
+web/vite.config.ts/**
+web/src/**/*.ts/**
+web/src/**/*.tsx/**
+web/src/**/*.css/**
+deploy/Caddyfile/**
