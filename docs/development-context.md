@@ -1,10 +1,12 @@
 # Development Context
 
-Updated October 5, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
+Updated October 6, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
 
 ## Implementation agreement
 
-The [foundation contract](foundation-contract.md) records the agreed Stage 0/Stage 1 boundaries, ownership, and integration details. Use it for the immediate local foundation scope; the broader architecture and AWS goals below remain the product direction, not completed implementation.
+The [foundation contract](foundation-contract.md) remains authoritative for baseline ownership, ports, routes, and health semantics; its Stage 0 status statements are historical. The [MVP product contract](mvp-contracts.md) is the canonical source for chosen product defaults, service delivery, Bee constraints, and local verification expectations. The [README](../README.md) records current implementation status. Broader AWS goals remain product direction, not completed implementation.
+
+Current authorization: local MVP work targets `integration/mvp-complete` on assigned task branches. No `dev`/`main` merge, push, AWS deployment, or paid model spend is authorized by this document. The general Git workflow below is retained for historical/team reference; its publish and integration commands are not instructions for the current task.
 
 ## Working preferences
 
@@ -16,7 +18,7 @@ The [foundation contract](foundation-contract.md) records the agreed Stage 0/Sta
 - Use plain language, short tasks, and clear diagrams. Avoid roleplay scenarios, repeated explanations, unnecessary dependencies, and speculative scaffolding.
 - Label proposals and unknowns. Never invent measurements, test results, device access, or completed features.
 
-## Git workflow
+## Git workflow (general team reference)
 
 | Branch | Purpose |
 |---|---|
@@ -116,7 +118,7 @@ This advances `main` to the tested commit without creating a merge commit or rew
 - Two-person team building for the Amazon hackathon's Bee track. Microservices are required by the team and professor.
 - Working name: SansCue; it may change. Keep technical names and commit messages independent of branding.
 - Conference web app first. Audience members use phone browsers; no native mobile application.
-- AWS hosting only for the current scope. Local-network hosting has been removed.
+- AWS remains the eventual hosting target; the current authorized implementation is local-only. Public/LAN hosting and AWS deployment are not part of this task.
 - Team submission target: October 22, 2026. Deadline: October 23, 2026, 2 PM America/Chicago. Keep submission details in the [checklist](../docs/submission-requirements.md).
 - A small external pilot is desired, subject to scheduling. No pilot or performance results exist yet.
 
@@ -126,7 +128,7 @@ The speaker creates a room and displays a QR code. Audience members join its web
 
 - Audience: generated questions and response controls, with written questions restricted to a separate Q&A tab.
 - Speaker: a dashboard understandable while speaking, plus question management and controls. This is a dashboard, not a speaking/recording tab.
-- TA: access to Questions; further permissions remain undecided. The speaker must also be able to operate alone.
+- TA: question management and private feedback access under the [MVP permissions](mvp-contracts.md#rooms-identity-and-permissions); no room ending or access/Bee-binding administration. The speaker must also be able to operate alone.
 - Topic precision and question frequency are separate controls.
 - Published questions stay fixed while people answer. Preserve their supporting transcript context after the discussion moves on.
 - Display response counts alongside understanding ratings where applicable.
@@ -198,14 +200,14 @@ Within a feature, separate HTTP handling, business rules, types/errors, and SQL 
 
 ## Development sequence and open decisions
 
-- Current repository contains planning/submission files; application implementation has not started.
-- Next scope: MVP Step 1, covering the frontend shell, sessions backend, database connection, health checks, and AWS deployment. AWS account/domain readiness is unverified.
+- The repository now contains the frontend shell, sessions health/readiness service, and local Compose foundation, as well as planning/submission files. Product features and Docker/runtime acceptance are not complete.
+- Current scope extends the local foundation through the product flow defined in the [MVP contract](mvp-contracts.md). AWS account/domain readiness is unverified and deployment remains outside authorization.
 - Build general infrastructure, connect the services, then optimize the complete flow. Add timing measurements during integration; fix issues that block useful testing immediately.
-- Access to a Bee-enabled Apple Watch must be scheduled. Authentication, data access, live delivery, and performance have not been verified for this project.
+- Bee account/authentication, device access, and consent need human involvement. The researched local proxy is unauthenticated and must remain loopback-only; its stream has no documented replay cursor or speech-order guarantee. Actual integration/performance remain unverified; see the MVP contract.
 - Recorded transcripts can support repeatable development tests. Validate the final flow with actual Bee data.
-- Step 8: decide an initial question format, topic behavior, and context selection; connect a provisional model.
+- Step 8: implement the contract’s evidenced single-topic understanding checks and asynchronous generation; connect a provisional model only with available authorized access.
 - Step 9: compare models using the same transcripts and instructions; choose based on quality, complete-question delay, and cost. Record model and prompt versions. Bedrock is a candidate, not a finalized choice.
-- Step 10: decide response options, publishing rules, timers, Q&A visibility/moderation, dashboard attention, and TA permissions.
-- Service message transport, exact AWS capacity, and performance targets remain open. SQS is a candidate, not an installed requirement.
+- Step 10: implement the contract’s response replacement, immutable manual publication, private Q&A, dashboard counts, and role permissions; no automatic timers.
+- Authenticated internal HTTP with durable deduplication and bounded retries is the chosen MVP transport; no SQS/broker is required. Workload, performance/cost targets, model choice, and AWS capacity remain open.
 
 Update these notes when decisions change. Never add credentials, participant data, private recordings, or machine-specific paths.
