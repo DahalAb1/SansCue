@@ -2,6 +2,10 @@
 
 Updated October 5, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
 
+## Implementation agreement
+
+The [foundation contract](foundation-contract.md) records the agreed Stage 0/Stage 1 boundaries, ownership, and integration details. Use it for the immediate local foundation scope; the broader architecture and AWS goals below remain the product direction, not completed implementation.
+
 ## Working preferences
 
 - Build one agreed step at a time. Discussion and requests for explanations are not permission to implement the whole product.
