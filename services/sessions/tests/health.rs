@@ -103,14 +103,13 @@ fn startup_failure_is_bounded_nonzero_and_never_binds() {
     let http = TcpListener::bind("127.0.0.1:0").unwrap();
     let http_address = http.local_addr().unwrap();
     drop(http);
+    let password = "sessions-test-only-do-not-leak-7f3a";
+    let url = format!(
+        "postgres://private:{password}@{}/sessions",
+        unavailable.local_addr().unwrap()
+    );
     let mut child = Command::new(env!("CARGO_BIN_EXE_sessions-service"))
-        .env(
-            "DATABASE_URL",
-            format!(
-                "postgres://private:do-not-leak@{}/sessions",
-                unavailable.local_addr().unwrap()
-            ),
-        )
+        .env("DATABASE_URL", &url)
         .env("HTTP_HOST", "127.0.0.1")
         .env("HTTP_PORT", http_address.port().to_string())
         .env("RUST_LOG", "info")
@@ -132,7 +131,14 @@ fn startup_failure_is_bounded_nonzero_and_never_binds() {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert!(!logs.contains("do-not-leak"));
+            assert!(
+                !logs.contains(password),
+                "logs exposed the database password"
+            );
+            assert!(
+                !logs.contains(&url),
+                "logs exposed the complete database URL"
+            );
             break;
         }
         if start.elapsed() > STARTUP_TIMEOUT + Duration::from_secs(2) {
