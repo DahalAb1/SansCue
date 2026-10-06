@@ -20,6 +20,7 @@ BLOCKED_NAMES = [
     ".npmrc", ".netrc", ".pypirc", ".env", ".env.local",
     "identity.pem", "identity.key", "identity.p12", "identity.pfx",
     "identity.jks", "identity.keystore", "unknown-credentials.json",
+    "private-backup.dump", "nested/unknown-credentials.json",
     ".aws/config", ".ssh/config", ".gnupg/config",
     "secrets/private.ts", "credentials/private.rs", "local-data/backup.sql",
     "node_modules/package/index.ts", "dist/bundle.ts",
@@ -36,8 +37,8 @@ def main():
         # Never copy application directories or inspect actual credentials.
         shutil.copyfile(ROOT / ".dockerignore", context / ".dockerignore")
         blocked = [prefix + name for prefix in
-                   ("", "web/", "web/src/", "services/sessions/",
-                    "services/sessions/src/") for name in BLOCKED_NAMES]
+                   ("", "web/", "web/src/", "services/", "services/sessions/",
+                    "services/sessions/src/", "services/sessions/migrations/", "deploy/") for name in BLOCKED_NAMES]
         for name in ALLOWED + blocked:
             path = context / name
             path.parent.mkdir(parents=True, exist_ok=True)
