@@ -1,0 +1,24 @@
+# Allowlist only build inputs; never send local environment files/backups.
+**
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!services/
+!services/sessions/
+!services/sessions/**
+!web/
+!web/**
+!deploy/
+!deploy/Caddyfile
+**/.env
+**/.env.*
+**/node_modules
+**/dist
+**/target
+**/.git
+**/*.log
+**/local-data
+**/secrets
+**/credentials
+**/*.pem
+**/*.key
