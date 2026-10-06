@@ -64,7 +64,8 @@ def main():
             "--env", "POSTGRES_PASSWORD=disposable-test-only", "postgres:17")
         db_port = run("docker", "port", name, "5432/tcp").rsplit(":", 1)[1]
         deadline = time.monotonic() + 60
-        while subprocess.run(["docker", "exec", name, "pg_isready", "-U", "sessions_app",
+        # The initialization server is Unix-socket-only; wait for final TCP service.
+        while subprocess.run(["docker", "exec", name, "pg_isready", "-h", "127.0.0.1", "-U", "sessions_app",
                                "-d", "sessions"], stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=10).returncode:
             if time.monotonic() >= deadline:
