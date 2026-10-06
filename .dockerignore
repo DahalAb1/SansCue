@@ -1,8 +1,9 @@
 # Default deny: only source types and explicit build configuration enter context.
 # Add future asset/input types deliberately; never reinclude whole application trees.
 # Docker trims trailing slashes and includes descendants of an allowed parent.
-# Do not allow directories (including **/): negated file patterns below let
-# Docker traverse excluded parents to find the required build inputs.
+# Negated paths also match directories. Final descendant exclusions below
+# prevent extension-shaped or manifest-named directories from admitting files.
+# Docker can still traverse excluded parents to find required build inputs.
 **
 !Cargo.toml
 !Cargo.lock
@@ -44,3 +45,21 @@
 **/*.pfx
 **/*.jks
 **/*.keystore
+
+# Never admit descendants of ANY allowed path, even source-like descendants.
+# Keep one terminal exclusion per allowlist entry; the fixture check enforces this.
+Cargo.toml/**
+Cargo.lock/**
+rust-toolchain.toml/**
+services/sessions/Cargo.toml/**
+services/sessions/src/**/*.rs/**
+services/sessions/migrations/**/*.sql/**
+web/package.json/**
+web/package-lock.json/**
+web/index.html/**
+web/tsconfig.json/**
+web/vite.config.ts/**
+web/src/**/*.ts/**
+web/src/**/*.tsx/**
+web/src/**/*.css/**
+deploy/Caddyfile/**

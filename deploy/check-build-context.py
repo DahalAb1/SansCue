@@ -27,6 +27,22 @@ BLOCKED_NAMES = [
 ]
 
 
+def descendant_fixtures():
+    # Negated paths can match directories, including exact manifest names.
+    # Source-shaped children must also stay excluded by terminal rules.
+    rules = (ROOT / ".dockerignore").read_text().splitlines()
+    patterns = [line[1:] for line in rules if line.startswith("!")]
+    last_allow = max(index for index, line in enumerate(rules) if line.startswith("!"))
+    assert all(pattern + "/**" in rules[last_allow + 1:] for pattern in patterns), (
+        "every allowlist entry needs a terminal descendant exclusion")
+    directories = [pattern.replace("**/", "nested/").replace("*", "archive")
+                   for pattern in patterns]
+    return [directory + "/" + child for directory in directories for child in
+            ("unknown-credentials.json", "private.ts", "private.tsx", "private.css",
+             "private.rs", "private.sql", "nested/unknown-credentials.json",
+             "nested/private.ts", "nested/private.rs", "nested/private.sql")]
+
+
 def main():
     if not shutil.which("docker"):
         raise SystemExit("Missing prerequisite: Docker with BuildKit; ask the environment Fixer")
@@ -35,22 +51,28 @@ def main():
         context = base / "context"
         context.mkdir()
         # Never copy application directories or inspect actual credentials.
-        shutil.copyfile(ROOT / ".dockerignore", context / ".dockerignore")
         blocked = [prefix + name for prefix in
                    ("", "web/", "web/src/", "services/", "services/sessions/",
                     "services/sessions/src/", "services/sessions/migrations/", "deploy/") for name in BLOCKED_NAMES]
-        for name in ALLOWED + blocked:
-            path = context / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("harmless fixture\n")
-        (context / "Dockerfile").write_text("FROM scratch\nCOPY . /\n")
-        output = base / "output"
-        subprocess.run(["docker", "build", "--no-cache", "--output",
-                        f"type=local,dest={output}", str(context)], check=True, timeout=120)
-        actual = {str(path.relative_to(output)) for path in output.rglob("*") if path.is_file()}
-        assert actual == set(ALLOWED), {"missing": set(ALLOWED) - actual,
-                                       "unexpected": actual - set(ALLOWED)}
-        print(f"PASS: {len(ALLOWED)} required inputs included; {len(blocked)} credential/generated fixtures excluded")
+        descendants = descendant_fixtures()
+        for label, allowed, denied in (("normal", ALLOWED, blocked),
+                                        ("directory-shaped", [], descendants)):
+            case = context / label
+            case.mkdir()
+            shutil.copyfile(ROOT / ".dockerignore", case / ".dockerignore")
+            for name in allowed + denied:
+                path = case / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("harmless fixture\n")
+            (case / "Dockerfile").write_text("FROM scratch\nCOPY . /\n")
+            output = base / (label + "-output")
+            subprocess.run(["docker", "build", "--no-cache", "--output",
+                            f"type=local,dest={output}", str(case)], check=True, timeout=120)
+            actual = {str(path.relative_to(output)) for path in output.rglob("*") if path.is_file()}
+            assert actual == set(allowed), {"case": label, "missing": set(allowed) - actual,
+                                           "unexpected": actual - set(allowed)}
+            print(f"PASS ({label}): {len(allowed)} required inputs included; "
+                  f"{len(denied)} credential/generated fixtures excluded")
 
 
 if __name__ == "__main__":
