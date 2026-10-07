@@ -1,6 +1,8 @@
+pub mod access;
 pub mod app;
 pub mod config;
 pub mod health;
+pub mod security;
 
 use sqlx::{
     PgPool,

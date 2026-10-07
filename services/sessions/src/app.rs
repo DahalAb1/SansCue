@@ -7,3 +7,10 @@ pub fn router(pool: PgPool) -> Router {
         .route("/readyz", get(crate::health::ready))
         .with_state(pool)
 }
+
+pub fn configured_router(pool: PgPool, security: crate::security::Security) -> Router {
+    router(pool.clone()).merge(crate::access::router(crate::access::Access {
+        pool,
+        security,
+    }))
+}

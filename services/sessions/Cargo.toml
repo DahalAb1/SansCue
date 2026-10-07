@@ -8,10 +8,21 @@ publish = false
 [dependencies]
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "migrate", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "migrate", "macros", "uuid", "chrono", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+hex = "0.4"
+cookie = "0.18"
+url = "2"
 
 [dev-dependencies]
 http-body-util = "0.1"
