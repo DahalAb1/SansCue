@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 pub struct Config {
     pub database: PgConnectOptions,
     pub address: SocketAddr,
+    pub internal_address: SocketAddr,
     pub log_filter: EnvFilter,
 }
 
@@ -42,11 +43,23 @@ impl Config {
         if port == 0 {
             return Err("HTTP_PORT must be between 1 and 65535");
         }
+        let internal_host: IpAddr = get("SESSIONS_INTERNAL_HOST")?
+            .unwrap_or_else(|| "127.0.0.1".into())
+            .parse()
+            .map_err(|_| "invalid internal host")?;
+        let internal_port: u16 = get("SESSIONS_INTERNAL_PORT")?
+            .unwrap_or_else(|| "3001".into())
+            .parse()
+            .map_err(|_| "invalid internal port")?;
+        if internal_port == 0 {
+            return Err("invalid internal port");
+        }
         let log_filter = EnvFilter::try_new(get("RUST_LOG")?.unwrap_or_else(|| "info".into()))
             .map_err(|_| "invalid RUST_LOG")?;
         Ok(Self {
             database,
             address: SocketAddr::new(host, port),
+            internal_address: SocketAddr::new(internal_host, internal_port),
             log_filter,
         })
     }
@@ -68,6 +81,7 @@ mod tests {
         assert!(config(&[]).is_err());
         let c = config(&[("DATABASE_URL", "postgres://localhost/sessions")]).unwrap();
         assert_eq!(c.address.to_string(), "127.0.0.1:3000");
+        assert_eq!(c.internal_address.to_string(), "127.0.0.1:3001");
         assert_eq!(c.log_filter.to_string(), "info");
     }
     #[test]
@@ -90,6 +104,8 @@ mod tests {
             ("HTTP_HOST", "invalid"),
             ("HTTP_PORT", "0"),
             ("HTTP_PORT", "65536"),
+            ("SESSIONS_INTERNAL_HOST", "not-an-ip"),
+            ("SESSIONS_INTERNAL_PORT", "0"),
             ("RUST_LOG", "info[invalid"),
         ] {
             let result = config(&[
