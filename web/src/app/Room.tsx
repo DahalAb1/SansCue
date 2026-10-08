@@ -208,12 +208,16 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState('');
+  const [liveStatus, setLiveStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
   const seenRevision = useRef(-1);
+  const liveSequence = useRef(0);
   const draftOwner = useRef('');
+  const refreshLive = useRef<(() => Promise<void>) | undefined>(undefined);
 
   function show(next: State) {
     if (next.revision < seenRevision.current) return;
     seenRevision.current = next.revision;
+    liveSequence.current = Math.max(liveSequence.current, next.sequence);
     const owner = draftKey(id, next.membership.id, next.membership.role);
     if (draftOwner.current !== owner) {
       draftOwner.current = owner;
@@ -236,7 +240,51 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
     } finally { setBusy(false); }
   }
 
-  useEffect(() => { void refresh(); }, [id]);
+  refreshLive.current = refresh;
+
+  useEffect(() => {
+    seenRevision.current = -1;
+    liveSequence.current = 0;
+    draftOwner.current = '';
+    setState(undefined);
+    void refresh();
+  }, [id]);
+
+  useEffect(() => {
+    if (!state || state.room.id.toLowerCase() !== id.toLowerCase()) return;
+    let current = true;
+    let refreshing = false;
+    let pendingRefresh = false;
+    const socketUrl = new URL('/api/sessions' + paths.events(id, state.sequence), window.location.href);
+    socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(socketUrl);
+    setLiveStatus('connecting');
+    socket.addEventListener('open', () => { if (current) setLiveStatus('connected'); });
+    socket.addEventListener('message', event => {
+      if (typeof event.data !== 'string') return;
+      let update: unknown;
+      try { update = JSON.parse(event.data); } catch { return; }
+      if (typeof update !== 'object' || update === null) return;
+      const message = update as { type?: unknown; room_id?: unknown; sequence?: unknown; schema_version?: unknown };
+      if (message.type !== 'room.changed' || typeof message.room_id !== 'string' || message.room_id.toLowerCase() !== id.toLowerCase() || message.schema_version !== 1 || !Number.isSafeInteger(message.sequence) || (message.sequence as number) <= liveSequence.current) return;
+      liveSequence.current = message.sequence as number;
+      pendingRefresh = true;
+      if (refreshing) return;
+      refreshing = true;
+      void (async () => {
+        while (current && pendingRefresh) {
+          pendingRefresh = false;
+          await refreshLive.current?.();
+        }
+      })().finally(() => { refreshing = false; });
+    });
+    socket.addEventListener('close', () => { if (current) setLiveStatus('disconnected'); });
+    socket.addEventListener('error', () => { if (current) setLiveStatus('disconnected'); });
+    return () => {
+      current = false;
+      socket.close(1000, 'room view changed');
+    };
+  }, [id, state?.membership.id]);
 
   if (!state) {
     return <section class="panel"><h1>Room</h1>
@@ -285,7 +333,7 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
         } finally { setBusy(false); }
       }}>End room</button>}
     </div>
-    <p class="service-note">State is a snapshot. Live updates are not implemented in this stage; refresh to see changes.</p>
+    <p class="service-note" role="status">{liveStatus === 'connected' ? 'Live updates connected.' : liveStatus === 'connecting' ? 'Connecting to live updates…' : 'Live updates disconnected. Refresh room state to check for changes.'}</p>
     <nav class="room-tabs" aria-label="Room sections">{tabs.map(name => <a key={name} href={'/rooms/' + id + '/' + name} aria-current={selected === name ? 'page' : undefined} onClick={event => followLink(event, '/rooms/' + id + '/' + name)}>{tabLabel(name)}</a>)}</nav>
     {redirected && <p role="status">That section is unavailable for your role. Showing {tabLabel(selected)}.</p>}
     <div class="panel">

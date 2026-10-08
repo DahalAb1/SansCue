@@ -36,6 +36,7 @@ export const paths = {
   login: '/operator/login',
   rooms: '/rooms',
   state: (id: string) => '/rooms/' + segment(id) + '/state',
+  events: (id: string, after: number) => '/rooms/' + segment(id) + '/events?after=' + encodeURIComponent(String(after)),
   join: (token: string) => '/join/' + segment(token),
   redeem: (token: string) => '/invitations/' + segment(token) + '/redeem',
   invitations: (id: string) => '/rooms/' + segment(id) + '/invitations',

@@ -2,6 +2,7 @@ pub mod access;
 pub mod app;
 pub mod config;
 pub mod health;
+pub mod live;
 pub mod security;
 
 use sqlx::{

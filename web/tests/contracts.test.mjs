@@ -97,6 +97,7 @@ test('access paths match the sessions room contract and omit later product route
   assert.equal(paths.login, '/operator/login');
   assert.equal(paths.rooms, '/rooms');
   assert.equal(paths.state(roomId), '/rooms/' + roomId + '/state');
+  assert.equal(paths.events(roomId, 17), '/rooms/' + roomId + '/events?after=17');
   assert.equal(paths.join(token), '/join/' + token);
   assert.equal(paths.redeem(token), '/invitations/' + token + '/redeem');
   assert.equal(paths.invitations(roomId), '/rooms/' + roomId + '/invitations');
