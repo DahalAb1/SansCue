@@ -1,0 +1,14 @@
+# Defense in depth for tooling using web as context. Compose uses root context
+# and the root .dockerignore, since web/Dockerfile also copies deploy/Caddyfile.
+.git
+.env
+.env.*
+node_modules
+dist
+coverage
+*.log
+local-data
+secrets
+credentials
+*.pem
+*.key
