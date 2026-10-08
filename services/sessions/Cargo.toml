@@ -6,7 +6,7 @@ rust-version = "1.99"
 publish = false
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "migrate", "macros", "uuid", "chrono", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal"] }
@@ -23,6 +23,7 @@ subtle = "2"
 hex = "0.4"
 cookie = "0.18"
 url = "2"
+futures-util = "0.3"
 
 [dev-dependencies]
 http-body-util = "0.1"

@@ -9,8 +9,8 @@ pub fn router(pool: PgPool) -> Router {
 }
 
 pub fn configured_router(pool: PgPool, security: crate::security::Security) -> Router {
-    router(pool.clone()).merge(crate::access::router(crate::access::Access {
-        pool,
-        security,
-    }))
+    let access = crate::access::Access { pool, security };
+    router(access.pool.clone())
+        .merge(crate::access::router(access.clone()))
+        .merge(crate::live::router(access))
 }
