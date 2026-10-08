@@ -27,6 +27,39 @@ Keep database `sessions` and local role `sessions_app`. The sample password is l
 
 PostgreSQL creates the database and role on first initialization only. Its `POSTGRES_USER` is a local bootstrap superuser, not a least-privilege production role design. Changing `POSTGRES_*` does not update an existing database/password. Sessions owns and applies migrations and its pool; runtime creates no product tables or separate migration runner.
 
+## Operator provisioning
+
+Operator access is optional for stack startup but **required to create rooms**. Compose passes `SESSIONS_OPERATOR_TOKEN_SHA256`, `SESSIONS_OPERATOR_EPOCH`, and `SESSIONS_IDEMPOTENCY_HMAC_KEY` from `deploy/.env` to sessions at container runtime only (never build args, image layers, or Git). With any of the three blank or absent, sessions starts healthy but operator login and room creation stay disabled (fail closed). There are no defaults. A malformed hash or key (not exactly 64 hex characters) makes sessions exit at startup.
+
+- `SESSIONS_OPERATOR_TOKEN_SHA256`: SHA-256 hex of a random 256-bit operator credential. Only the hash goes in `deploy/.env`.
+- `SESSIONS_OPERATOR_EPOCH`: separate, non-secret label (letters, digits, `. _ -`). Changing it ends existing operator sessions.
+- `SESSIONS_IDEMPOTENCY_HMAC_KEY`: independent random 256-bit key, 64 hex characters. Never derive it from or reuse the credential or its hash.
+
+Run from the repository root with `openssl` and GNU `sha256sum` (use `shasum -a 256` on macOS). Nothing below prints a secret or puts one on a command line; do not add `echo`, `set -x`, or similar.
+
+```sh
+cp -n deploy/.env.example deploy/.env   # skip if already created
+umask 077
+chmod 600 deploy/.env
+mkdir -p local-data/operator
+chmod 700 local-data local-data/operator
+# Plaintext credential: keep only here (ignored, private) or move it to a password manager.
+openssl rand -hex 32 > local-data/operator/credential
+op_hash=$(tr -d '\n' < local-data/operator/credential | sha256sum | cut -d' ' -f1)
+hmac_key=$(openssl rand -hex 32)
+epoch=$(date -u +%Y%m%dT%H%M%SZ)
+sed -e "s|^SESSIONS_OPERATOR_TOKEN_SHA256=.*|SESSIONS_OPERATOR_TOKEN_SHA256=$op_hash|" \
+    -e "s|^SESSIONS_OPERATOR_EPOCH=.*|SESSIONS_OPERATOR_EPOCH=$epoch|" \
+    -e "s|^SESSIONS_IDEMPOTENCY_HMAC_KEY=.*|SESSIONS_IDEMPOTENCY_HMAC_KEY=$hmac_key|" \
+    deploy/.env > deploy/.env.new && mv deploy/.env.new deploy/.env
+unset op_hash hmac_key epoch
+docker compose --env-file deploy/.env up -d --wait --wait-timeout 120 sessions
+```
+
+Enter the credential file's contents only into the operator login of the local app; never paste it into issues, shell arguments, or logs. To rotate, repeat with a new credential and key; a new epoch also revokes prior operator sessions. If you rotate only the credential, still change the epoch. To disable the operator again, blank all three values and recreate `sessions`. `deploy/.env`, `deploy/.env.new`, and `local-data/` are Git-ignored; keep them out of backups you share. Container environment inspection and `docker compose config` expose the hash and HMAC key, so keep them private too.
+
+## Stack endpoints
+
 - Browser: `http://127.0.0.1:8080`; Caddy listens on container `:80`.
 - Sessions: `sessions:3000` internally, bound to `0.0.0.0:3000`; no published sessions host port.
 - PostgreSQL: `sessions-db:5432` internally, `127.0.0.1:5432` on the host.
@@ -72,6 +105,7 @@ set -a
 set +a
 export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
 export HTTP_HOST=127.0.0.1 HTTP_PORT=3000 RUST_LOG=info
+# Sourcing also exports any operator settings from deploy/.env; blank values keep the operator disabled.
 cargo run --locked --package sessions-service --bin sessions-service
 # Terminal 2:
 (cd web && npm ci && npm run dev)
@@ -137,4 +171,4 @@ To check persistence without creating product tables, record existing migration 
 
 ## Verification status
 
-Authored against the Stage 0 foundation contract. The authoring host has no Docker/Compose or Caddy executable; this isolated branch has no application source. Image builds, Compose config validation, `up --wait`, HTTP checks, persistence, and backup/restore execution therefore require integration and a Docker-enabled development machine. Static checks are not Stage 1 acceptance.
+Operator Compose pass-through and documentation are covered by static checks (`python3 deploy/check-operator-config.py`) only; Docker/Compose behavior with and without operator values is unverified. Authored against the Stage 0 foundation contract. The authoring host has no Docker/Compose or Caddy executable; this isolated branch has no application source. Image builds, Compose config validation, `up --wait`, HTTP checks, persistence, and backup/restore execution therefore require integration and a Docker-enabled development machine. Static checks are not Stage 1 acceptance.
