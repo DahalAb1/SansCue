@@ -5,17 +5,16 @@ export type Route =
   | { kind: 'join' | 'invite'; token: string }
   | { kind: 'room'; id: string; tab?: string };
 
-// Join/invite tokens are opaque; the contract fixes no alphabet or length (only >=256 random
-// bits, validated by the server). A link segment must be RFC 3986 pchars; its single-decoded
-// value must be one bounded, non-empty segment without separators, dot segments or controls.
+// Join/invite tokens are opaque; the contract fixes no alphabet or maximum length (only >=256
+// random bits, validated by the server). A link segment must be RFC 3986 pchars; its
+// single-decoded value must be one non-empty segment without separators, dot segments or controls.
 const SEGMENT = /^[A-Za-z0-9\-._~!$&'()*+,;=:@%]+$/;
-const MAX_TOKEN = 512;
 
 function decodeToken(segment: string): string | null {
   if (!SEGMENT.test(segment)) return null;
   let token: string;
   try { token = decodeURIComponent(segment); } catch { return null; }
-  if (token === '' || token === '.' || token === '..' || token.length > MAX_TOKEN) return null;
+  if (token === '' || token === '.' || token === '..') return null;
   if (/[\u0000-\u0020\u007f-\u009f/\\\u2028\u2029]/.test(token)) return null;
   return token;
 }

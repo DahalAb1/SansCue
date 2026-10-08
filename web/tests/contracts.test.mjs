@@ -49,7 +49,12 @@ test('frontend routes accept opaque path-segment tokens and role sections', () =
   assert.deepEqual(parseRoute('/invite/' + encoded), { kind: 'invite', token: opaque });
   assert.deepEqual(parseRoute('/join/' + token.toUpperCase()), { kind: 'join', token: token.toUpperCase() });
   assert.deepEqual(parseRoute('/join/a%25b%2Bc'), { kind: 'join', token: 'a%b+c' });
-  assert.equal(parseRoute('/join/' + 'a'.repeat(513)).kind, 'missing');
+  const longToken = 'Ab0-_.~'.repeat(2000);
+  assert.deepEqual(parseRoute('/join/' + longToken), { kind: 'join', token: longToken });
+  assert.deepEqual(parseRoute('/invite/' + encodeURIComponent(longToken + '+=')), { kind: 'invite', token: longToken + '+=' });
+  assert.equal(parseRoute('/join/' + longToken + '%2F').kind, 'missing');
+  assert.equal(parseRoute('/join/' + longToken + '%00').kind, 'missing');
+  assert.equal(parseRoute('/join/' + longToken + '%E0%A4%A').kind, 'missing');
   for (const bad of ['%2e', '%2e%2e', '%2F', 'a%2Fb', 'a%5Cb', 'a%00b', 'a%0Ab', 'a%20b', '%E0%A4%A', '%', 'a b', 'a\\b', 'caf\u00e9']) {
     assert.equal(parseRoute('/join/' + bad).kind, 'missing', bad);
     assert.equal(parseRoute('/invite/' + bad).kind, 'missing', bad);
@@ -80,6 +85,10 @@ test('share links are same-origin path tokens and nothing else', () => {
   assert.equal(sharePath('join', '/join/' + opaque), '/join/' + opaque);
   assert.equal(sharePath('invite', '/invite/' + encodeURIComponent(opaque)), '/invite/' + encodeURIComponent(opaque));
   assert.equal(sharePath('join', '/join/' + token.toUpperCase()), '/join/' + token.toUpperCase());
+  const longToken = 'Ab0-_.~'.repeat(2000);
+  assert.equal(sharePath('join', '/join/' + longToken), '/join/' + longToken);
+  assert.equal(sharePath('invite', '/invite/' + longToken), '/invite/' + longToken);
+  assert.equal(sharePath('join', '/join/' + longToken + '%2F'), null);
   assert.equal(sharePath('invite', join), null);
 });
 
@@ -106,7 +115,10 @@ test('access paths match the sessions room contract and omit later product route
   assert.equal(paths.page(paths.invitations(roomId), 'a&limit=1'), paths.invitations(roomId) + '?limit=50&after=a%26limit%3D1');
   assert.equal(paths.page(paths.invitations(roomId), null), paths.invitations(roomId) + '?limit=50');
   assert.equal(paths.page(paths.invitations(roomId), '\ud800'), null);
-  assert.equal(paths.page(paths.invitations(roomId), 'a'.repeat(4097)), null);
+  const longCursor = 'a/+=?&# %'.repeat(5000);
+  assert.equal(paths.page(paths.invitations(roomId), longCursor), paths.invitations(roomId) + '?limit=50&after=' + encodeURIComponent(longCursor));
+  assert.equal(new URL('http://x' + paths.page(paths.memberships(roomId), longCursor)).searchParams.get('after'), longCursor);
+  assert.equal(paths.page(paths.invitations(roomId), 'a'.repeat(5000) + '\ud800'), null);
   const listed = [
     paths.bootstrap, paths.login, paths.rooms, paths.state(roomId), paths.join(token), paths.redeem(token),
     paths.invitations(roomId), paths.memberships(roomId), paths.revokeInvitation(roomId, memberId),
