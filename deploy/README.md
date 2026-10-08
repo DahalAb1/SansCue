@@ -35,28 +35,22 @@ Operator access is optional for stack startup but **required to create rooms**. 
 - `SESSIONS_OPERATOR_EPOCH`: separate, non-secret label (letters, digits, `. _ -`). Changing it ends existing operator sessions.
 - `SESSIONS_IDEMPOTENCY_HMAC_KEY`: independent random 256-bit key, 64 hex characters. Never derive it from or reuse the credential or its hash.
 
-Run from the repository root with `openssl` and GNU `sha256sum` (use `shasum -a 256` on macOS). Nothing below prints a secret or puts one on a command line; do not add `echo`, `set -x`, or similar.
+Run from the repository root with Python 3 (standard library only). `deploy/provision_operator.py` is a local-only utility. Each run generates an operator credential, its SHA-256, a unique random epoch (UTC time plus 128 random bits, never reused, so rapid rotations cannot collide), and an independent random HMAC key. It then atomically replaces `deploy/.env` (mode 600; created from `.env.example` if absent, other settings kept) with only the hash, epoch, and HMAC key, and atomically replaces `local-data/operator/credential` (mode 600, in mode-700 `local-data/` and `local-data/operator/`) with the plaintext credential. It prints no credential, hash, or key, reads nothing secret from arguments or the environment, and refuses symbolic-link targets. If the second write fails, the credential file is restored so the pair stays consistent; rerun to retry.
 
 ```sh
-cp -n deploy/.env.example deploy/.env   # skip if already created
-umask 077
-chmod 600 deploy/.env
-mkdir -p local-data/operator
-chmod 700 local-data local-data/operator
-# Plaintext credential: keep only here (ignored, private) or move it to a password manager.
-openssl rand -hex 32 > local-data/operator/credential
-op_hash=$(tr -d '\n' < local-data/operator/credential | sha256sum | cut -d' ' -f1)
-hmac_key=$(openssl rand -hex 32)
-epoch=$(date -u +%Y%m%dT%H%M%SZ)
-sed -e "s|^SESSIONS_OPERATOR_TOKEN_SHA256=.*|SESSIONS_OPERATOR_TOKEN_SHA256=$op_hash|" \
-    -e "s|^SESSIONS_OPERATOR_EPOCH=.*|SESSIONS_OPERATOR_EPOCH=$epoch|" \
-    -e "s|^SESSIONS_IDEMPOTENCY_HMAC_KEY=.*|SESSIONS_IDEMPOTENCY_HMAC_KEY=$hmac_key|" \
-    deploy/.env > deploy/.env.new && mv deploy/.env.new deploy/.env
-unset op_hash hmac_key epoch
+python3 deploy/provision_operator.py
 docker compose --env-file deploy/.env up -d --wait --wait-timeout 120 sessions
 ```
 
-Enter the credential file's contents only into the operator login of the local app; never paste it into issues, shell arguments, or logs. To rotate, repeat with a new credential and key; a new epoch also revokes prior operator sessions. If you rotate only the credential, still change the epoch. To disable the operator again, blank all three values and recreate `sessions`. `deploy/.env`, `deploy/.env.new`, and `local-data/` are Git-ignored; keep them out of backups you share. Container environment inspection and `docker compose config` expose the hash and HMAC key, so keep them private too.
+Read the credential privately as the trusted operator, on your own terminal, with no screen sharing, recording, or shared scrollback. Open `local-data/operator/credential` in a local editor or password manager, or run `cat local-data/operator/credential` once; the file holds exactly the credential with no trailing newline. Copy it into the operator login of the local app, or store it in a password manager and delete the file. Never paste it into issues, chat, shell arguments, `docker compose` arguments, or logs, and never add it to `deploy/.env`, Git, or an image.
+
+**Rerunning rotates everything:** `python3 deploy/provision_operator.py` replaces the credential, hash, epoch, and HMAC key together, so the old credential stops working and, because the epoch changes, prior operator sessions end after sessions is recreated. To disable the operator again, blank all three values and recreate `sessions`. `deploy/.env`, its temporary `deploy/.env.*.tmp` files, and `local-data/` are Git-ignored and excluded from Docker build contexts; keep them out of backups you share. Container environment inspection and `docker compose config` expose the hash, epoch, and HMAC key, so keep them private too.
+
+Check the utility without touching your real files (tests use a temporary directory; `-B` avoids writing bytecode):
+
+```sh
+python3 -B -m unittest discover -s deploy -p 'test_*.py'
+```
 
 ## Stack endpoints
 
@@ -171,4 +165,4 @@ To check persistence without creating product tables, record existing migration 
 
 ## Verification status
 
-Operator Compose pass-through and documentation are covered by static checks (`python3 deploy/check-operator-config.py`) only; Docker/Compose behavior with and without operator values is unverified. Authored against the Stage 0 foundation contract. The authoring host has no Docker/Compose or Caddy executable; this isolated branch has no application source. Image builds, Compose config validation, `up --wait`, HTTP checks, persistence, and backup/restore execution therefore require integration and a Docker-enabled development machine. Static checks are not Stage 1 acceptance.
+Operator Compose pass-through and documentation are covered by static checks (`python3 -B deploy/check-operator-config.py`), and the provisioning utility by stdlib unit tests, only; Docker/Compose behavior with and without operator values is unverified. Authored against the Stage 0 foundation contract. The authoring host has no Docker/Compose or Caddy executable; this isolated branch has no application source. Image builds, Compose config validation, `up --wait`, HTTP checks, persistence, and backup/restore execution therefore require integration and a Docker-enabled development machine. Static checks are not Stage 1 acceptance.
