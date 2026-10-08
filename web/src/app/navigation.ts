@@ -5,7 +5,20 @@ export type Route =
   | { kind: 'join' | 'invite'; token: string }
   | { kind: 'room'; id: string; tab?: string };
 
-const TOKEN = /^[0-9a-f]{64}$/;
+// Join/invite tokens are opaque; the contract fixes no alphabet or length (only >=256 random
+// bits, validated by the server). A link segment must be RFC 3986 pchars; its single-decoded
+// value must be one bounded, non-empty segment without separators, dot segments or controls.
+const SEGMENT = /^[A-Za-z0-9\-._~!$&'()*+,;=:@%]+$/;
+const MAX_TOKEN = 512;
+
+function decodeToken(segment: string): string | null {
+  if (!SEGMENT.test(segment)) return null;
+  let token: string;
+  try { token = decodeURIComponent(segment); } catch { return null; }
+  if (token === '' || token === '.' || token === '..' || token.length > MAX_TOKEN) return null;
+  if (/[\u0000-\u0020\u007f-\u009f/\\\u2028\u2029]/.test(token)) return null;
+  return token;
+}
 
 export function parseRoute(path: string): Route {
   if (path === '/') return { kind: 'home' };
@@ -13,9 +26,8 @@ export function parseRoute(path: string): Route {
   if (path === '/health') return { kind: 'health' };
   const link = /^\/(join|invite)\/([^/]+)\/?$/.exec(path);
   if (link) {
-    let token = link[2];
-    try { token = decodeURIComponent(token); } catch { return { kind: 'missing' }; }
-    if (!TOKEN.test(token)) return { kind: 'missing' };
+    const token = decodeToken(link[2]);
+    if (token === null) return { kind: 'missing' };
     return { kind: link[1] as 'join' | 'invite', token };
   }
   const room = /^\/rooms\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/([a-z-]+))?\/?$/i.exec(path);
@@ -40,8 +52,10 @@ export function tabLabel(tab: string): string {
 }
 
 export function sharePath(kind: 'join' | 'invite', value: string | null | undefined): string | null {
-  if (typeof value !== 'string' || !new RegExp('^/' + kind + '/[0-9a-f]{64}$').test(value)) return null;
-  return value;
+  if (typeof value !== 'string') return null;
+  const prefix = '/' + kind + '/';
+  if (!value.startsWith(prefix) || value.includes('/', prefix.length)) return null;
+  return decodeToken(value.slice(prefix.length)) === null ? null : value;
 }
 
 export function navigate(path: string, replace = false) {

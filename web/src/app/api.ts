@@ -27,6 +27,8 @@ export type LinkResult = { join_url?: string | null; invite_url?: string | null;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const MAX_CURSOR = 4096;
+
 export function segment(value: string): string {
   return encodeURIComponent(value);
 }
@@ -47,8 +49,10 @@ export const paths = {
   end: (id: string) => '/rooms/' + segment(id) + '/end',
   page(path: string, cursor?: string | null): string | null {
     if (!cursor) return path + '?limit=50';
-    if (!UUID.test(cursor)) return null;
-    return path + '?limit=50&after=' + segment(cursor);
+    // Cursors are opaque: pass them through unchanged, only encoded for a query value.
+    if (typeof cursor !== 'string' || cursor.length > MAX_CURSOR) return null;
+    try { return path + '?limit=50&after=' + encodeURIComponent(cursor); }
+    catch { return null; }
   },
 };
 

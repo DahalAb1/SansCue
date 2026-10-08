@@ -39,11 +39,21 @@ function state(role = 'audience') {
   };
 }
 
-test('frontend routes accept only contract join tokens and role sections', () => {
+test('frontend routes accept opaque path-segment tokens and role sections', () => {
   assert.deepEqual(parseRoute('/rooms/' + roomId + '/qa'), { kind: 'room', id: roomId, tab: 'qa' });
   assert.deepEqual(parseRoute('/join/' + token), { kind: 'join', token });
   assert.deepEqual(parseRoute('/invite/' + token + '/'), { kind: 'invite', token });
-  assert.equal(parseRoute('/join/opaque').kind, 'missing');
+  const opaque = 'Zm9v-_.~YmFy+Z=:@!$&\'()*,;';
+  const encoded = encodeURIComponent(opaque);
+  assert.deepEqual(parseRoute('/join/' + opaque), { kind: 'join', token: opaque });
+  assert.deepEqual(parseRoute('/invite/' + encoded), { kind: 'invite', token: opaque });
+  assert.deepEqual(parseRoute('/join/' + token.toUpperCase()), { kind: 'join', token: token.toUpperCase() });
+  assert.deepEqual(parseRoute('/join/a%25b%2Bc'), { kind: 'join', token: 'a%b+c' });
+  assert.equal(parseRoute('/join/' + 'a'.repeat(513)).kind, 'missing');
+  for (const bad of ['%2e', '%2e%2e', '%2F', 'a%2Fb', 'a%5Cb', 'a%00b', 'a%0Ab', 'a%20b', '%E0%A4%A', '%', 'a b', 'a\\b', 'caf\u00e9']) {
+    assert.equal(parseRoute('/join/' + bad).kind, 'missing', bad);
+    assert.equal(parseRoute('/invite/' + bad).kind, 'missing', bad);
+  }
   assert.equal(parseRoute('/join/' + token + '/extra').kind, 'missing');
   assert.equal(parseRoute('/api/sessions/rooms').kind, 'missing');
   assert.equal(parseRoute('/join/').kind, 'missing');
@@ -63,10 +73,13 @@ test('share links are same-origin path tokens and nothing else', () => {
   const invite = '/invite/' + token;
   assert.equal(sharePath('join', join), join);
   assert.equal(sharePath('invite', invite), invite);
-  for (const value of [join, 'https://evil.example' + join, '//' + 'evil.example' + join, join + '?x=1', join + '#x', '/invite/' + token, 'javascript:alert(1)', '/join/' + token.toUpperCase()]) {
-    if (value === join) continue;
-    assert.equal(sharePath('join', value), null, value);
+  for (const value of ['https://evil.example' + join, '//' + 'evil.example' + join, join + '?x=1', join + '#x', join + '/', join + '/extra', '/invite/' + token, 'javascript:alert(1)', '/join/', '/join/%2e%2e', '/join/a%2Fb', '/join/a%00b', '/join/%zz', '/join/a b', ' ' + join, join + '\n', null, undefined]) {
+    assert.equal(sharePath('join', value), null, String(value));
   }
+  const opaque = 'Zm9v-_.~YmFy+Z=:@!$&\'()*,;';
+  assert.equal(sharePath('join', '/join/' + opaque), '/join/' + opaque);
+  assert.equal(sharePath('invite', '/invite/' + encodeURIComponent(opaque)), '/invite/' + encodeURIComponent(opaque));
+  assert.equal(sharePath('join', '/join/' + token.toUpperCase()), '/join/' + token.toUpperCase());
   assert.equal(sharePath('invite', join), null);
 });
 
@@ -86,7 +99,14 @@ test('access paths match the sessions room contract and omit later product route
   assert.equal(paths.end(roomId), '/rooms/' + roomId + '/end');
   assert.equal(paths.page(paths.invitations(roomId)), paths.invitations(roomId) + '?limit=50');
   assert.equal(paths.page(paths.memberships(roomId), memberId), paths.memberships(roomId) + '?limit=50&after=' + memberId);
-  assert.equal(paths.page(paths.invitations(roomId), '../secrets'), null);
+  const opaqueCursor = 'eyJ0IjoiMjAyNi0xMC0wOCIsImlkIjoiYSJ9.sig/+=?&# %';
+  assert.equal(paths.page(paths.invitations(roomId), opaqueCursor), paths.invitations(roomId) + '?limit=50&after=' + encodeURIComponent(opaqueCursor));
+  assert.equal(new URL('http://x' + paths.page(paths.memberships(roomId), opaqueCursor)).searchParams.get('after'), opaqueCursor);
+  assert.equal(paths.page(paths.invitations(roomId), '../secrets'), paths.invitations(roomId) + '?limit=50&after=..%2Fsecrets');
+  assert.equal(paths.page(paths.invitations(roomId), 'a&limit=1'), paths.invitations(roomId) + '?limit=50&after=a%26limit%3D1');
+  assert.equal(paths.page(paths.invitations(roomId), null), paths.invitations(roomId) + '?limit=50');
+  assert.equal(paths.page(paths.invitations(roomId), '\ud800'), null);
+  assert.equal(paths.page(paths.invitations(roomId), 'a'.repeat(4097)), null);
   const listed = [
     paths.bootstrap, paths.login, paths.rooms, paths.state(roomId), paths.join(token), paths.redeem(token),
     paths.invitations(roomId), paths.memberships(roomId), paths.revokeInvitation(roomId, memberId),
