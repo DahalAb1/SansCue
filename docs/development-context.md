@@ -1,6 +1,17 @@
 # Development Context
 
-Updated October 5, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
+Updated October 8, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
+
+## Current implementation status
+
+`dev` contains the web room/access flow, PostgreSQL-backed sessions service,
+durable room updates, and local Compose packaging. Rust checks and tests against
+the provisioned native PostgreSQL 17 database, frontend checks, and runtime
+configuration unit/static checks pass. Docker/Compose build, proxy, real outage,
+named-volume persistence, and backup/restore checks remain environment-blocked;
+AWS deployment and Bee/model integrations are not complete. See the
+[environment verification record](environment-verification.md) for the exact
+container-only checklist.
 
 ## Implementation agreement
 
@@ -198,8 +209,8 @@ Within a feature, separate HTTP handling, business rules, types/errors, and SQL 
 
 ## Development sequence and open decisions
 
-- Current repository contains planning/submission files; application implementation has not started.
-- Next scope: MVP Step 1, covering the frontend shell, sessions backend, database connection, health checks, and AWS deployment. AWS account/domain readiness is unverified.
+- The local implementation covers the frontend shell, sessions service, room creation/join/access, and live updates. Local Compose packaging exists but awaits Docker verification; AWS account/domain readiness and deployment are unverified.
+- Next product milestone: complete Step 6 reconnect and room-ending behavior, then agree on the listed Bee integration decisions before Step 7. Continue native PostgreSQL tests for every relevant service change.
 - Build general infrastructure, connect the services, then optimize the complete flow. Add timing measurements during integration; fix issues that block useful testing immediately.
 - Access to a Bee-enabled Apple Watch must be scheduled. Authentication, data access, live delivery, and performance have not been verified for this project.
 - Recorded transcripts can support repeatable development tests. Validate the final flow with actual Bee data.
