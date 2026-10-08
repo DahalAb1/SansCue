@@ -2,7 +2,7 @@
 
 Agreed October 6, 2026 for local MVP implementation. The [MVP plan](mvp-plan.md), Steps 1–11, remains the original requirements and roadmap; the choices below are **implementation defaults**, not claims that the original plan specified them or that they are implemented. The [foundation contract](foundation-contract.md) remains authoritative for baseline ownership, ports, proxy routing, and health semantics. Its Stage 0 status statements are historical; see the [README](../README.md) for current status.
 
-Implementation currently consists of the frontend shell, sessions health service, and local Compose foundation. Product behavior below is the target. Work is authorized toward `integration/mvp-complete` only, on assigned task branches: no merge into `dev`/`main`, push, or AWS deployment is implied. Participant history across sessions, native clients, automatic timers, and speculative scaling are deferred.
+Implementation currently includes the frontend room/access flow, PostgreSQL-backed sessions room/access APIs, sessions health service, and local Compose foundation. Product behavior below remains the target; live updates, Bee ingestion, question generation, responses, and dashboard behavior are not yet implemented. Authorized local MVP work targets `dev` through reviewed feature branches that rebase onto the latest `dev` and squash-integrate. Pushes, changes to `main`, AWS deployment, and paid model calls are not authorized. Participant history across sessions, native clients, automatic timers, and speculative scaling are deferred.
 
 ## Rooms, identity, and permissions
 

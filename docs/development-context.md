@@ -1,12 +1,12 @@
 # Development Context
 
-Updated October 6, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
+Updated October 8, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
 
 ## Implementation agreement
 
 The [foundation contract](foundation-contract.md) remains authoritative for baseline ownership, ports, routes, and health semantics; its Stage 0 status statements are historical. The [MVP product contract](mvp-contracts.md) is the canonical source for chosen product defaults, service delivery, Bee constraints, and local verification expectations. The [README](../README.md) records current implementation status. Broader AWS goals remain product direction, not completed implementation.
 
-Current authorization: local MVP work targets `integration/mvp-complete` on assigned task branches. No `dev`/`main` merge, push, AWS deployment, or paid model spend is authorized by this document. The general Git workflow below is retained for historical/team reference; its publish and integration commands are not instructions for the current task.
+Current authorization: local MVP work targets `dev` on assigned task branches. The owner has authorized rebasing feature branches onto the latest `dev` and squash-integrating reviewed changes into `dev`. Do not push, modify `main`, deploy to AWS, or incur paid model spend without further authorization. The general Git workflow below applies subject to these current boundaries.
 
 ## Working preferences
 
@@ -200,7 +200,7 @@ Within a feature, separate HTTP handling, business rules, types/errors, and SQL 
 
 ## Development sequence and open decisions
 
-- The repository now contains the frontend shell, sessions health/readiness service, and local Compose foundation, as well as planning/submission files. Product features and Docker/runtime acceptance are not complete.
+- The repository now contains the frontend room/access flow, sessions room/access service, health/readiness behavior, local Compose packaging, and planning/submission files. Live updates, Bee ingestion, question generation, responses, dashboard behavior, and full Docker/runtime acceptance remain incomplete.
 - Current scope extends the local foundation through the product flow defined in the [MVP contract](mvp-contracts.md). AWS account/domain readiness is unverified and deployment remains outside authorization.
 - Build general infrastructure, connect the services, then optimize the complete flow. Add timing measurements during integration; fix issues that block useful testing immediately.
 - Bee account/authentication, device access, and consent need human involvement. The researched local proxy is unauthenticated and must remain loopback-only; its stream has no documented replay cursor or speech-order guarantee. Actual integration/performance remain unverified; see the MVP contract.

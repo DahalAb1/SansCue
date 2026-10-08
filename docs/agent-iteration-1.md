@@ -39,7 +39,7 @@ On October 5, 2026, this was a planning-only repository. As of October 6, the fr
 
 The first iteration established code for the frontend shell, sessions-service startup, database connectivity, health checks, and repeatable packaging. Its purpose is to establish a foundation that the team can inspect and extend. Rooms, access controls, live updates, Bee, and question generation follow incrementally in the [MVP plan](mvp-plan.md).
 
-The current authorized work extends this foundation toward the local MVP on `integration/mvp-complete`, using assigned task branches; it does not authorize merging into `dev`/`main` or deploying AWS. Agents can develop and verify locally. Local execution is a development environment; the product's hosting target remains AWS. The team will handle AWS account access and deployment settings. Cloud deployment is not verified, and MVP Step 1 remains incomplete until the deployed system works.
+At the time this historical note was written, implementation was directed to `integration/mvp-complete`. Current branch and integration authorization is recorded in [development context](development-context.md). Agents can develop and verify locally. Local execution is a development environment; the product's hosting target remains AWS. The team will handle AWS account access and deployment settings. Cloud deployment is not verified, and MVP Step 1 remains incomplete until the deployed system works.
 
 ## Defaults and remaining unknowns
 
