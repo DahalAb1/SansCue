@@ -50,3 +50,27 @@ button:disabled { color: #697366; cursor: wait; background: #f0f1eb; }
 .site-footer { margin-top: 70px; padding: 23px 0 30px; border-top: 1px solid #d9ddd3; display: flex; justify-content: space-between; gap: 20px; color: #697161; font-size: 11px; }
 .site-footer > span:first-child { font-weight: 650; }
 @media (max-width: 640px) { .shell { padding: 0 22px; } .site-header { min-height: 84px; } .brand { font-size: 21px; } .environment { font-size: 10px; padding: 5px 9px; } .intro { padding: 48px 0 40px; } .intro-copy { font-size: 15px; } .section-heading { display: block; } .section-heading > p { margin-top: 12px; } .checks { grid-template-columns: 1fr; gap: 16px; } .check-card { padding: 23px; } .site-footer { margin-top: 46px; flex-wrap: wrap; gap: 8px; } }
+
+/* Room navigation retains the foundation’s visual language. */
+main { padding-top: 32px; }
+.panel { background: #fdfdf9; border: 1px solid #d9ddd3; border-radius: 16px; padding: 28px; margin: 24px 0; }
+.panel h1, .room h1, .service-section h1 { font-size: clamp(30px, 5vw, 48px); overflow-wrap: anywhere; }
+.panel h3 { margin-top: 28px; }
+label { display: block; font-weight: 600; margin: 18px 0; }
+input, textarea { display: block; width: 100%; padding: 12px; margin-top: 7px; border: 1px solid #7e8a79; border-radius: 7px; background: white; color: #242a26; font: inherit; }
+textarea { resize: vertical; }
+form { max-width: 660px; }
+.notice { background: #eef1e5; padding: 18px; border-left: 4px solid #59724c; }
+.error { background: #fbe8e2; color: #7a2b20; border-left: 4px solid #963d2b; padding: 16px; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0; }
+.room-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 28px 0 0; }
+.room-tabs a { text-decoration: none; padding: 12px 18px; border: 1px solid #bfc9b8; border-radius: 8px; }
+.room-tabs a[aria-current="page"] { color: white; background: #284d3e; border-color: #284d3e; }
+.share-link { max-width: 700px; margin: 20px 0; }
+.share-link img { max-width: 100%; height: auto; display: block; }
+.access-list { list-style: none; padding: 0; }
+.access-list li { display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 16px 0; border-bottom: 1px solid #d9ddd3; }
+.access-list li > div { min-width: 0; }
+.access-list p { margin: 5px 0; }
+.access-list button { flex-shrink: 0; }
+@media (max-width: 640px) { .panel { padding: 20px; } .access-list li { display: block; } .access-list button { margin-top: 10px; } .room-tabs a { padding: 10px 12px; } }
