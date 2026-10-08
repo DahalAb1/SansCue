@@ -5,7 +5,8 @@ does not replace the PostgreSQL-backed sessions test suite.
 
 ## Passed without containers
 
-On `dev` after the live-updates and local-runtime squash integrations:
+On `dev` after the live-updates, local-runtime, and room-reconnect squash
+integrations:
 
 - Rust formatting and Clippy (`cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`).
@@ -13,7 +14,8 @@ On `dev` after the live-updates and local-runtime squash integrations:
   6 library unit tests, 5 access/integration tests, and 4 readiness/migration
   tests passed. These exercise database migrations, repeat startup, readiness,
   pool timeout/recovery, migration failure, and startup bounds.
-- Frontend typecheck, all 12 frontend tests, and production build.
+- Frontend typecheck, all 14 frontend tests (including live-event replay
+  scoping and reconnect backoff), and production build.
 - 13 operator-provisioning unit tests, static Compose operator-configuration
   checks, and `git diff --check`.
 

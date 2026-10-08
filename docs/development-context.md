@@ -210,7 +210,7 @@ Within a feature, separate HTTP handling, business rules, types/errors, and SQL 
 ## Development sequence and open decisions
 
 - The local implementation covers the frontend shell, sessions service, room creation/join/access, and live updates. Local Compose packaging exists but awaits Docker verification; AWS account/domain readiness and deployment are unverified.
-- Next product milestone: complete Step 6 reconnect and room-ending behavior, then agree on the listed Bee integration decisions before Step 7. Continue native PostgreSQL tests for every relevant service change.
+- Step 6 reconnect and room-ending behavior is implemented and frontend-verified. Next, agree on the listed Bee integration decisions before Step 7. Continue native PostgreSQL tests for every relevant service change.
 - Build general infrastructure, connect the services, then optimize the complete flow. Add timing measurements during integration; fix issues that block useful testing immediately.
 - Access to a Bee-enabled Apple Watch must be scheduled. Authentication, data access, live delivery, and performance have not been verified for this project.
 - Recorded transcripts can support repeatable development tests. Validate the final flow with actual Bee data.
