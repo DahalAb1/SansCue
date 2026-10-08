@@ -8,11 +8,13 @@ const server = await createServer({ server: { middlewareMode: true }, appType: '
 const apiModule = await server.ssrLoadModule('/src/app/api.ts');
 const navigation = await server.ssrLoadModule('/src/app/navigation.ts');
 const memory = await server.ssrLoadModule('/src/app/pageMemory.ts');
+const live = await server.ssrLoadModule('/src/app/live.ts');
 await server.close();
 
 const { SessionsApi, ApiError, errorMessage, paths, parseRoomState, preferState, deniesRoomRead } = apiModule;
 const { parseRoute, tabsFor, selectedSection, sharePath } = navigation;
 const { keepJoin, memoryJoin, keepInvite, memoryInvite, keepDraft, memoryDraft, draftKey } = memory;
+const { parseRoomEvent, reconnectDelay } = live;
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const roomId = '00000000-0000-4000-8000-000000000001';
 const memberId = '00000000-0000-4000-8000-000000000002';
@@ -126,6 +128,20 @@ test('access paths match the sessions room contract and omit later product route
     paths.revokeMembership(roomId, memberId), paths.rotateJoin(roomId), paths.revokeJoin(roomId), paths.end(roomId),
   ].join('\n');
   assert.doesNotMatch(listed, /\/questions|\/generations|\/written-questions|\/bee-binding|\/response/);
+});
+
+test('live events are scoped and replayed strictly after the accepted room sequence', () => {
+  const event = { type: 'room.changed', room_id: roomId, schema_version: 1, sequence: 4 };
+  assert.deepEqual(parseRoomEvent(event, roomId, 3), event);
+  assert.equal(parseRoomEvent(event, roomId, 4), undefined);
+  assert.equal(parseRoomEvent({ ...event, room_id: memberId }, roomId, 3), undefined);
+  assert.equal(parseRoomEvent({ ...event, type: 'room.other' }, roomId, 3), undefined);
+  assert.equal(parseRoomEvent({ ...event, schema_version: 2 }, roomId, 3), undefined);
+  assert.equal(parseRoomEvent({ ...event, sequence: Number.MAX_SAFE_INTEGER + 1 }, roomId, 3), undefined);
+});
+
+test('live reconnect backoff grows and is capped', () => {
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 9].map(reconnectDelay), [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
 });
 
 test('room state is accepted only for the requested room and a server role', () => {
