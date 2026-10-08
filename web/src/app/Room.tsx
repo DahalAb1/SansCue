@@ -4,6 +4,7 @@ import { ApiError, api, deniesRoomRead, errorMessage, parseRoomState, paths } fr
 import type { State, Invitation, Membership, Page, LinkResult } from './api';
 import { followLink, selectedSection, sharePath, tabLabel } from './navigation';
 import { draftKey, keepDraft, keepInvite, keepJoin, memoryDraft, memoryInvite, memoryJoin } from './pageMemory';
+import { parseRoomEvent, reconnectDelay } from './live';
 
 function when(value: string): string {
   const date = new Date(value);
@@ -45,7 +46,7 @@ function joinStatus(state: State): string {
   return 'Audience link status is unavailable. Refresh room state.';
 }
 
-function Access({ state, refresh, loseAccess }: { state: State; refresh: () => Promise<void>; loseAccess: () => void }) {
+function Access({ state, refresh, loseAccess }: { state: State; refresh: () => Promise<boolean>; loseAccess: () => void }) {
   const roomId = state.room.id;
   const ended = state.room.status === 'ended';
   const [invitations, setInvitations] = useState<Page<Invitation>>();
@@ -208,11 +209,11 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState('');
-  const [liveStatus, setLiveStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [liveStatus, setLiveStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'ended'>('connecting');
   const seenRevision = useRef(-1);
   const liveSequence = useRef(0);
   const draftOwner = useRef('');
-  const refreshLive = useRef<(() => Promise<void>) | undefined>(undefined);
+  const refreshLive = useRef<(() => Promise<boolean>) | undefined>(undefined);
 
   function show(next: State) {
     if (next.revision < seenRevision.current) return;
@@ -226,7 +227,7 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
     setState(next);
   }
 
-  async function refresh() {
+  async function refresh(): Promise<boolean> {
     setBusy(true);
     setError('');
     try {
@@ -234,9 +235,11 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
       const next = parseRoomState(body, id);
       if (!next) throw new Error('Invalid state');
       show(next);
+      return true;
     } catch (reason) {
       setError(errorMessage(reason));
       if (deniesRoomRead(reason)) setState(undefined);
+      return false;
     } finally { setBusy(false); }
   }
 
@@ -252,39 +255,74 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
 
   useEffect(() => {
     if (!state || state.room.id.toLowerCase() !== id.toLowerCase()) return;
+    if (state.room.status === 'ended') {
+      setLiveStatus('ended');
+      return;
+    }
     let current = true;
     let refreshing = false;
     let pendingRefresh = false;
-    const socketUrl = new URL('/api/sessions' + paths.events(id, state.sequence), window.location.href);
-    socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
-    const socket = new WebSocket(socketUrl);
+    let pendingSequence = liveSequence.current;
+    let attempt = 0;
+    let socket: WebSocket | undefined;
+    let reconnectTimer: number | undefined;
     setLiveStatus('connecting');
-    socket.addEventListener('open', () => { if (current) setLiveStatus('connected'); });
-    socket.addEventListener('message', event => {
-      if (typeof event.data !== 'string') return;
-      let update: unknown;
-      try { update = JSON.parse(event.data); } catch { return; }
-      if (typeof update !== 'object' || update === null) return;
-      const message = update as { type?: unknown; room_id?: unknown; sequence?: unknown; schema_version?: unknown };
-      if (message.type !== 'room.changed' || typeof message.room_id !== 'string' || message.room_id.toLowerCase() !== id.toLowerCase() || message.schema_version !== 1 || !Number.isSafeInteger(message.sequence) || (message.sequence as number) <= liveSequence.current) return;
-      liveSequence.current = message.sequence as number;
-      pendingRefresh = true;
-      if (refreshing) return;
-      refreshing = true;
-      void (async () => {
-        while (current && pendingRefresh) {
-          pendingRefresh = false;
-          await refreshLive.current?.();
-        }
-      })().finally(() => { refreshing = false; });
-    });
-    socket.addEventListener('close', () => { if (current) setLiveStatus('disconnected'); });
-    socket.addEventListener('error', () => { if (current) setLiveStatus('disconnected'); });
+    function scheduleReconnect() {
+      if (!current || reconnectTimer !== undefined) return;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = undefined;
+        connect();
+      }, reconnectDelay(attempt++));
+    }
+    function connect() {
+      if (!current) return;
+      const socketUrl = new URL('/api/sessions' + paths.events(id, liveSequence.current), window.location.href);
+      socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+      const connection = new WebSocket(socketUrl);
+      socket = connection;
+      connection.addEventListener('open', () => { if (current) setLiveStatus('connected'); });
+      connection.addEventListener('message', event => {
+        if (typeof event.data !== 'string') return;
+        let update: unknown;
+        try { update = JSON.parse(event.data); } catch { return; }
+        const message = parseRoomEvent(update, id, liveSequence.current);
+        if (!message) return;
+        pendingSequence = Math.max(pendingSequence, message.sequence);
+        pendingRefresh = true;
+        if (refreshing) return;
+        refreshing = true;
+        void (async () => {
+          while (current && pendingRefresh) {
+            pendingRefresh = false;
+            if (!await refreshLive.current?.()) {
+              connection.close();
+              break;
+            }
+            // refresh() advances the replay cursor only after a valid snapshot
+            // is received, so reconnecting replays any unreflected changes.
+            if (liveSequence.current < pendingSequence) {
+              connection.close();
+              break;
+            }
+          }
+        })().finally(() => { refreshing = false; });
+      });
+      connection.addEventListener('close', () => {
+        if (!current) return;
+        setLiveStatus('disconnected');
+        const refreshAfterDisconnect = refreshLive.current;
+        if (refreshAfterDisconnect) void refreshAfterDisconnect().finally(scheduleReconnect);
+        else scheduleReconnect();
+      });
+      connection.addEventListener('error', () => connection.close());
+    }
+    connect();
     return () => {
       current = false;
-      socket.close(1000, 'room view changed');
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      socket?.close(1000, 'room view changed');
     };
-  }, [id, state?.membership.id]);
+  }, [id, state?.membership.id, state?.room.status]);
 
   if (!state) {
     return <section class="panel"><h1>Room</h1>
@@ -333,7 +371,7 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
         } finally { setBusy(false); }
       }}>End room</button>}
     </div>
-    <p class="service-note" role="status">{liveStatus === 'connected' ? 'Live updates connected.' : liveStatus === 'connecting' ? 'Connecting to live updates…' : 'Live updates disconnected. Refresh room state to check for changes.'}</p>
+    <p class="service-note" role="status">{liveStatus === 'connected' ? 'Live updates connected.' : liveStatus === 'connecting' ? 'Connecting to live updates…' : liveStatus === 'ended' ? 'Room ended. Live updates are closed.' : 'Live updates disconnected. Reconnecting…'}</p>
     <nav class="room-tabs" aria-label="Room sections">{tabs.map(name => <a key={name} href={'/rooms/' + id + '/' + name} aria-current={selected === name ? 'page' : undefined} onClick={event => followLink(event, '/rooms/' + id + '/' + name)}>{tabLabel(name)}</a>)}</nav>
     {redirected && <p role="status">That section is unavailable for your role. Showing {tabLabel(selected)}.</p>}
     <div class="panel">
