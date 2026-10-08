@@ -1,87 +1,175 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
+import { api, errorMessage, parseRoomState, paths } from './api';
+import type { LinkResult, State } from './api';
+import { followLink, navigate, parseRoute, sharePath } from './navigation';
+import { keepJoin } from './pageMemory';
+import { Room } from './Room';
+import { ServiceChecks } from './ServiceChecks';
 
-type Check = 'healthz' | 'readyz';
-type Result = { kind: 'idle' | 'checking' | 'success' | 'warning' | 'error'; label: string; detail: string };
-const initial: Result = { kind: 'idle', label: 'Not checked', detail: 'Run a check to see the current service status.' };
-
-async function checkService(check: Check, signal: AbortSignal): Promise<Result> {
-  const response = await fetch('/api/sessions/' + check, { signal, cache: 'no-store', headers: { Accept: 'application/json' } });
-  if (response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
-    throw new Error('Unexpected response (HTTP ' + response.status + '). Expected JSON from the sessions service.');
-  }
-  let body: unknown;
-  try { body = await response.json(); } catch { throw new Error('The service returned invalid JSON (HTTP ' + response.status + ').'); }
-  const status = typeof body === 'object' && body !== null && !Array.isArray(body) && Object.keys(body).length === 1 && 'status' in body ? body.status : undefined;
-  if (check === 'healthz' && response.status === 200 && status === 'ok') {
-    return { kind: 'success', label: 'Alive', detail: 'The sessions service is responding. This does not check the database.' };
-  }
-  if (check === 'readyz' && response.status === 200 && status === 'ready') {
-    return { kind: 'success', label: 'Ready', detail: 'The sessions service can reach its database.' };
-  }
-  if (check === 'readyz' && response.status === 503 && status === 'not_ready') {
-    return { kind: 'warning', label: 'Not ready', detail: 'The service responded, but its database check did not pass. Retry after the database recovers.' };
-  }
-  throw new Error('Unexpected service response (HTTP ' + response.status + '). The status did not match the agreed contract.');
+function Retention() {
+  return <p class="notice">Local data, including questions, responses and any captured transcripts, is retained until the operator explicitly deletes the dataset and backups. Room end and access revocation are not deletion. Do not use real recordings if indefinite local retention is unacceptable.</p>;
 }
 
-function ServiceCheck({ check, title, description }: { check: Check; title: string; description: string }) {
-  const [result, setResult] = useState<Result>(initial);
-  const [checkedAt, setCheckedAt] = useState<string>();
-  const pending = useRef<AbortController | null>(null);
-  useEffect(() => () => { pending.current?.abort(); pending.current = null; }, []);
+function Operator({ created }: { created: (state: State) => void }) {
+  const [credential, setCredential] = useState('');
+  const [authenticated, setAuthenticated] = useState(false);
+  const [title, setTitle] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [roomId, setRoomId] = useState('');
+  return <section class="panel">
+    <h1>Host operator</h1>
+    <p>Only the host-configured operator can create rooms. Audience links never grant speaker access.</p>
+    {error && <p role="alert" class="error">{error}</p>}
+    {!authenticated ? <form onSubmit={async event => {
+      event.preventDefault();
+      if (busy) return;
+      setBusy(true);
+      setError('');
+      const secret = credential;
+      setCredential('');
+      try {
+        const result = await api.mutate<{ operator?: boolean }>(paths.login, { credential: secret });
+        if (result.operator !== true) throw new Error('Invalid operator response');
+        setAuthenticated(true);
+      } catch (reason) {
+        setError(errorMessage(reason) + ' Re-enter the credential to retry.');
+      } finally { setBusy(false); }
+    }}>
+      <label>Operator credential
+        <input type="password" autoComplete="off" required value={credential} onInput={event => setCredential(event.currentTarget.value)} />
+      </label>
+      <p>The credential is sent only to this origin’s sessions service and is not saved in this browser.</p>
+      <button disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+    </form> : <>
+      <p role="status">Operator authenticated for this session.</p>
+      <Retention />
+      <form onSubmit={async event => {
+        event.preventDefault();
+        const trimmed = title.trim();
+        if (busy || trimmed === '' || [...trimmed].length > 200) return;
+        setBusy(true);
+        setError('');
+        try {
+          const result = await api.mutate<{ state?: unknown } & LinkResult>(paths.rooms, { title: trimmed }, 201);
+          const state = parseRoomState(result.state);
+          if (!state || state.membership.role !== 'speaker') throw new Error('Invalid room');
+          const link = sharePath('join', result.join_url);
+          keepJoin(state.room.id, link);
+          created(state);
+        } catch (reason) {
+          setError(errorMessage(reason));
+        } finally { setBusy(false); }
+      }}>
+        <label>Room title
+          <input required maxLength={200} value={title} onInput={event => setTitle(event.currentTarget.value)} />
+        </label>
+        <button disabled={busy || title.trim() === ''}>{busy ? 'Creating…' : 'Create room'}</button>
+      </form>
+      <h2>Return to an existing room</h2>
+      <p>Use its saved room URL, or enter its room ID. Signing in restores the operator’s existing speaker memberships.</p>
+      <form onSubmit={event => { event.preventDefault(); navigate('/rooms/' + roomId.trim()); }}>
+        <label>Room ID
+          <input required pattern="[a-fA-F0-9-]{36}" value={roomId} onInput={event => setRoomId(event.currentTarget.value)} />
+        </label>
+        <button>Open room</button>
+      </form>
+    </>}
+  </section>;
+}
 
-  async function run() {
-    if (pending.current) return;
-    const controller = new AbortController();
-    pending.current = controller;
-    setResult({ kind: 'checking', label: 'Checking…', detail: 'Waiting for the sessions service.' });
-    const timeout = window.setTimeout(() => controller.abort(), 5000);
-    let next: Result;
-    try { next = await checkService(check, controller.signal); }
-    catch (error) {
-      next = { kind: 'error', label: controller.signal.aborted ? 'Timed out' : 'Check failed', detail: controller.signal.aborted ? 'No complete response within 5 seconds. Check that the local service is running, then retry.' : error instanceof TypeError ? 'Could not reach the sessions service. Check the local service and proxy, then retry.' : error instanceof Error ? error.message : 'Unable to check the service. Please retry.' };
-    } finally { window.clearTimeout(timeout); }
-    if (pending.current !== controller) return;
-    pending.current = null;
-    setResult(next);
-    setCheckedAt(new Date().toLocaleTimeString());
-  }
-
-  return (
-    <article class="check-card" aria-labelledby={check + '-title'}>
-      <div class="check-heading"><h3 id={check + '-title'}>{title}</h3><code>/{check}</code></div>
-      <p class="check-description">{description}</p>
-      <div class="result" role="status" aria-live="polite" aria-atomic="true">
-        <span class={'status status--' + result.kind}><span aria-hidden="true" class="status-dot" />{result.label}</span>
-        <p>{result.detail}</p>
-      </div>
-      <div class="check-footer">
-        <button type="button" disabled={result.kind === 'checking'} onClick={run} aria-label={(checkedAt ? 'Retry ' : 'Check ') + title.toLowerCase()}>{result.kind === 'checking' ? 'Checking…' : checkedAt ? 'Retry check' : 'Run check'}<span aria-hidden="true">↗</span></button>
-        <span class="timestamp">{checkedAt ? 'Last completed ' + checkedAt : 'Manual check'}</span>
-      </div>
-    </article>
-  );
+function Landing({ kind, token }: { kind: 'join' | 'invite'; token: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  return <section class="panel">
+    <h1>{kind === 'join' ? 'Join the audience' : 'Accept TA invitation'}</h1>
+    <p>{kind === 'join' ? 'This link grants audience membership only. Existing speaker or TA membership is preserved.' : 'This single-use invitation grants TA access, not speaker or operator authority.'}</p>
+    <Retention />
+    {error && <p role="alert" class="error">{error}</p>}
+    <form onSubmit={async event => {
+      event.preventDefault();
+      if (busy) return;
+      setBusy(true);
+      setError('');
+      try {
+        const result = await api.mutate<{ state?: unknown }>(kind === 'join' ? paths.join(token) : paths.redeem(token));
+        const state = parseRoomState(result.state);
+        if (!state) throw new Error('Invalid room');
+        navigate('/rooms/' + state.room.id, true);
+      } catch (reason) {
+        setError(errorMessage(reason));
+      } finally { setBusy(false); }
+    }}>
+      <button disabled={busy}>{busy ? 'Joining…' : kind === 'join' ? 'Join room' : 'Accept invitation'}</button>
+    </form>
+    <p>Invalid, expired or revoked link? Ask the speaker for a fresh link.</p>
+  </section>;
 }
 
 export function App() {
-  return (
-    <div class="shell">
-      <a class="skip-link" href="#main">Skip to content</a>
-      <header class="site-header"><a class="brand" href="./" aria-label="SansCue home"><span class="brand-mark" aria-hidden="true">s.</span>SansCue</a><span class="environment">Local development</span></header>
-      <main id="main" tabIndex={-1}>
-        <section class="intro" aria-labelledby="page-title">
-          <p class="eyebrow"><span aria-hidden="true" /> Stage 1 / Foundation</p>
-          <h1 id="page-title">A starting point.<br /><span>Not a live event.</span></h1>
-          <p class="intro-copy">SansCue is a conference tool in development. This starter shell provides a place to verify the local sessions service — nothing more, yet.</p>
-          <div class="scope-note"><span aria-hidden="true">↳</span><p>This is a development shell, not a working conference experience.</p></div>
-        </section>
-        <section class="service-section" aria-labelledby="service-title">
-          <div class="section-heading"><div><p class="eyebrow">Local connection</p><h2 id="service-title">Sessions service</h2></div><p>Two independent checks.<br />Run or retry each when you need it.</p></div>
-          <div class="checks"><ServiceCheck check="healthz" title="Liveness" description="Is the service responding?" /><ServiceCheck check="readyz" title="Readiness" description="Can the service reach its database?" /></div>
-          <p class="service-note">Checks use the same-origin <code>/api/sessions</code> proxy. Results are snapshots, not continuous monitoring.</p>
-        </section>
-      </main>
-      <footer class="site-footer"><span>SansCue</span><span>Local foundation · No conference functionality</span></footer>
-    </div>
-  );
+  const [path, setPath] = useState(window.location.pathname);
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState('');
+  const route = parseRoute(path);
+  async function connect() {
+    setBusy(true);
+    setError('');
+    try {
+      await api.bootstrap();
+      setReady(true);
+    } catch (reason) {
+      setReady(false);
+      setError(errorMessage(reason));
+    } finally { setBusy(false); }
+  }
+  useEffect(() => {
+    const update = () => setPath(window.location.pathname);
+    window.addEventListener('popstate', update);
+    void connect();
+    return () => window.removeEventListener('popstate', update);
+  }, []);
+  useEffect(() => {
+    const title = route.kind === 'room' ? 'Room'
+      : route.kind === 'operator' ? 'Host operator'
+        : route.kind === 'health' ? 'Service checks'
+          : route.kind === 'join' ? 'Join room'
+            : route.kind === 'invite' ? 'Invitation'
+              : route.kind === 'missing' ? 'Not found'
+                : 'Rooms';
+    document.title = 'SansCue · ' + title;
+  }, [path]);
+  return <div class="shell">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="/" onClick={event => followLink(event, '/')}>
+        <span class="brand-mark" aria-hidden="true">s.</span>SansCue
+      </a>
+      <span class="environment">Rooms · local MVP</span>
+    </header>
+    <main id="main" tabIndex={-1}>
+      {route.kind === 'health' ? <ServiceChecks /> : !ready ? <section class="panel">
+        <h1>Connect to SansCue</h1>
+        {busy ? <p role="status">Preparing your secure browser session…</p> : <>
+          <p role="alert" class="error">{error}</p>
+          <button type="button" onClick={() => void connect()}>Retry connection</button>
+        </>}
+      </section> : route.kind === 'room' ? <Room key={route.id} id={route.id} tab={route.tab} /> : route.kind === 'operator' ? <Operator created={state => navigate('/rooms/' + state.room.id + '/access')} /> : route.kind === 'join' || route.kind === 'invite' ? <Landing key={path} kind={route.kind} token={route.token} /> : route.kind === 'missing' ? <section class="panel">
+        <h1>Page not found</h1>
+        <p>This is not a valid room or invitation route.</p>
+        <a href="/" onClick={event => followLink(event, '/')}>Return home</a>
+      </section> : <section class="intro">
+        <p class="eyebrow">Rooms and access</p>
+        <h1>A shared room.<br /><span>Your own perspective.</span></h1>
+        <p class="intro-copy">Join using the speaker’s QR code or audience link. Invited TAs use their private invitation.</p>
+        <p><a href="/operator" onClick={event => followLink(event, '/operator')}>Host operator sign-in and room creation</a></p>
+        <p class="scope-note">Questions, responses, live updates and Bee integration are coming in later stages.</p>
+      </section>}
+    </main>
+    <footer class="site-footer">
+      <a href="/health" onClick={event => followLink(event, '/health')}>Service checks</a>
+      <button type="button" disabled={busy} onClick={() => { setReady(false); void connect(); }}>Reconnect browser session</button>
+      <span>Same-origin sessions · No accounts</span>
+    </footer>
+  </div>;
 }
