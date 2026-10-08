@@ -26,6 +26,8 @@ services:
       DATABASE_URL: "postgresql://${POSTGRES_USER:?Set POSTGRES_USER in deploy/.env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}@sessions-db:5432/${POSTGRES_DB:?Set POSTGRES_DB in deploy/.env}"
       HTTP_HOST: "0.0.0.0"
       HTTP_PORT: "3000"
+      SESSIONS_PUBLIC_ORIGIN: "http://127.0.0.1:8080"
+      SESSIONS_ALLOW_INSECURE_LOOPBACK: "true"
       RUST_LOG: "info"
     depends_on:
       sessions-db:
