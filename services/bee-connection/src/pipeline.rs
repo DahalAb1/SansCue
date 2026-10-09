@@ -237,19 +237,20 @@ impl Pipeline {
     }
 
     fn record_sequence(&mut self, sequence: u64, ordinal: u64, at: DateTime<Utc>) {
-        if let Some(previous) = self.high_sequence {
-            if sequence > previous && sequence - previous > 1 {
-                self.gaps.push(Gap {
-                    detected_ordinal: ordinal,
-                    started_at: at,
-                    reconnected_at: None,
-                    missing: Some((previous + 1, sequence - 1)),
-                    status: GapStatus::Confirmed,
-                    after_sequence: Some(previous),
-                    disconnect: false,
-                    recovered_at_ordinal: None,
-                });
-            }
+        if let Some(previous) = self.high_sequence
+            && sequence > previous
+            && sequence - previous > 1
+        {
+            self.gaps.push(Gap {
+                detected_ordinal: ordinal,
+                started_at: at,
+                reconnected_at: None,
+                missing: Some((previous + 1, sequence - 1)),
+                status: GapStatus::Confirmed,
+                after_sequence: Some(previous),
+                disconnect: false,
+                recovered_at_ordinal: None,
+            });
         }
         self.seen_sequences.insert(sequence);
         self.high_sequence = Some(
@@ -260,18 +261,19 @@ impl Pipeline {
             if !matches!(gap.status, GapStatus::Suspected | GapStatus::Confirmed) {
                 continue;
             }
-            if gap.disconnect && gap.reconnected_at.is_some() && gap.missing.is_none() {
-                if let Some(before) = gap.after_sequence {
-                    if sequence > before {
-                        // First post-reconnect forward observation bounds the interval.
-                        if sequence - before == 1 {
-                            gap.status = GapStatus::Recovered;
-                            gap.recovered_at_ordinal = Some(ordinal);
-                        } else {
-                            gap.missing = Some((before + 1, sequence - 1));
-                            gap.status = GapStatus::Confirmed;
-                        }
-                    }
+            if gap.disconnect
+                && gap.reconnected_at.is_some()
+                && gap.missing.is_none()
+                && let Some(before) = gap.after_sequence
+                && sequence > before
+            {
+                // First post-reconnect forward observation bounds the interval.
+                if sequence - before == 1 {
+                    gap.status = GapStatus::Recovered;
+                    gap.recovered_at_ordinal = Some(ordinal);
+                } else {
+                    gap.missing = Some((before + 1, sequence - 1));
+                    gap.status = GapStatus::Confirmed;
                 }
             }
             if let Some((start, end)) = gap.missing {
