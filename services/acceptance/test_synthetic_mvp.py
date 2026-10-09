@@ -49,6 +49,14 @@ class AcceptanceRunnerSafetyTests(unittest.TestCase):
         self.assertEqual(sessions["HTTP_HOST"], "127.0.0.1")
         self.assertEqual(topics["HTTP_HOST"], "127.0.0.1")
 
+    def test_replay_summary_parses_integer_tokens(self):
+        self.assertEqual(
+            synthetic.replay_counts("observations=14 events=30 gap_intervals=2"),
+            {"observations": 14, "events": 30, "gap_intervals": 2},
+        )
+        with self.assertRaisesRegex(RuntimeError, "invalid summary count"):
+            synthetic.replay_counts("observations=14 events=3 gap_intervals=")
+
 
 if __name__ == "__main__":
     unittest.main()

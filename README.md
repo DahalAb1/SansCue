@@ -13,12 +13,14 @@ written Q&A, and staff response counts. Candidate generation is the explicit
 exercises this flow with a synthetic fixture and three separate PostgreSQL
 databases.
 
-Do not infer that the acceptance procedure or every database gate has run:
-record execution status for the current host/commit separately. Live Bee/API,
-AWS, model quality, Docker/Compose runtime, and production resilience/performance
-remain distinct unverified gates. See [verification status](docs/environment-verification.md)
-for Docker checks and [development context](docs/development-context.md) for
-current implementation boundaries.
+The synthetic end-to-end procedure and the relevant service PostgreSQL suites
+passed on `test/mvp-acceptance-matrix` at `707e23c` against native PostgreSQL
+17.11; this is not Docker verification. See the
+[verification record](docs/environment-verification.md) for exact check scope.
+Live Bee/API, AWS, model quality, Docker/Compose runtime, and production
+resilience/performance remain distinct unverified gates. See the
+[development context](docs/development-context.md) for implementation
+boundaries.
 
 ## Documents
 

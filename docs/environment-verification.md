@@ -1,28 +1,34 @@
 # Environment verification status
 
-Updated October 9, 2026. The earlier native-PostgreSQL/frontend results below
-are a historical foundation record, not a claim that the full current MVP or
-the new synthetic acceptance procedure has run on this checkout. This document
-tracks Docker-only checks and does not replace current service-specific
-PostgreSQL verification.
+Updated October 9, 2026. This records an observed hardware-independent run and
+separates native-PostgreSQL checks from Docker-only checks. It does not claim
+that live Bee, AWS, model quality, or production acceptance has passed.
 
 ## Current acceptance gates
 
-- **Hardware-independent synthetic flow:** the procedure at
-  [`services/acceptance`](../services/acceptance/README.md) is available and
-  requires three distinct native PostgreSQL databases. Its result is pending
-  until explicitly run on the target commit.
-- **Local code checks:** current branch checks should be reported with the exact
-  commit and the observed frontend/Rust commands; prior foundation results below
-  should not be generalized to newly added services.
+- **Hardware-independent synthetic flow:** passed on branch
+  `test/mvp-acceptance-matrix` at `707e23c` using three fresh, separate native
+  PostgreSQL 17.11 databases. The procedure in
+  [`services/acceptance`](../services/acceptance/README.md) replayed the
+  synthetic fixture twice and verified binding/outbox delivery, event and
+  candidate deduplication, staff-only candidate/evidence, publication, an
+  audience rating and written Q&A, staff counts, and audience privacy.
+- **Service PostgreSQL suites on the same branch/commit:** Sessions access 9/9,
+  Bee persistence 3/3, and Topics persistence 2/2 passed after correcting test
+  sequencing and isolating Bee persistence tests by schema.
+- **Database-independent checks on the same branch/commit:** Sessions unit 6/6,
+  Bee unit/contract/pipeline/worker 23/23, Topics unit/contract 3/3; 18 frontend
+  tests, frontend typecheck and production build; workspace Clippy and Rust
+  formatting passed. The checks used native services/databases and did not use
+  Docker.
 - **Live Bee/device/API, model quality, AWS, Docker/Compose, production
   performance, and backup/restore:** unverified separate gates. Synthetic input
   is not a live Bee validation, and `stub-v1` is not model-quality evidence.
 
-## Passed without containers
+## Earlier foundation-only verification record
 
-On `dev` after the live-updates, local-runtime, and room-reconnect squash
-integrations:
+These results were recorded on an earlier `dev` snapshot, before the current
+Bee/Topics/question workflow; they are retained as historical context only:
 
 - Rust formatting and Clippy (`cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`).

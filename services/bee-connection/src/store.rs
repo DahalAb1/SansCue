@@ -3,8 +3,12 @@ use crate::{
     pipeline::{Disposition, Pipeline},
 };
 use serde_json::Value;
-use sqlx::{PgPool, Row, postgres::PgPoolOptions, types::Json};
-use std::time::Duration;
+use sqlx::{
+    PgPool, Row,
+    postgres::{PgConnectOptions, PgPoolOptions},
+    types::Json,
+};
+use std::{str::FromStr, time::Duration};
 use uuid::Uuid;
 
 /// First-step aggregate store. Row locks serialize writers per conversation;
@@ -22,11 +26,17 @@ pub enum CommandOutcome {
 
 impl Store {
     pub async fn connect(url: &str) -> Result<Self, &'static str> {
+        let options = PgConnectOptions::from_str(url).map_err(|_| "invalid Bee database URL")?;
+        Self::connect_with_options(options).await
+    }
+
+    /// Connect with explicit driver options, useful for isolated test schemas.
+    pub async fn connect_with_options(options: PgConnectOptions) -> Result<Self, &'static str> {
         tokio::time::timeout(Duration::from_secs(15), async {
             let pool = PgPoolOptions::new()
                 .max_connections(5)
                 .acquire_timeout(Duration::from_secs(5))
-                .connect(url)
+                .connect_with(options)
                 .await
                 .map_err(|_| "Bee database connection failed")?;
             sqlx::migrate!("./migrations")

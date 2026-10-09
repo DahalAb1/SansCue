@@ -1398,7 +1398,8 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
         )
         .await
         .1["bee"]["status"],
-        "bound"
+        "binding",
+        "status publication alone is not command acknowledgement"
     );
     let status_body = json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":revision});
     assert_eq!(
@@ -1421,6 +1422,18 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
     assert_eq!(
         private.clone().oneshot(request).await.unwrap().status(),
         200
+    );
+    assert_eq!(
+        call(
+            &app,
+            &browser,
+            "GET",
+            &format!("/rooms/{room}/state"),
+            json!({})
+        )
+        .await
+        .1["bee"]["status"],
+        "bound"
     );
     let before: i64 = sqlx::query_scalar("SELECT sequence FROM rooms WHERE id=$1")
         .bind(Uuid::parse_str(room).unwrap())
@@ -1478,6 +1491,13 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
     )
     .await;
     let new_command = commands["commands"][0]["command_id"].as_str().unwrap();
+    let new_conversation = Uuid::parse_str(
+        commands["commands"][0]["payload"]["conversation_id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":new_conversation,"status":"bound","has_gaps":false,"connectivity_revision":new_binding["revision"]})).await.0,200);
     assert_eq!(
         once(
             &private,
@@ -1489,13 +1509,6 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
         .0,
         200
     );
-    let new_conversation = Uuid::parse_str(
-        commands["commands"][0]["payload"]["conversation_id"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":new_conversation,"status":"bound","has_gaps":false,"connectivity_revision":new_binding["revision"]})).await.0,200);
     let events_before: i64 =
         sqlx::query_scalar("SELECT count(*) FROM room_events WHERE room_id=$1")
             .bind(Uuid::parse_str(room).unwrap())
@@ -1594,7 +1607,10 @@ async fn superseded_binding_status_has_machine_readable_stale_outcome() {
         once(
             &private,
             "POST",
-            &format!("/internal/v1/bee/commands/{}/ack", bind["command_id"]),
+            &format!(
+                "/internal/v1/bee/commands/{}/ack",
+                bind["command_id"].as_str().unwrap()
+            ),
             Some(("authorization", "Bearer synthetic-bee"))
         )
         .await
@@ -1605,7 +1621,10 @@ async fn superseded_binding_status_has_machine_readable_stale_outcome() {
         once(
             &private,
             "POST",
-            &format!("/internal/v1/bee/commands/{}/ack", unbind["command_id"]),
+            &format!(
+                "/internal/v1/bee/commands/{}/ack",
+                unbind["command_id"].as_str().unwrap()
+            ),
             Some(("authorization", "Bearer synthetic-bee"))
         )
         .await
@@ -1664,6 +1683,20 @@ async fn topic_candidate_receipts_survive_unbind_and_room_end() {
             .await
             .unwrap();
     assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":binding["revision"]})).await.0,200);
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!(
+                "/internal/v1/bee/commands/{}/ack",
+                binding["command_id"].as_str().unwrap()
+            ),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
 
     let candidate_id = Uuid::new_v4();
     let candidate = topic_candidate(
@@ -1693,6 +1726,20 @@ async fn topic_candidate_receipts_survive_unbind_and_room_end() {
     )
     .await;
     assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":null,"status":"unbound","has_gaps":false,"connectivity_revision":unbind["revision"]})).await.0,200);
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!(
+                "/internal/v1/bee/commands/{}/ack",
+                unbind["command_id"].as_str().unwrap()
+            ),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
     let duplicate = private_topics_json(
         &private,
         "POST",
@@ -1730,6 +1777,20 @@ async fn topic_candidate_receipts_survive_unbind_and_room_end() {
     )
     .await;
     assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":conversation2,"status":"bound","has_gaps":false,"connectivity_revision":binding2["revision"]})).await.0,200);
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!(
+                "/internal/v1/bee/commands/{}/ack",
+                binding2["command_id"].as_str().unwrap()
+            ),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
     let (_, ended) = call(
         &app,
         &browser,
@@ -1738,7 +1799,7 @@ async fn topic_candidate_receipts_survive_unbind_and_room_end() {
         json!({}),
     )
     .await;
-    assert_eq!(ended["state"]["room"]["status"], "ended");
+    assert_eq!(ended["status"], "ended");
     let replay_after_end = private_topics_json(
         &private,
         "POST",
@@ -1815,6 +1876,20 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
             .await
             .unwrap();
     assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room_text}/status"),json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":binding["revision"]})).await.0,200);
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!(
+                "/internal/v1/bee/commands/{}/ack",
+                binding["command_id"].as_str().unwrap()
+            ),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
     let candidate_id = Uuid::new_v4();
     let candidate = topic_candidate(
         candidate_id,
