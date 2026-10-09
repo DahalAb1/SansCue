@@ -1491,6 +1491,13 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
     )
     .await;
     let new_command = commands["commands"][0]["command_id"].as_str().unwrap();
+    let new_conversation = Uuid::parse_str(
+        commands["commands"][0]["payload"]["conversation_id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":new_conversation,"status":"bound","has_gaps":false,"connectivity_revision":new_binding["revision"]})).await.0,200);
     assert_eq!(
         once(
             &private,
@@ -1502,13 +1509,6 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
         .0,
         200
     );
-    let new_conversation = Uuid::parse_str(
-        commands["commands"][0]["payload"]["conversation_id"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":new_conversation,"status":"bound","has_gaps":false,"connectivity_revision":new_binding["revision"]})).await.0,200);
     let events_before: i64 =
         sqlx::query_scalar("SELECT count(*) FROM room_events WHERE room_id=$1")
             .bind(Uuid::parse_str(room).unwrap())

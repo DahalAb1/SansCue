@@ -151,6 +151,21 @@ def wait_until(predicate, description):
     raise RuntimeError(f"timed out waiting for {description}")
 
 
+def replay_counts(output):
+    counts = {}
+    for token in output.split():
+        if "=" in token:
+            name, value = token.split("=", 1)
+            if name in {"observations", "events", "gap_intervals"}:
+                try:
+                    counts[name] = int(value)
+                except ValueError as error:
+                    raise RuntimeError("replay CLI returned an invalid summary count") from error
+    if set(counts) != {"observations", "events", "gap_intervals"}:
+        raise RuntimeError("replay CLI returned an incomplete summary")
+    return counts
+
+
 def main():
     database_targets(os.environ)
     credential = secrets.token_hex(32)
@@ -217,8 +232,11 @@ def main():
         # Rerun the same fixture/binding: stable source IDs must not create extra candidates.
         second_replay = subprocess.run(replay, cwd=ROOT, env=run_env, check=True,
                                        capture_output=True, text=True).stdout.strip()
-        assert "events=3" in first_replay and "gap_intervals=" in first_replay
-        assert "observations=14 events=3" in second_replay, (
+        first_counts = replay_counts(first_replay)
+        second_counts = replay_counts(second_replay)
+        assert first_counts["observations"] == 7 and first_counts["events"] == 3
+        assert first_counts["gap_intervals"] > 0
+        assert second_counts["observations"] == 14 and second_counts["events"] == 3, (
             "second replay must preserve raw arrivals while deduplicating canonical events"
         )
         # Replay establishes the fixture's verified capability flags before the
@@ -269,7 +287,6 @@ def main():
         assert final["dashboard"]["counts"]["clear"] == 1
         assert final["dashboard"]["percentages"]["clear"] == 100.0
         assert request(audience, "GET", f"/rooms/{room}/state")["dashboard"] is None
-        print("PASS: synthetic replay -> idempotent event/candidate delivery -> staff-only preview -> publication -> audience rating/Q&A -> staff counts and audience privacy")
     finally:
         for proc in reversed(PROCS):
             if proc.poll() is None:
@@ -282,6 +299,7 @@ def main():
                 proc.wait()
         if any(proc.poll() is None for proc in PROCS):
             raise RuntimeError("cleanup failed: a directly started service process is still running")
+    print("PASS: synthetic replay -> idempotent event/candidate delivery -> staff-only preview -> publication -> audience rating/Q&A -> staff counts and audience privacy")
 
 
 if __name__ == "__main__":
