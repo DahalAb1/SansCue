@@ -273,7 +273,8 @@ impl Delivery {
             tx.commit().await.map_err(|_| "generation commit failed")?;
             count += 1;
         }
-        let outbox=sqlx::query("SELECT c.candidate_id,c.event_id,c.room_id,c.session_id,c.text,c.generator_version,c.evidence FROM candidate_outbox o JOIN question_candidates c USING(candidate_id) WHERE o.delivered_at IS NULL ORDER BY o.created_at LIMIT 50").fetch_all(&self.pool).await.map_err(|_|"candidate outbox poll failed")?;
+        let outbox=sqlx::query("SELECT c.candidate_id,c.event_id,c.room_id,c.session_id,c.text,c.generator_version,c.evidence FROM candidate_outbox o JOIN question_candidates c USING(candidate_id) WHERE o.delivered_at IS NULL AND o.terminal_at IS NULL ORDER BY o.created_at LIMIT 50").fetch_all(&self.pool).await.map_err(|_|"candidate outbox poll failed")?;
+        let mut retryable_failure = false;
         for row in outbox {
             let evidence: sqlx::types::Json<Evidence> = row.get("evidence");
             let candidate = Candidate {
@@ -295,26 +296,93 @@ impl Delivery {
                 .bearer_auth(&self.sessions_token)
                 .json(&candidate)
                 .send()
-                .await
-                .map_err(|_| "sessions candidate delivery failed")?;
-            if !response.status().is_success() {
-                return Err("sessions candidate delivery rejected");
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(_) => {
+                    retryable_failure = true;
+                    continue;
+                }
             };
-            let acknowledgement: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|_| "sessions candidate acknowledgement invalid")?;
+            if !response.status().is_success() {
+                let status = response.status().as_u16();
+                let body: serde_json::Value =
+                    response.json().await.unwrap_or(serde_json::Value::Null);
+                if let Some(code) = terminal_candidate_rejection(status, &body) {
+                    self.reject_candidate(candidate.candidate_id, code).await?;
+                    count += 1;
+                } else {
+                    retryable_failure = true;
+                }
+                continue;
+            };
+            let acknowledgement: serde_json::Value =
+                response.json().await.unwrap_or(serde_json::Value::Null);
             if acknowledgement["accepted"] != true
                 || acknowledgement["candidate_id"]
                     .as_str()
                     .and_then(|value| Uuid::parse_str(value).ok())
                     != Some(candidate.candidate_id)
             {
-                return Err("sessions candidate acknowledgement invalid");
+                retryable_failure = true;
+                continue;
             }
-            sqlx::query("UPDATE candidate_outbox SET delivered_at=now(),attempts=attempts+1 WHERE candidate_id=$1").bind(candidate.candidate_id).execute(&self.pool).await.map_err(|_|"candidate outbox acknowledgement failed")?;
+            if sqlx::query("UPDATE candidate_outbox SET delivered_at=now(),attempts=attempts+1 WHERE candidate_id=$1 AND delivered_at IS NULL AND terminal_at IS NULL").bind(candidate.candidate_id).execute(&self.pool).await.is_err() {
+                retryable_failure = true;
+                continue;
+            }
             count += 1;
         }
-        Ok(count)
+        if retryable_failure {
+            Err("some candidate deliveries remain pending for retry")
+        } else {
+            Ok(count)
+        }
+    }
+
+    async fn reject_candidate(&self, candidate: Uuid, code: &str) -> Result<(), &'static str> {
+        sqlx::query("UPDATE candidate_outbox SET terminal_at=now(),terminal_code=$2,attempts=attempts+1 WHERE candidate_id=$1 AND delivered_at IS NULL AND terminal_at IS NULL")
+            .bind(candidate).bind(code).execute(&self.pool).await
+            .map_err(|_| "candidate outbox terminal receipt failed")?;
+        Ok(())
+    }
+}
+
+fn terminal_candidate_rejection(status: u16, body: &serde_json::Value) -> Option<&'static str> {
+    match (status, body["code"].as_str()) {
+        (410, Some("topic_candidate_stale")) => Some("topic_candidate_stale"),
+        (409, Some("topic_candidate_conflict")) => Some("topic_candidate_conflict"),
+        (400, Some("invalid_request")) => Some("invalid_request"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::terminal_candidate_rejection;
+    use serde_json::json;
+
+    #[test]
+    fn only_explicit_permanent_session_rejections_are_terminal() {
+        assert_eq!(
+            terminal_candidate_rejection(410, &json!({"code":"topic_candidate_stale"})),
+            Some("topic_candidate_stale")
+        );
+        assert_eq!(
+            terminal_candidate_rejection(409, &json!({"code":"topic_candidate_conflict"})),
+            Some("topic_candidate_conflict")
+        );
+        assert_eq!(
+            terminal_candidate_rejection(400, &json!({"code":"invalid_request"})),
+            Some("invalid_request")
+        );
+        assert_eq!(
+            terminal_candidate_rejection(401, &json!({"code":"service_auth_required"})),
+            None
+        );
+        assert_eq!(
+            terminal_candidate_rejection(503, &json!({"code":"storage_unavailable"})),
+            None
+        );
     }
 }

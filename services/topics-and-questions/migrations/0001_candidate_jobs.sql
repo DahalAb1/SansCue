@@ -34,5 +34,9 @@ CREATE TABLE candidate_outbox (
     candidate_id UUID PRIMARY KEY REFERENCES question_candidates(candidate_id),
     attempts INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    delivered_at TIMESTAMPTZ
+    delivered_at TIMESTAMPTZ,
+    terminal_at TIMESTAMPTZ,
+    terminal_code TEXT,
+    CHECK ((terminal_at IS NULL) = (terminal_code IS NULL)),
+    CHECK (delivered_at IS NULL OR terminal_at IS NULL)
 );
