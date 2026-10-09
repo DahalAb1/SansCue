@@ -13,7 +13,7 @@ await server.close();
 
 const { SessionsApi, ApiError, errorMessage, paths, parseRoomState, preferState, deniesRoomRead } = apiModule;
 const { parseRoute, tabsFor, selectedSection, sharePath } = navigation;
-const { keepJoin, memoryJoin, keepInvite, memoryInvite, keepDraft, memoryDraft, draftKey } = memory;
+const { keepJoin, memoryJoin, keepInvite, memoryInvite, keepDraft, memoryDraft, draftKey, keepPublishedQuestionDraft, memoryPublishedQuestionDraft, clearPublishedQuestionDraft } = memory;
 const { parseRoomEvent, reconnectDelay } = live;
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const roomId = '00000000-0000-4000-8000-000000000001';
@@ -115,7 +115,7 @@ test('share links are same-origin path tokens and nothing else', () => {
   assert.equal(sharePath('invite', join), null);
 });
 
-test('access paths match the sessions room contract and omit later product routes', () => {
+test('room feature paths match the sessions publication, feedback and written Q&A contract', () => {
   assert.equal(paths.bootstrap, '/bootstrap');
   assert.equal(paths.login, '/operator/login');
   assert.equal(paths.rooms, '/rooms');
@@ -130,6 +130,10 @@ test('access paths match the sessions room contract and omit later product route
   assert.equal(paths.rotateJoin(roomId), '/rooms/' + roomId + '/join-link/rotate');
   assert.equal(paths.revokeJoin(roomId), '/rooms/' + roomId + '/join-link/revoke');
   assert.equal(paths.end(roomId), '/rooms/' + roomId + '/end');
+  assert.equal(paths.qa(roomId), '/rooms/' + roomId + '/qa');
+  assert.equal(paths.publishQuestion(roomId, memberId), '/rooms/' + roomId + '/questions/' + memberId + '/publish');
+  assert.equal(paths.questionVersion(roomId, memberId), '/rooms/' + roomId + '/questions/' + memberId + '/versions');
+  assert.equal(paths.respond(roomId, memberId), '/rooms/' + roomId + '/questions/' + memberId + '/response');
   assert.equal(paths.page(paths.invitations(roomId)), paths.invitations(roomId) + '?limit=50');
   assert.equal(paths.page(paths.memberships(roomId), memberId), paths.memberships(roomId) + '?limit=50&after=' + memberId);
   const opaqueCursor = 'eyJ0IjoiMjAyNi0xMC0wOCIsImlkIjoiYSJ9.sig/+=?&# %';
@@ -147,8 +151,19 @@ test('access paths match the sessions room contract and omit later product route
     paths.bootstrap, paths.login, paths.rooms, paths.state(roomId), paths.join(token), paths.redeem(token),
     paths.invitations(roomId), paths.memberships(roomId), paths.revokeInvitation(roomId, memberId),
     paths.revokeMembership(roomId, memberId), paths.rotateJoin(roomId), paths.revokeJoin(roomId), paths.end(roomId),
+    paths.qa(roomId), paths.publishQuestion(roomId, memberId), paths.questionVersion(roomId, memberId), paths.respond(roomId, memberId),
   ].join('\n');
-  assert.doesNotMatch(listed, /\/questions|\/generations|\/written-questions|\/bee-binding|\/response/);
+  assert.match(listed, /\/questions/);
+  assert.match(listed, /\/qa/);
+  assert.match(listed, /\/response/);
+});
+
+test('published question state supports public text while role-specific data stays partitioned', () => {
+  const active = { id: memberId, version: 2, text: 'Published text' };
+  assert.deepEqual(parseRoomState({ ...state('audience'), active_question: active, my_response: 'clear' }, roomId)?.active_question, active);
+  assert.equal(parseRoomState({ ...state('audience'), active_question: { ...active, evidence: { excerpt: 'secret' } }, question_candidates: [] }, roomId), null);
+  assert.equal(parseRoomState({ ...state('audience'), my_response: 'other' }, roomId), null);
+  assert.equal(parseRoomState({ ...state('speaker'), active_question: { ...active, evidence: { excerpt: 'private source copy' } }, dashboard: { respondents: 1, counts: { clear: 1, partly_clear: 0, need_help: 0 }, percentages: { clear: 100, partly_clear: 0, need_help: 0 } } }, roomId)?.dashboard.respondents, 1);
 });
 
 test('live events are scoped and replayed strictly after the accepted room sequence', () => {
@@ -319,6 +334,30 @@ test('issued links and unsent drafts stay in page memory only', () => {
   assert.equal(memoryDraft(draftKey(roomId, memberId, 'ta')), '');
   keepDraft(key, '');
   assert.equal(memoryDraft(key), '');
+});
+
+test('written Q&A drafts are keyed by membership and survive section unmounts', () => {
+  const key = draftKey(roomId, memberId, 'audience');
+  keepDraft(key, 'Question draft before opening another tab');
+  // QaPanel remounts from the same page-memory entry when its tab is selected again.
+  assert.equal(memoryDraft(draftKey(roomId, memberId, 'audience')), 'Question draft before opening another tab');
+  assert.equal(memoryDraft(draftKey(roomId, roomId, 'audience')), '');
+  assert.equal(memoryDraft(draftKey(roomId, memberId, 'ta')), '');
+  keepDraft(key, '');
+});
+
+test('speaker version drafts survive tab changes but reset when publication version changes', () => {
+  const key = draftKey(roomId, memberId, 'question-publication');
+  keepPublishedQuestionDraft(key, memberId, 1, 'Unsaved speaker edit');
+  // Returning to Questions remounts the panel with the same room, member and active version.
+  assert.equal(memoryPublishedQuestionDraft(key, memberId, 1, 'Published v1'), 'Unsaved speaker edit');
+  // A new publication/version invalidates the stale unsaved draft and uses the published baseline.
+  assert.equal(memoryPublishedQuestionDraft(key, memberId, 2, 'Published v2'), 'Published v2');
+  keepPublishedQuestionDraft(key, memberId, 2, 'Published v2');
+  assert.equal(memoryPublishedQuestionDraft(key, memberId, 2, 'fallback'), 'Published v2');
+  assert.equal(memoryPublishedQuestionDraft(draftKey(roomId, roomId, 'question-publication'), memberId, 2, 'Other member'), 'Other member');
+  clearPublishedQuestionDraft(key);
+  assert.equal(memoryPublishedQuestionDraft(key, memberId, 2, 'Published v2'), 'Published v2');
 });
 
 test('client source does not persist secrets or log them', () => {

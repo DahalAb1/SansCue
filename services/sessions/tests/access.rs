@@ -7,7 +7,7 @@ use sessions_service::{
     initialize, pool_options,
     security::{Security, hash},
 };
-use sqlx::{Executor, PgPool, postgres::PgConnectOptions};
+use sqlx::{Executor, PgPool, Row, postgres::PgConnectOptions};
 use std::str::FromStr;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -1762,5 +1762,333 @@ async fn topic_candidate_receipts_survive_unbind_and_room_end() {
     .await;
     assert_eq!(stale_after_end.0, 410);
     assert_eq!(stale_after_end.1["code"], "topic_candidate_stale");
+    finish(pool, admin, schema).await;
+}
+
+#[tokio::test]
+async fn published_questions_feedback_and_written_questions_are_role_partitioned() {
+    let (pool, admin, schema) = db().await;
+    let sec = Security {
+        topics_credential: Some("synthetic-topics".into()),
+        ..security()
+    };
+    let app = configured_router(pool.clone(), sec.clone());
+    let private = internal_router(Access {
+        pool: pool.clone(),
+        security: sec,
+    });
+    let speaker = boot(&app).await;
+    let audience = boot(&app).await;
+    let other_audience = boot(&app).await;
+    login(&app, &speaker).await;
+    let (_, created) = call(
+        &app,
+        &speaker,
+        "POST",
+        "/rooms",
+        json!({"title":"Publication"}),
+    )
+    .await;
+    let room_text = created["state"]["room"]["id"].as_str().unwrap();
+    let room_id = Uuid::parse_str(room_text).unwrap();
+    let root = format!("/rooms/{room_text}");
+    let join = created["join_url"].as_str().unwrap();
+    assert_eq!(call(&app, &audience, "POST", join, json!({})).await.0, 200);
+    assert_eq!(
+        call(&app, &other_audience, "POST", join, json!({})).await.0,
+        200
+    );
+
+    let conversation = Uuid::new_v4();
+    let (_, binding) = call(
+        &app,
+        &speaker,
+        "POST",
+        &format!("{root}/bee/bind"),
+        json!({"conversation_id":conversation,"source_conversation_id":null}),
+    )
+    .await;
+    let session =
+        sqlx::query_scalar::<_, Uuid>("SELECT session_id FROM bee_room_bindings WHERE room_id=$1")
+            .bind(room_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room_text}/status"),json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":binding["revision"]})).await.0,200);
+    let candidate_id = Uuid::new_v4();
+    let candidate = topic_candidate(
+        candidate_id,
+        conversation,
+        room_id,
+        session,
+        "a private source excerpt",
+    );
+    assert_eq!(
+        private_topics_json(
+            &private,
+            "POST",
+            "/internal/v1/topics/candidates",
+            candidate.clone()
+        )
+        .await
+        .0,
+        202
+    );
+    assert_eq!(
+        call(
+            &app,
+            &audience,
+            "POST",
+            &format!("{root}/questions/{candidate_id}/publish"),
+            json!({})
+        )
+        .await
+        .0,
+        403
+    );
+
+    let (_, published) = call(
+        &app,
+        &speaker,
+        "POST",
+        &format!("{root}/questions/{candidate_id}/publish"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(published["published"], true);
+    let question_id = published["question_id"].as_str().unwrap();
+    let (status, audience_state) =
+        call(&app, &audience, "GET", &format!("{root}/state"), json!({})).await;
+    assert_eq!(status, 200);
+    assert_eq!(audience_state["active_question"]["text"], candidate["text"]);
+    assert!(audience_state["active_question"].get("evidence").is_none());
+    assert!(audience_state["question_candidates"].is_null());
+    assert_eq!(audience_state["my_response"], Value::Null);
+    assert_eq!(
+        call(
+            &app,
+            &speaker,
+            "POST",
+            &format!("{root}/questions/{question_id}/response"),
+            json!({"response":"clear"})
+        )
+        .await
+        .0,
+        403
+    );
+    let response_path = format!("{root}/questions/{question_id}/response");
+    let response_key = Uuid::new_v4();
+    let response_body = json!({"response":"clear"});
+    assert_eq!(
+        request(
+            &app,
+            Some(&audience),
+            "POST",
+            &response_path,
+            response_body.clone(),
+            attempt(response_key)
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        request(
+            &app,
+            Some(&audience),
+            "POST",
+            &response_path,
+            response_body,
+            attempt(response_key)
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            &app,
+            &audience,
+            "POST",
+            &format!("{root}/questions/{question_id}/response"),
+            json!({"response":"need_help"})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            &app,
+            &other_audience,
+            "POST",
+            &format!("{root}/questions/{question_id}/response"),
+            json!({"response":"partly_clear"})
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, speaker_state) = call(&app, &speaker, "GET", &format!("{root}/state"), json!({})).await;
+    assert_eq!(speaker_state["dashboard"]["respondents"], 2);
+    assert_eq!(speaker_state["dashboard"]["counts"]["need_help"], 1);
+    assert_eq!(speaker_state["dashboard"]["counts"]["partly_clear"], 1);
+    assert!(
+        speaker_state["question_candidates"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let (_, audience_state) =
+        call(&app, &audience, "GET", &format!("{root}/state"), json!({})).await;
+    assert_eq!(audience_state["my_response"], "need_help");
+    assert!(audience_state.get("dashboard").is_none_or(Value::is_null));
+
+    assert_eq!(
+        call(
+            &app,
+            &speaker,
+            "POST",
+            &format!("{root}/questions/{question_id}/versions"),
+            json!({"text":"Revised for clarity"})
+        )
+        .await
+        .0,
+        200
+    );
+    let evidence_rows = sqlx::query("SELECT version,evidence,question_text FROM published_question_versions WHERE question_id=$1 ORDER BY version")
+        .bind(Uuid::parse_str(question_id).unwrap()).fetch_all(&pool).await.unwrap();
+    assert_eq!(evidence_rows.len(), 2);
+    assert_eq!(
+        evidence_rows[0].get::<Value, _>("evidence"),
+        evidence_rows[1].get::<Value, _>("evidence")
+    );
+    assert_ne!(
+        evidence_rows[0].get::<String, _>("question_text"),
+        evidence_rows[1].get::<String, _>("question_text")
+    );
+    assert!(sqlx::query("UPDATE published_question_versions SET question_text='mutated' WHERE question_id=$1 AND version=1")
+        .bind(Uuid::parse_str(question_id).unwrap()).execute(&pool).await.is_err());
+    let (_, public_state) = call(&app, &audience, "GET", &format!("{root}/state"), json!({})).await;
+    assert_eq!(public_state["active_question"]["version"], 2);
+    assert_eq!(
+        public_state["active_question"]["text"],
+        "Revised for clarity"
+    );
+
+    let private_text = "A confidential written question";
+    let qa_path = format!("{root}/qa");
+    let qa_key = Uuid::new_v4();
+    let qa_body = json!({"body":private_text,"question_id":question_id});
+    assert_eq!(
+        request(
+            &app,
+            Some(&audience),
+            "POST",
+            &qa_path,
+            qa_body.clone(),
+            attempt(qa_key)
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        request(
+            &app,
+            Some(&audience),
+            "POST",
+            &qa_path,
+            qa_body,
+            attempt(qa_key)
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, own_qa) = call(&app, &audience, "GET", &format!("{root}/qa"), json!({})).await;
+    assert_eq!(own_qa["items"].as_array().unwrap().len(), 1);
+    assert_eq!(own_qa["items"][0]["question_id"], question_id);
+    let (_, other_qa) = call(
+        &app,
+        &other_audience,
+        "GET",
+        &format!("{root}/qa"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(other_qa["items"].as_array().unwrap().len(), 0);
+    let (_, staff_qa) = call(&app, &speaker, "GET", &format!("{root}/qa"), json!({})).await;
+    assert_eq!(
+        staff_qa["items"].as_array().unwrap()[0]["body"],
+        private_text
+    );
+    assert_eq!(
+        call(
+            &app,
+            &audience,
+            "POST",
+            &format!("{root}/qa"),
+            json!({"body":"x".repeat(4001)})
+        )
+        .await
+        .0,
+        400
+    );
+
+    let events = sqlx::query_scalar::<_, Value>("SELECT payload FROM room_events WHERE room_id=$1")
+        .bind(room_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|value| value.get("body").is_none()
+                && value.to_string().find(private_text).is_none())
+    );
+
+    // Independent operator sessions concurrently publishing different
+    // candidates must serialize on the room lock, leaving exactly one active.
+    let next_a = Uuid::new_v4();
+    let next_b = Uuid::new_v4();
+    for candidate_id in [next_a, next_b] {
+        let next_candidate = topic_candidate(
+            candidate_id,
+            conversation,
+            room_id,
+            session,
+            "parallel candidate",
+        );
+        assert_eq!(
+            private_topics_json(
+                &private,
+                "POST",
+                "/internal/v1/topics/candidates",
+                next_candidate
+            )
+            .await
+            .0,
+            202
+        );
+    }
+    let second_operator = boot(&app).await;
+    login(&app, &second_operator).await;
+    let path_a = format!("{root}/questions/{next_a}/publish");
+    let path_b = format!("{root}/questions/{next_b}/publish");
+    let (published_a, published_b) = tokio::join!(
+        call(&app, &speaker, "POST", &path_a, json!({})),
+        call(&app, &second_operator, "POST", &path_b, json!({})),
+    );
+    assert_eq!(published_a.0, 200);
+    assert_eq!(published_b.0, 200);
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM published_questions WHERE room_id=$1 AND active=true",
+    )
+    .bind(room_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active_count, 1);
     finish(pool, admin, schema).await;
 }

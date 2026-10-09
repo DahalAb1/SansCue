@@ -160,6 +160,10 @@ pub fn router(access: Access) -> Router {
         .route("/join/{token}", post(mutate))
         .route("/invitations/{token}/redeem", post(mutate))
         .route("/rooms/{room}/state", get(read))
+        .route("/rooms/{room}/qa", get(read).post(mutate))
+        .route("/rooms/{room}/questions/{question}/versions", post(mutate))
+        .route("/rooms/{room}/questions/{question}/publish", post(mutate))
+        .route("/rooms/{room}/questions/{question}/response", post(mutate))
         .route("/rooms/{room}/invitations", get(read).post(mutate))
         .route("/rooms/{room}/memberships", get(read))
         .route(
@@ -471,6 +475,45 @@ fn json_content_type(headers: &HeaderMap) -> bool {
 
 fn check_shape(path: &str, body: &Value) -> Result<()> {
     let object = body.as_object().ok_or_else(invalid)?;
+    let p = parts(path);
+    if p.len() == 3 && p[0] == "rooms" && p[2] == "qa" {
+        let allowed = ["body", "question_id"];
+        if object
+            .get("body")
+            .and_then(Value::as_str)
+            .is_none_or(|s| s.trim().is_empty() || s.chars().count() > 4000)
+            || object.keys().any(|k| !allowed.contains(&k.as_str()))
+            || object
+                .get("question_id")
+                .is_some_and(|v| !v.is_null() && !v.is_string())
+        {
+            return Err(invalid());
+        }
+        return Ok(());
+    }
+    if p.len() == 5 && p[0] == "rooms" && p[2] == "questions" {
+        return match p[4] {
+            "publish" if object.is_empty() => Ok(()),
+            "response"
+                if object.len() == 1
+                    && matches!(
+                        body["response"].as_str(),
+                        Some("clear" | "partly_clear" | "need_help")
+                    ) =>
+            {
+                Ok(())
+            }
+            "versions"
+                if object.len() == 1
+                    && body["text"]
+                        .as_str()
+                        .is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 1000) =>
+            {
+                Ok(())
+            }
+            _ => Err(invalid()),
+        };
+    }
     if path.ends_with("/bee/bind") {
         let allowed = ["conversation_id", "source_conversation_id"];
         if !object.contains_key("conversation_id")
@@ -594,7 +637,20 @@ async fn authorize_replay(
         {
             return Err(missing());
         }
-        return require_speaker(&member);
+        let p = parts(path);
+        if p.len() < 3 || p[0] != "rooms" || p[1].parse::<Uuid>().ok() != Some(room_id) {
+            return Err(missing());
+        }
+        let role: String = member.get("role");
+        let permitted = match p.get(2).copied() {
+            Some("qa") if p.len() == 3 => role == "audience",
+            Some("questions") if p.len() == 5 && p[4] == "response" => role == "audience",
+            Some("questions") if p.len() == 5 && matches!(p[4], "publish" | "versions") => {
+                role == "speaker"
+            }
+            _ => role == "speaker",
+        };
+        return if permitted { Ok(()) } else { Err(forbidden()) };
     }
     let Some(member) = member else {
         return Err(missing());
@@ -686,7 +742,18 @@ async fn resolve(
         let room_id = id(p[1])?;
         room(tx, room_id).await?;
         let member = membership(tx, room_id, session, security).await?;
-        require_speaker(&member)?;
+        let role: String = member.get("role");
+        let role_allowed = match p.get(2).copied() {
+            Some("qa") => role == "audience",
+            Some("questions") if p.len() == 5 && p[4] == "response" => role == "audience",
+            Some("questions") if p.len() == 5 && matches!(p[4], "publish" | "versions") => {
+                role == "speaker"
+            }
+            _ => role == "speaker",
+        };
+        if !role_allowed {
+            return Err(forbidden());
+        }
         return Ok(Context {
             room_id: Some(room_id),
             member: Some(member),
@@ -829,6 +896,10 @@ async fn apply(
         return create_room(tx, body, session_id).await;
     }
     let room_id = ctx.room_id.ok_or_else(missing)?;
+    let actor_membership_id = ctx
+        .member
+        .as_ref()
+        .map(|member| member.get::<Uuid, _>("id"));
     let p = parts(path);
     let body = if p.first() == Some(&"join") {
         join_room(tx, room_id, session_id, ctx.member).await?
@@ -850,6 +921,21 @@ async fn apply(
         bind_bee(tx, room_id, body).await?
     } else if p.get(2) == Some(&"bee") && p.len() == 4 && p[3] == "unbind" {
         unbind_bee(tx, room_id).await?
+    } else if p.get(2) == Some(&"questions") && p.len() == 5 && p[4] == "publish" {
+        publish_question(tx, room_id, id(p[3])?).await?
+    } else if p.get(2) == Some(&"questions") && p.len() == 5 && p[4] == "response" {
+        set_question_response(
+            tx,
+            room_id,
+            id(p[3])?,
+            body,
+            actor_membership_id.ok_or_else(missing)?,
+        )
+        .await?
+    } else if p.get(2) == Some(&"questions") && p.len() == 5 && p[4] == "versions" {
+        add_question_version(tx, room_id, id(p[3])?, body).await?
+    } else if p.get(2) == Some(&"qa") && p.len() == 3 {
+        create_written_question(tx, room_id, actor_membership_id.ok_or_else(missing)?, body).await?
     } else {
         return Err(missing());
     };
@@ -902,6 +988,198 @@ async fn bind_bee(
     sqlx::query("INSERT INTO bee_command_outbox(command_id,room_id,conversation_id,command_type,revision,payload) VALUES($1,$2,$3,'bind',$4,$5)").bind(command_id).bind(room_id).bind(conversation).bind(rev).bind(payload).execute(&mut **tx).await?;
     change(tx, room_id, false).await?;
     Ok(json!({"status":"binding","command_id":command_id,"revision":rev}))
+}
+
+async fn active_question(
+    tx: &mut Transaction<'_, Postgres>,
+    room_id: Uuid,
+    role: &str,
+) -> Result<Value> {
+    let Some(row) = sqlx::query("SELECT p.question_id,p.current_version,v.question_text,v.evidence FROM published_questions p JOIN published_question_versions v ON v.question_id=p.question_id AND v.version=p.current_version WHERE p.room_id=$1 AND p.active=true")
+        .bind(room_id).fetch_optional(&mut **tx).await? else { return Ok(Value::Null); };
+    let mut result = json!({"id":row.get::<Uuid,_>("question_id"),"version":row.get::<i32,_>("current_version"),"text":row.get::<String,_>("question_text")});
+    if role != "audience" {
+        result["evidence"] = row.get("evidence");
+        let versions = sqlx::query("SELECT version,question_text,created_at FROM published_question_versions WHERE question_id=$1 ORDER BY version DESC")
+            .bind(row.get::<Uuid,_>("question_id")).fetch_all(&mut **tx).await?;
+        result["versions"] = json!(versions.into_iter().map(|v| json!({"version":v.get::<i32,_>("version"),"text":v.get::<String,_>("question_text"),"created_at":v.get::<DateTime<Utc>,_>("created_at")})).collect::<Vec<_>>());
+    }
+    Ok(result)
+}
+
+async fn my_question_response(
+    tx: &mut Transaction<'_, Postgres>,
+    room_id: Uuid,
+    membership_id: Uuid,
+) -> Result<Value> {
+    let row = sqlx::query("SELECT r.response FROM question_responses r JOIN published_questions p ON p.question_id=r.question_id WHERE p.room_id=$1 AND p.active=true AND r.membership_id=$2")
+        .bind(room_id).bind(membership_id).fetch_optional(&mut **tx).await?;
+    Ok(row
+        .map(|r| json!(r.get::<String, _>("response")))
+        .unwrap_or(Value::Null))
+}
+
+async fn response_dashboard(tx: &mut Transaction<'_, Postgres>, room_id: Uuid) -> Result<Value> {
+    let row = sqlx::query("SELECT count(r.membership_id)::bigint AS respondents,count(*) FILTER(WHERE r.response='clear')::bigint AS clear,count(*) FILTER(WHERE r.response='partly_clear')::bigint AS partly_clear,count(*) FILTER(WHERE r.response='need_help')::bigint AS need_help FROM published_questions p LEFT JOIN question_responses r ON r.question_id=p.question_id WHERE p.room_id=$1 AND p.active=true GROUP BY p.question_id")
+        .bind(room_id).fetch_optional(&mut **tx).await?;
+    let Some(row) = row else {
+        return Ok(
+            json!({"respondents":0,"counts":{"clear":0,"partly_clear":0,"need_help":0},"percentages":{"clear":null,"partly_clear":null,"need_help":null}}),
+        );
+    };
+    let respondents: i64 = row.get("respondents");
+    let clear: i64 = row.get("clear");
+    let partly: i64 = row.get("partly_clear");
+    let help: i64 = row.get("need_help");
+    let pct = |value: i64| {
+        if respondents == 0 {
+            Value::Null
+        } else {
+            json!(value as f64 * 100.0 / respondents as f64)
+        }
+    };
+    Ok(
+        json!({"respondents":respondents,"counts":{"clear":clear,"partly_clear":partly,"need_help":help},"percentages":{"clear":pct(clear),"partly_clear":pct(partly),"need_help":pct(help)}}),
+    )
+}
+
+async fn written_question_list(
+    tx: &mut Transaction<'_, Postgres>,
+    room_id: Uuid,
+    member_id: Uuid,
+    role: &str,
+) -> Result<Value> {
+    let rows = if role == "audience" {
+        sqlx::query("SELECT message_id,question_id,body,created_at FROM written_questions WHERE room_id=$1 AND membership_id=$2 ORDER BY created_at DESC LIMIT 100")
+            .bind(room_id).bind(member_id).fetch_all(&mut **tx).await?
+    } else {
+        sqlx::query("SELECT message_id,question_id,body,created_at FROM written_questions WHERE room_id=$1 ORDER BY created_at DESC LIMIT 200")
+            .bind(room_id).fetch_all(&mut **tx).await?
+    };
+    Ok(
+        json!({"items":rows.into_iter().map(|r| json!({"message_id":r.get::<Uuid,_>("message_id"),"question_id":r.get::<Option<Uuid>,_>("question_id"),"body":r.get::<String,_>("body"),"created_at":r.get::<DateTime<Utc>,_>("created_at")})).collect::<Vec<_>>()}),
+    )
+}
+
+async fn publish_question(
+    tx: &mut Transaction<'_, Postgres>,
+    room_id: Uuid,
+    candidate_id: Uuid,
+) -> Result<Value> {
+    // Keep all active-pointer changes serialized, even if this helper is reused
+    // outside the HTTP mutation path (which already takes this lock).
+    room(tx, room_id).await?;
+    let candidate = sqlx::query(
+        "SELECT candidate_text,evidence FROM topic_candidates WHERE candidate_id=$1 AND room_id=$2",
+    )
+    .bind(candidate_id)
+    .bind(room_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(missing)?;
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM published_questions WHERE candidate_id=$1)",
+    )
+    .bind(candidate_id)
+    .fetch_one(&mut **tx)
+    .await?
+    {
+        return Err(conflict(
+            "question_already_published",
+            "Candidate has already been published",
+        ));
+    }
+    sqlx::query("UPDATE published_questions SET active=false,updated_at=now() WHERE room_id=$1 AND active=true").bind(room_id).execute(&mut **tx).await?;
+    let question_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO published_questions(question_id,room_id,candidate_id) VALUES($1,$2,$3)",
+    )
+    .bind(question_id)
+    .bind(room_id)
+    .bind(candidate_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("INSERT INTO published_question_versions(question_id,version,candidate_id,question_text,evidence) VALUES($1,1,$2,$3,$4)")
+        .bind(question_id).bind(candidate_id).bind(candidate.get::<String,_>("candidate_text")).bind(candidate.get::<Value,_>("evidence")).execute(&mut **tx).await?;
+    change_with_resources(
+        tx,
+        room_id,
+        "all",
+        json!(["state", "question_candidates", "dashboard"]),
+    )
+    .await?;
+    Ok(json!({"question_id":question_id,"version":1,"published":true}))
+}
+
+async fn add_question_version(
+    tx: &mut Transaction<'_, Postgres>,
+    room_id: Uuid,
+    question_id: Uuid,
+    body: &Value,
+) -> Result<Value> {
+    room(tx, room_id).await?;
+    let current = sqlx::query("SELECT p.current_version,v.candidate_id,v.evidence FROM published_questions p JOIN published_question_versions v ON v.question_id=p.question_id AND v.version=p.current_version WHERE p.question_id=$1 AND p.room_id=$2 AND p.active=true FOR UPDATE OF p")
+        .bind(question_id).bind(room_id).fetch_optional(&mut **tx).await?.ok_or_else(missing)?;
+    let version: i32 = current.get("current_version");
+    let next = version.checked_add(1).ok_or_else(invalid)?;
+    let text = body["text"].as_str().ok_or_else(invalid)?;
+    sqlx::query("INSERT INTO published_question_versions(question_id,version,candidate_id,question_text,evidence) VALUES($1,$2,$3,$4,$5)")
+        .bind(question_id).bind(next).bind(current.get::<Uuid,_>("candidate_id")).bind(text).bind(current.get::<Value,_>("evidence")).execute(&mut **tx).await?;
+    sqlx::query(
+        "UPDATE published_questions SET current_version=$2,updated_at=now() WHERE question_id=$1",
+    )
+    .bind(question_id)
+    .bind(next)
+    .execute(&mut **tx)
+    .await?;
+    change_with_resources(tx, room_id, "all", json!(["state", "dashboard"])).await?;
+    Ok(json!({"question_id":question_id,"version":next}))
+}
+
+async fn set_question_response(
+    tx: &mut Transaction<'_, Postgres>,
+    room_id: Uuid,
+    question_id: Uuid,
+    body: &Value,
+    member_id: Uuid,
+) -> Result<Value> {
+    let response = body["response"].as_str().ok_or_else(invalid)?;
+    let active = sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM published_questions WHERE room_id=$1 AND question_id=$2 AND active=true)")
+        .bind(room_id).bind(question_id).fetch_one(&mut **tx).await?;
+    if !active {
+        return Err(missing());
+    }
+    sqlx::query("INSERT INTO question_responses(question_id,membership_id,response) VALUES($1,$2,$3) ON CONFLICT(question_id,membership_id) DO UPDATE SET response=EXCLUDED.response,updated_at=now()")
+        .bind(question_id).bind(member_id).bind(response).execute(&mut **tx).await?;
+    change_with_resources(tx, room_id, "all", json!(["state", "dashboard"])).await?;
+    Ok(json!({"question_id":question_id,"response":response}))
+}
+
+async fn create_written_question(
+    tx: &mut Transaction<'_, Postgres>,
+    room_id: Uuid,
+    member_id: Uuid,
+    body: &Value,
+) -> Result<Value> {
+    let text = body["body"].as_str().ok_or_else(invalid)?;
+    let question_id = match body.get("question_id").filter(|v| !v.is_null()) {
+        Some(v) => {
+            let question =
+                Uuid::parse_str(v.as_str().ok_or_else(invalid)?).map_err(|_| invalid())?;
+            let active = sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM published_questions WHERE room_id=$1 AND question_id=$2 AND active=true)")
+                .bind(room_id).bind(question).fetch_one(&mut **tx).await?;
+            if !active {
+                return Err(invalid());
+            }
+            Some(question)
+        }
+        None => None,
+    };
+    let message_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO written_questions(message_id,room_id,membership_id,question_id,body) VALUES($1,$2,$3,$4,$5)")
+        .bind(message_id).bind(room_id).bind(member_id).bind(question_id).bind(text).execute(&mut **tx).await?;
+    change_with_resources(tx, room_id, "all", json!(["qa"])).await?;
+    Ok(json!({"message_id":message_id,"created":true}))
 }
 
 async fn unbind_bee(tx: &mut Transaction<'_, Postgres>, room_id: Uuid) -> Result<Value> {
@@ -1253,11 +1531,19 @@ async fn read(
     let member = membership(&mut tx, room_id, &session, &access.security).await?;
     let body = if p[2] == "state" {
         let mut state = snapshot(&room_row, &member);
+        state["active_question"] = active_question(&mut tx, room_id, member.get("role")).await?;
+        if member.get::<String, _>("role") == "audience" {
+            state["my_response"] = my_question_response(&mut tx, room_id, member.get("id")).await?;
+        } else {
+            state["dashboard"] = response_dashboard(&mut tx, room_id).await?;
+        }
         if member.get::<String, _>("role") != "audience" {
             state["bee"] = bee_snapshot(&mut tx, room_id).await?;
             state["question_candidates"] = topic_candidates(&mut tx, room_id).await?;
         }
         state
+    } else if p[2] == "qa" {
+        written_question_list(&mut tx, room_id, member.get("id"), member.get("role")).await?
     } else if p[2] == "memberships" || p[2] == "invitations" {
         require_speaker(&member)?;
         let (limit, after) = list_window(uri.query())?;
@@ -1410,7 +1696,7 @@ pub fn internal_router(access: Access) -> Router {
 }
 
 async fn topic_candidates(tx: &mut Transaction<'_, Postgres>, room: Uuid) -> Result<Value> {
-    let rows=sqlx::query("SELECT candidate_id,event_id,candidate_text,generator_version,evidence,created_at FROM topic_candidates WHERE room_id=$1 ORDER BY created_at DESC LIMIT 50")
+    let rows=sqlx::query("SELECT candidate_id,event_id,candidate_text,generator_version,evidence,created_at FROM topic_candidates c WHERE room_id=$1 AND NOT EXISTS(SELECT 1 FROM published_questions p WHERE p.candidate_id=c.candidate_id) ORDER BY created_at DESC LIMIT 50")
         .bind(room).fetch_all(&mut **tx).await?;
     Ok(Value::Array(
         rows.into_iter()

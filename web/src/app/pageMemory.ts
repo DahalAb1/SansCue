@@ -37,3 +37,25 @@ export function keepDraft(key: string, value: string) {
   if (value) drafts.set(key, value);
   else drafts.delete(key);
 }
+
+type PublishedQuestionDraft = { questionId: string; version: number; text: string };
+
+export function memoryPublishedQuestionDraft(key: string, questionId: string, version: number, fallback: string): string {
+  const raw = drafts.get(key);
+  if (!raw) return fallback;
+  try {
+    const draft = JSON.parse(raw) as Partial<PublishedQuestionDraft>;
+    return draft.questionId === questionId && draft.version === version && typeof draft.text === 'string'
+      ? draft.text : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function keepPublishedQuestionDraft(key: string, questionId: string, version: number, text: string) {
+  drafts.set(key, JSON.stringify({ questionId, version, text } satisfies PublishedQuestionDraft));
+}
+
+export function clearPublishedQuestionDraft(key: string) {
+  drafts.delete(key);
+}

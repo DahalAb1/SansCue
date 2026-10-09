@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import QRCode from 'qrcode';
 import { ApiError, api, deniesRoomRead, errorMessage, parseRoomState, paths } from './api';
-import type { State, Invitation, Membership, Page, LinkResult } from './api';
+import type { State, Invitation, Membership, Page, LinkResult, QuestionCandidate } from './api';
 import { followLink, selectedSection, sharePath, tabLabel } from './navigation';
-import { draftKey, keepDraft, keepInvite, keepJoin, memoryDraft, memoryInvite, memoryJoin } from './pageMemory';
+import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft } from './pageMemory';
 import { parseRoomEvent, reconnectDelay } from './live';
 
 function when(value: string): string {
@@ -35,6 +35,137 @@ export function ShareLink({ value, kind }: { value: string; kind: 'join' | 'invi
     <a href={safe} target="_blank" rel="noreferrer noopener">Open {kind === 'join' ? 'audience link' : 'TA invitation'}</a>
     <p>Copy this link now. It is kept only in this page’s memory.{kind === 'invite' && ' Share only with your intended TA; this invitation is single-use.'}</p>
   </section>;
+}
+
+function QuestionsPanel({ state, refresh, ended }: { state: State; refresh: () => Promise<boolean>; ended: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const owner = draftKey(state.room.id, state.membership.id, 'question-publication');
+  const active = state.active_question;
+  const [draft, setDraft] = useState(() => active
+    ? memoryPublishedQuestionDraft(owner, active.id, active.version, active.text)
+    : '');
+  useEffect(() => {
+    setDraft(active ? memoryPublishedQuestionDraft(owner, active.id, active.version, active.text) : '');
+  }, [owner, active?.id, active?.version]);
+  const candidates = state.question_candidates ?? [];
+  async function publish(candidate: QuestionCandidate) {
+    setBusy(true); setError('');
+    try {
+      const result = await api.mutate<{ question_id?: string; version?: number }>(paths.publishQuestion(state.room.id, candidate.candidate_id));
+      if (result.question_id && Number.isSafeInteger(result.version)) keepPublishedQuestionDraft(owner, result.question_id, result.version!, candidate.text);
+      else clearPublishedQuestionDraft(owner);
+      await refresh();
+    }
+    catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
+  }
+  async function addVersion() {
+    if (!state.active_question || draft.trim() === '') return;
+    setBusy(true); setError('');
+    try {
+      const result = await api.mutate<{ question_id?: string; version?: number }>(paths.questionVersion(state.room.id, state.active_question.id), { text: draft });
+      if (result.question_id && Number.isSafeInteger(result.version)) keepPublishedQuestionDraft(owner, result.question_id, result.version!, draft);
+      else clearPublishedQuestionDraft(owner);
+      await refresh();
+    }
+    catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
+  }
+  return <>
+    {error && <p role="alert" class="error">{error}</p>}
+    <h3>Published question</h3>
+    {state.active_question ? <>
+      <p>{state.active_question.text} <small>Version {state.active_question.version}</small></p>
+      {state.active_question.versions && <ul aria-label="Immutable published versions">{state.active_question.versions.map(item => <li key={item.version}><strong>Version {item.version}</strong>: {item.text} <small>{when(item.created_at)}</small></li>)}</ul>}
+      {state.membership.role === 'speaker' && !ended && <>
+        <label>New immutable version<textarea rows={3} maxLength={1000} value={draft} onInput={e => {
+          const value = e.currentTarget.value;
+          setDraft(value);
+          keepPublishedQuestionDraft(owner, state.active_question!.id, state.active_question!.version, value);
+        }} /></label>
+        <button disabled={busy || draft.trim() === state.active_question.text} onClick={() => void addVersion()}>Publish new version</button>
+      </>}
+    </> : <p>No question is published.</p>}
+    <h3>Evidence-backed candidates</h3>
+    <p><strong>Development preview — deterministic stub-v1, not AI-generated.</strong> Candidates are visible only to the speaker and TAs. Evidence is retained as an immutable copy when published.</p>
+    {candidates.length === 0 ? <p role="status">No development candidates yet.</p> : <ul class="access-list">{candidates.map(candidate => <li key={candidate.candidate_id}>
+      <div><strong>{candidate.text}</strong><p>Unpublished · {candidate.generator_version} · evidence ordinal {candidate.evidence.ingest_ordinal}</p><blockquote>{candidate.evidence.excerpt}</blockquote><small>Transcript event {candidate.event_id}</small></div>
+      {state.membership.role === 'speaker' && !ended && <button disabled={busy} onClick={() => void publish(candidate)}>Publish</button>}
+    </li>)}</ul>}
+  </>;
+}
+
+function FeedbackPanel({ state, ended, refresh }: { state: State; ended: boolean; refresh: () => Promise<boolean> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const responses = [{ value: 'clear', label: 'Clear' }, { value: 'partly_clear', label: 'Partly clear' }, { value: 'need_help', label: 'Need help' }] as const;
+  async function respond(value: typeof responses[number]['value']) {
+    if (!state.active_question) return;
+    setBusy(true); setError('');
+    try { await api.mutate(paths.respond(state.room.id, state.active_question.id), { response: value }); await refresh(); }
+    catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
+  }
+  return <>
+    {error && <p role="alert" class="error">{error}</p>}
+    {state.active_question ? <>
+      <h3>{state.active_question.text}</h3>
+      <p>How clear is this question?</p>
+      <div class="actions">{responses.map(item => <button key={item.value} aria-pressed={state.my_response === item.value} disabled={busy || ended} onClick={() => void respond(item.value)}>{item.label}</button>)}</div>
+      {state.my_response && <p role="status">Your response: {responses.find(item => item.value === state.my_response)?.label}</p>}
+    </> : <p>No active question to respond to.</p>}
+  </>;
+}
+
+function DashboardPanel({ state }: { state: State }) {
+  const dashboard = state.dashboard;
+  if (!dashboard) return <p role="status">Response dashboard unavailable.</p>;
+  return <>
+    <p>{dashboard.respondents} audience response{dashboard.respondents === 1 ? '' : 's'}</p>
+    <dl><dt>Clear</dt><dd>{dashboard.counts.clear}</dd><dt>Partly clear</dt><dd>{dashboard.counts.partly_clear}</dd><dt>Need help</dt><dd>{dashboard.counts.need_help}</dd></dl>
+  </>;
+}
+
+type WrittenQuestion = { message_id: string; question_id: string | null; body: string; created_at: string };
+function QaPanel({ state, ended, revision }: { state: State; ended: boolean; revision: number }) {
+  const [items, setItems] = useState<WrittenQuestion[]>([]);
+  const owner = draftKey(state.room.id, state.membership.id, state.membership.role);
+  const [draft, setDraft] = useState(() => memoryDraft(owner));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const role = state.membership.role;
+  useEffect(() => setDraft(memoryDraft(owner)), [owner]);
+  useEffect(() => {
+    let current = true;
+    api.read<{items?: unknown}>(paths.qa(state.room.id)).then(result => {
+      if (!current) return;
+      const list = Array.isArray(result.items) ? result.items as WrittenQuestion[] : [];
+      setItems(list);
+    }).catch(reason => { if (current) setError(errorMessage(reason)); });
+    return () => { current = false; };
+  }, [state.room.id, revision]);
+  async function submit() {
+    if (!draft.trim()) return;
+    setBusy(true); setError('');
+    try {
+      await api.mutate(paths.qa(state.room.id), { body: draft, question_id: state.active_question?.id ?? null });
+      setDraft('');
+      keepDraft(owner, '');
+      const result = await api.read<{items?: unknown}>(paths.qa(state.room.id));
+      setItems(Array.isArray(result.items) ? result.items as WrittenQuestion[] : []);
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
+  }
+  return <>
+    {error && <p role="alert" class="error">{error}</p>}
+    {role === 'audience' && <>
+      <label>Write a question<textarea rows={4} maxLength={4000} value={draft} readOnly={ended} onInput={e => { const value = e.currentTarget.value; setDraft(value); keepDraft(owner, value); }} /></label>
+      <button disabled={busy || ended || !draft.trim()} onClick={() => void submit()}>Send question</button>
+      <p>Your written questions are private to you and the speaker/TAs.</p>
+    </>}
+    {items.length === 0 ? <p role="status">No written questions.</p> : <ul class="access-list">{items.map(item => <li key={item.message_id}><div><p>{item.body}</p><small>{when(item.created_at)}</small></div></li>)}</ul>}
+  </>;
 }
 
 type IssuedInvite = { id: string; expires: string; link: string | null };
@@ -208,22 +339,15 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
   const [state, setState] = useState<State>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [draft, setDraft] = useState('');
   const [liveStatus, setLiveStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'ended'>('connecting');
   const seenRevision = useRef(-1);
   const liveSequence = useRef(0);
-  const draftOwner = useRef('');
   const refreshLive = useRef<(() => Promise<boolean>) | undefined>(undefined);
 
   function show(next: State) {
     if (next.revision < seenRevision.current) return;
     seenRevision.current = next.revision;
     liveSequence.current = Math.max(liveSequence.current, next.sequence);
-    const owner = draftKey(id, next.membership.id, next.membership.role);
-    if (draftOwner.current !== owner) {
-      draftOwner.current = owner;
-      setDraft(memoryDraft(owner));
-    }
     setState(next);
   }
 
@@ -248,7 +372,6 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
   useEffect(() => {
     seenRevision.current = -1;
     liveSequence.current = 0;
-    draftOwner.current = '';
     setState(undefined);
     void refresh();
   }, [id]);
@@ -336,7 +459,6 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
 
   const { tabs, selected, redirected } = selectedSection(state.membership.role, tab);
   const ended = state.room.status === 'ended';
-  const owner = draftKey(id, state.membership.id, state.membership.role);
   return <section class="room">
     <p class="eyebrow">{state.membership.role} · {state.room.status}</p>
     <h1>{state.room.title}</h1>
@@ -379,26 +501,11 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
         ? <Access state={state} refresh={refresh} loseAccess={() => { setError('Room access changed. Refresh or sign in again.'); setState(undefined); }} />
         : <>
           <h2>{tabLabel(selected)}</h2>
-          {selected === 'qa' ? state.membership.role === 'audience' ? <>
-            <p>Written Q&A is private to you and the speaker/TAs. Submission is not implemented yet.</p>
-            <label>Your unsent question draft
-              <textarea rows={5} maxLength={4000} value={draft} readOnly={ended} aria-describedby="draft-help" onInput={event => {
-                const value = event.currentTarget.value;
-                setDraft(value);
-                keepDraft(owner, value);
-              }} />
-            </label>
-            <p id="draft-help">{ended ? 'This room is read-only.' : 'Draft only — not sent or saved to the server.'} Your draft survives section changes in this page, but not a page reload.</p>
-          </> : <p>Private Q&A review is not implemented in this stage. No participant questions are loaded here.</p> : <>
-            <p>{ended ? 'The room has ended. There is no active question.' : state.active_question ? 'A published question exists. Question display and participation arrive in a later stage.' : 'No active question. Waiting for the speaker to publish one.'}</p>
-            {selected === 'questions' && state.membership.role !== 'audience' ? <>
-              <p><strong>Development preview — deterministic stub-v1, not AI-generated.</strong> Candidates are unpublished and visible only to the speaker and TAs. One preview is created per accepted transcript event for pipeline development.</p>
-              {(state.question_candidates ?? []).length === 0 ? <p role="status">No development candidates yet. Candidates appear after a transcript event is processed.</p> : <ul class="access-list">{state.question_candidates!.map(candidate => <li key={candidate.candidate_id}>
-                <div><strong>{candidate.text}</strong><p>Unpublished · {candidate.generator_version} · evidence ordinal {candidate.evidence.ingest_ordinal}</p><blockquote>{candidate.evidence.excerpt}</blockquote><small>Transcript event {candidate.event_id}</small></div>
-              </li>)}</ul>}
-              <p>Publishing, audience display, rating, and model-based generation are not enabled.</p>
-            </> : <p>{selected === 'dashboard' ? 'Response metrics are not implemented in this stage.' : selected === 'questions' ? 'Candidate preview is not available to audience members.' : 'Response submission is not implemented in this stage.'}</p>}
-          </>}
+          {selected === 'qa' ? <QaPanel state={state} ended={ended} revision={state.revision} />
+            : selected === 'response' ? <FeedbackPanel state={state} ended={ended} refresh={refresh} />
+            : selected === 'dashboard' ? <DashboardPanel state={state} />
+            : selected === 'questions' && state.membership.role !== 'audience' ? <QuestionsPanel state={state} refresh={refresh} ended={ended} />
+            : <p>{selected === 'questions' ? 'Candidate preview is not available to audience members.' : 'No active question is available.'}</p>}
         </>}
     </div>
   </section>;
