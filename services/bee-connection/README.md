@@ -78,7 +78,7 @@ backup/restore, container builds and live-device recovery are separate checks.
 ### Authoring verification (October 9, 2026)
 
 - Formatting and strict workspace Clippy passed.
-- Focused contract/replay tests: 3 passed; pipeline tests: 13 passed.
+- Focused contract/replay tests: 3 passed; pipeline tests: 15 passed.
 - Sessions library regression tests: 6 passed.
 - Bee persistence test and full workspace suite were attempted and failed on the
   required missing BEE_TEST_DATABASE_URL (not skipped). DATABASE_URL was also
