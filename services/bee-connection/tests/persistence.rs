@@ -81,5 +81,36 @@ async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine
     assert_eq!(after.observations()[2].observation, malformed);
     assert_eq!(after.observations().last().unwrap().ordinal, 5);
     assert_eq!(after.gaps()[0].status, GapStatus::Suspected);
+    let at = "2026-10-08T00:00:07Z".parse().unwrap();
+    restarted
+        .ingest(
+            id,
+            Observation {
+                received_at: at,
+                raw: vec![],
+                decoded: Ok(Signal::Reconnected),
+            },
+        )
+        .await
+        .unwrap();
+    restarted
+        .ingest(
+            id,
+            Observation {
+                received_at: at,
+                raw: b"second".to_vec(),
+                decoded: Ok(Signal::Transcript(Transcript {
+                    text: "second".into(),
+                    source_id: Some("synthetic-2".into()),
+                    source_sequence: Some(2),
+                })),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.load(id).await.unwrap().gaps()[0].status,
+        GapStatus::Recovered
+    );
     restarted.close().await;
 }

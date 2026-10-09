@@ -218,3 +218,50 @@ fn internal_uuid_collision_is_quarantined_and_receive_time_is_not_sort_order() {
     assert_eq!(p.events()[1].ingest_ordinal, 3);
     assert!(p.events()[1].received_at < p.events()[0].received_at);
 }
+
+#[test]
+fn separate_disconnects_keep_independent_recovery_evidence() {
+    let mut p = pipeline(evidence());
+    ingest(&mut p, transcript(Some(1), Some("a"), "one"));
+    ingest(&mut p, observation(Signal::Disconnected));
+    ingest(&mut p, observation(Signal::Reconnected));
+    ingest(&mut p, transcript(Some(3), Some("c"), "three"));
+    ingest(&mut p, observation(Signal::Disconnected));
+    ingest(&mut p, observation(Signal::Reconnected));
+    ingest(&mut p, transcript(Some(4), Some("d"), "four"));
+    let disconnects: Vec<_> = p.gaps().iter().filter(|g| g.disconnect).collect();
+    assert_eq!(disconnects.len(), 2);
+    assert_eq!(disconnects[0].status, GapStatus::Confirmed);
+    assert_eq!(disconnects[1].status, GapStatus::Recovered);
+    ingest(&mut p, transcript(Some(2), Some("b"), "two"));
+    assert!(p.gaps().iter().all(|g| g.status == GapStatus::Recovered));
+}
+
+#[test]
+fn source_id_and_sequence_evidence_cannot_merge_distinct_events() {
+    let mut p = pipeline(evidence());
+    ingest(&mut p, transcript(Some(1), Some("a"), "same"));
+    ingest(&mut p, transcript(Some(2), Some("b"), "same"));
+    assert!(matches!(
+        ingest(&mut p, transcript(Some(2), Some("a"), "same")),
+        Disposition::Quarantined { .. }
+    ));
+    assert_eq!(p.events().len(), 2);
+}
+
+#[test]
+fn stable_id_only_deduplicates_without_claiming_sequence_recovery() {
+    let mut p = pipeline(Capabilities {
+        stable_ids: true,
+        contiguous_sequence: false,
+    });
+    ingest(&mut p, transcript(None, Some("a"), "one"));
+    ingest(&mut p, observation(Signal::Disconnected));
+    ingest(&mut p, observation(Signal::Reconnected));
+    assert!(matches!(
+        ingest(&mut p, transcript(None, Some("a"), "one")),
+        Disposition::Duplicate { .. }
+    ));
+    ingest(&mut p, transcript(None, Some("b"), "two"));
+    assert_eq!(p.gaps()[0].status, GapStatus::Suspected);
+}

@@ -33,6 +33,10 @@ quarantine and duplicate observations, so event ordinals need not be contiguous.
 Arrival order is never described as speech order. Wall-clock times may regress.
 
 Only a source-verified capability permits source-ID/sequence deduplication.
+Capabilities apply to one immutable conversation stream: stable IDs cannot be
+reused for revisions, and contiguous sequence numbers cannot reset or roll over.
+If a real source differs, its adapter must map those semantics explicitly or
+disable the capability; numeric metadata alone does not enable it.
 Without identity evidence, identical text is two observations, not a duplicate.
 The recording format is a SansCue synthetic fixture, NOT a Bee wire protocol.
 
