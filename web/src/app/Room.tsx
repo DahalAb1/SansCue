@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import { ApiError, api, deniesRoomRead, errorMessage, parseRoomState, paths } from './api';
 import type { State, Invitation, Membership, Page, LinkResult, QuestionCandidate } from './api';
 import { followLink, selectedSection, sharePath, tabLabel } from './navigation';
-import { keepInvite, keepJoin, memoryInvite, memoryJoin } from './pageMemory';
+import { draftKey, keepDraft, keepInvite, keepJoin, memoryDraft, memoryInvite, memoryJoin } from './pageMemory';
 import { parseRoomEvent, reconnectDelay } from './live';
 
 function when(value: string): string {
@@ -109,10 +109,12 @@ function DashboardPanel({ state }: { state: State }) {
 type WrittenQuestion = { message_id: string; question_id: string | null; body: string; created_at: string };
 function QaPanel({ state, ended, revision }: { state: State; ended: boolean; revision: number }) {
   const [items, setItems] = useState<WrittenQuestion[]>([]);
-  const [draft, setDraft] = useState('');
+  const owner = draftKey(state.room.id, state.membership.id, state.membership.role);
+  const [draft, setDraft] = useState(() => memoryDraft(owner));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const role = state.membership.role;
+  useEffect(() => setDraft(memoryDraft(owner)), [owner]);
   useEffect(() => {
     let current = true;
     api.read<{items?: unknown}>(paths.qa(state.room.id)).then(result => {
@@ -128,6 +130,7 @@ function QaPanel({ state, ended, revision }: { state: State; ended: boolean; rev
     try {
       await api.mutate(paths.qa(state.room.id), { body: draft, question_id: state.active_question?.id ?? null });
       setDraft('');
+      keepDraft(owner, '');
       const result = await api.read<{items?: unknown}>(paths.qa(state.room.id));
       setItems(Array.isArray(result.items) ? result.items as WrittenQuestion[] : []);
     } catch (reason) { setError(errorMessage(reason)); }
@@ -136,7 +139,7 @@ function QaPanel({ state, ended, revision }: { state: State; ended: boolean; rev
   return <>
     {error && <p role="alert" class="error">{error}</p>}
     {role === 'audience' && <>
-      <label>Write a question<textarea rows={4} maxLength={4000} value={draft} readOnly={ended} onInput={e => setDraft(e.currentTarget.value)} /></label>
+      <label>Write a question<textarea rows={4} maxLength={4000} value={draft} readOnly={ended} onInput={e => { const value = e.currentTarget.value; setDraft(value); keepDraft(owner, value); }} /></label>
       <button disabled={busy || ended || !draft.trim()} onClick={() => void submit()}>Send question</button>
       <p>Your written questions are private to you and the speaker/TAs.</p>
     </>}

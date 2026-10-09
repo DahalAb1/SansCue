@@ -336,6 +336,16 @@ test('issued links and unsent drafts stay in page memory only', () => {
   assert.equal(memoryDraft(key), '');
 });
 
+test('written Q&A drafts are keyed by membership and survive section unmounts', () => {
+  const key = draftKey(roomId, memberId, 'audience');
+  keepDraft(key, 'Question draft before opening another tab');
+  // QaPanel remounts from the same page-memory entry when its tab is selected again.
+  assert.equal(memoryDraft(draftKey(roomId, memberId, 'audience')), 'Question draft before opening another tab');
+  assert.equal(memoryDraft(draftKey(roomId, roomId, 'audience')), '');
+  assert.equal(memoryDraft(draftKey(roomId, memberId, 'ta')), '');
+  keepDraft(key, '');
+});
+
 test('client source does not persist secrets or log them', () => {
   const banned = /localStorage|sessionStorage|document\.cookie|console\.(log|debug|info|warn|error)/;
   const sources = files('src').filter(path => path.endsWith('.ts') || path.endsWith('.tsx'));

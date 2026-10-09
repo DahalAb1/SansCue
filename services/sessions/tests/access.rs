@@ -1876,13 +1876,30 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
         .0,
         403
     );
+    let response_path = format!("{root}/questions/{question_id}/response");
+    let response_key = Uuid::new_v4();
+    let response_body = json!({"response":"clear"});
     assert_eq!(
-        call(
+        request(
             &app,
-            &audience,
+            Some(&audience),
             "POST",
-            &format!("{root}/questions/{question_id}/response"),
-            json!({"response":"clear"})
+            &response_path,
+            response_body.clone(),
+            attempt(response_key)
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        request(
+            &app,
+            Some(&audience),
+            "POST",
+            &response_path,
+            response_body,
+            attempt(response_key)
         )
         .await
         .0,
@@ -1960,13 +1977,30 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
     );
 
     let private_text = "A confidential written question";
+    let qa_path = format!("{root}/qa");
+    let qa_key = Uuid::new_v4();
+    let qa_body = json!({"body":private_text,"question_id":question_id});
     assert_eq!(
-        call(
+        request(
             &app,
-            &audience,
+            Some(&audience),
             "POST",
-            &format!("{root}/qa"),
-            json!({"body":private_text,"question_id":question_id})
+            &qa_path,
+            qa_body.clone(),
+            attempt(qa_key)
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        request(
+            &app,
+            Some(&audience),
+            "POST",
+            &qa_path,
+            qa_body,
+            attempt(qa_key)
         )
         .await
         .0,
@@ -2013,5 +2047,48 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
             .all(|value| value.get("body").is_none()
                 && value.to_string().find(private_text).is_none())
     );
+
+    // Independent operator sessions concurrently publishing different
+    // candidates must serialize on the room lock, leaving exactly one active.
+    let next_a = Uuid::new_v4();
+    let next_b = Uuid::new_v4();
+    for candidate_id in [next_a, next_b] {
+        let next_candidate = topic_candidate(
+            candidate_id,
+            conversation,
+            room_id,
+            session,
+            "parallel candidate",
+        );
+        assert_eq!(
+            private_topics_json(
+                &private,
+                "POST",
+                "/internal/v1/topics/candidates",
+                next_candidate
+            )
+            .await
+            .0,
+            202
+        );
+    }
+    let second_operator = boot(&app).await;
+    login(&app, &second_operator).await;
+    let path_a = format!("{root}/questions/{next_a}/publish");
+    let path_b = format!("{root}/questions/{next_b}/publish");
+    let (published_a, published_b) = tokio::join!(
+        call(&app, &speaker, "POST", &path_a, json!({})),
+        call(&app, &second_operator, "POST", &path_b, json!({})),
+    );
+    assert_eq!(published_a.0, 200);
+    assert_eq!(published_b.0, 200);
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM published_questions WHERE room_id=$1 AND active=true",
+    )
+    .bind(room_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active_count, 1);
     finish(pool, admin, schema).await;
 }

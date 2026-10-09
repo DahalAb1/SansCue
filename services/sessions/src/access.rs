@@ -637,7 +637,20 @@ async fn authorize_replay(
         {
             return Err(missing());
         }
-        return require_speaker(&member);
+        let p = parts(path);
+        if p.len() < 3 || p[0] != "rooms" || p[1].parse::<Uuid>().ok() != Some(room_id) {
+            return Err(missing());
+        }
+        let role: String = member.get("role");
+        let permitted = match p.get(2).copied() {
+            Some("qa") if p.len() == 3 => role == "audience",
+            Some("questions") if p.len() == 5 && p[4] == "response" => role == "audience",
+            Some("questions") if p.len() == 5 && matches!(p[4], "publish" | "versions") => {
+                role == "speaker"
+            }
+            _ => role == "speaker",
+        };
+        return if permitted { Ok(()) } else { Err(forbidden()) };
     }
     let Some(member) = member else {
         return Err(missing());
@@ -1053,6 +1066,9 @@ async fn publish_question(
     room_id: Uuid,
     candidate_id: Uuid,
 ) -> Result<Value> {
+    // Keep all active-pointer changes serialized, even if this helper is reused
+    // outside the HTTP mutation path (which already takes this lock).
+    room(tx, room_id).await?;
     let candidate = sqlx::query(
         "SELECT candidate_text,evidence FROM topic_candidates WHERE candidate_id=$1 AND room_id=$2",
     )
@@ -1101,6 +1117,7 @@ async fn add_question_version(
     question_id: Uuid,
     body: &Value,
 ) -> Result<Value> {
+    room(tx, room_id).await?;
     let current = sqlx::query("SELECT p.current_version,v.candidate_id,v.evidence FROM published_questions p JOIN published_question_versions v ON v.question_id=p.question_id AND v.version=p.current_version WHERE p.question_id=$1 AND p.room_id=$2 AND p.active=true FOR UPDATE OF p")
         .bind(question_id).bind(room_id).fetch_optional(&mut **tx).await?.ok_or_else(missing)?;
     let version: i32 = current.get("current_version");
