@@ -7,16 +7,49 @@ use crate::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[allow(async_fn_in_trait)]
+pub trait CommandStore: Clone + Send + Sync {
+    async fn ensure_command_conversation(&self, conversation: Uuid) -> Result<(), &'static str>;
+    async fn apply_command(
+        &self,
+        command: Uuid,
+        revision: i64,
+        action: &str,
+        binding: Binding,
+    ) -> Result<CommandOutcome, &'static str>;
+}
+
+impl CommandStore for Store {
+    async fn ensure_command_conversation(&self, conversation: Uuid) -> Result<(), &'static str> {
+        Store::ensure_command_conversation(self, conversation).await
+    }
+    async fn apply_command(
+        &self,
+        command: Uuid,
+        revision: i64,
+        action: &str,
+        binding: Binding,
+    ) -> Result<CommandOutcome, &'static str> {
+        Store::apply_command(self, command, revision, action, binding).await
+    }
+}
+
 #[derive(Clone)]
-pub struct Consumer {
+pub struct Consumer<S = Store> {
     client: reqwest::Client,
     base: String,
     token: String,
-    store: Store,
+    store: S,
 }
 
-impl Consumer {
+impl Consumer<Store> {
     pub fn new(base: &str, token: &str, store: Store) -> Result<Self, &'static str> {
+        Self::with_store(base, token, store)
+    }
+}
+
+impl<S: CommandStore> Consumer<S> {
+    pub fn with_store(base: &str, token: &str, store: S) -> Result<Self, &'static str> {
         let url = reqwest::Url::parse(base).map_err(|_| "invalid sessions internal URL")?;
         if !matches!(url.scheme(), "http" | "https")
             || token.is_empty()
@@ -90,6 +123,13 @@ impl Consumer {
                 .await
                 .map_err(|_| "sessions status delivery failed")?;
             if !status.status().is_success() {
+                let code = status.status().as_u16();
+                let body = status.json::<Value>().await.unwrap_or(Value::Null);
+                if is_superseded_status(code, &body) {
+                    self.acknowledge(id).await?;
+                    completed += 1;
+                    continue;
+                }
                 return Err("sessions status delivery rejected");
             }
             self.acknowledge(id).await?;
@@ -128,6 +168,10 @@ impl Consumer {
 
 fn should_publish_status(outcome: CommandOutcome) -> bool {
     outcome == CommandOutcome::Applied
+}
+
+fn is_superseded_status(http_status: u16, body: &Value) -> bool {
+    http_status == 409 && body["code"] == "bee_binding_stale"
 }
 
 fn parse_command(command: &Value) -> Result<(Uuid, i64, &'static str, Binding), &'static str> {
@@ -177,5 +221,25 @@ mod tests {
     fn stale_commands_are_acknowledged_without_status_publication() {
         assert!(!should_publish_status(CommandOutcome::Stale));
         assert!(should_publish_status(CommandOutcome::Applied));
+    }
+
+    #[test]
+    fn only_explicit_stale_status_conflict_is_retired() {
+        assert!(is_superseded_status(
+            409,
+            &json!({"code":"bee_binding_stale"})
+        ));
+        assert!(!is_superseded_status(
+            409,
+            &json!({"code":"bee_binding_mismatch"})
+        ));
+        assert!(!is_superseded_status(
+            401,
+            &json!({"code":"bee_binding_stale"})
+        ));
+        assert!(!is_superseded_status(
+            500,
+            &json!({"code":"bee_binding_stale"})
+        ));
     }
 }

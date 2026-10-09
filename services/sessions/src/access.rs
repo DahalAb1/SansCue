@@ -1475,6 +1475,12 @@ async fn bee_status(
     let bind_status: String = binding.get("status");
     let revision: i64 = binding.get("revision");
     let incoming_revision = status["connectivity_revision"].as_i64();
+    if incoming_revision.is_some_and(|incoming| incoming < revision) {
+        return Err(conflict(
+            "bee_binding_stale",
+            "A newer binding revision superseded this status",
+        ));
+    }
     let valid_bind = status["status"] == "bound"
         && matches!(bind_status.as_str(), "binding" | "bound")
         && conversation == Some(bound);

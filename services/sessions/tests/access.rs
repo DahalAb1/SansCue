@@ -1489,3 +1489,92 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
     assert_eq!(current["bee"]["status"], "bound");
     finish(pool, admin, schema).await;
 }
+
+#[tokio::test]
+async fn superseded_binding_status_has_machine_readable_stale_outcome() {
+    let (pool, admin, schema) = db().await;
+    let security = Security {
+        bee_credential: Some("synthetic-bee".into()),
+        ..security()
+    };
+    let app = configured_router(pool.clone(), security.clone());
+    let private = internal_router(Access {
+        pool: pool.clone(),
+        security,
+    });
+    let browser = boot(&app).await;
+    login(&app, &browser).await;
+    let (_, created) = call(
+        &app,
+        &browser,
+        "POST",
+        "/rooms",
+        json!({"title":"stale status"}),
+    )
+    .await;
+    let room = created["state"]["room"]["id"].as_str().unwrap();
+    let conversation = Uuid::new_v4();
+    let (_, bind) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"conversation_id":conversation,"source_conversation_id":null}),
+    )
+    .await;
+    let (_, unbind) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/unbind"),
+        json!({}),
+    )
+    .await;
+    let stale=private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":conversation,"status":"bound","connectivity_revision":bind["revision"]})).await;
+    assert_eq!(stale.0, 409);
+    assert_eq!(stale.1["code"], "bee_binding_stale");
+    assert_eq!(
+        private_json(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/rooms/{room}/status"),
+            json!({"binding_id":null,"status":"unbound","connectivity_revision":unbind["revision"]})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/commands/{}/ack", bind["command_id"]),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/commands/{}/ack", unbind["command_id"]),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    let current = call(
+        &app,
+        &browser,
+        "GET",
+        &format!("/rooms/{room}/state"),
+        json!({}),
+    )
+    .await
+    .1;
+    assert_eq!(current["bee"]["status"], "unbound");
+    finish(pool, admin, schema).await;
+}
