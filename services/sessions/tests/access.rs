@@ -1255,3 +1255,83 @@ async fn private_readiness_is_not_a_public_route() {
     assert_eq!(body["status"], "ready");
     finish(pool, admin, schema).await;
 }
+
+#[tokio::test]
+async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable() {
+    let (pool, admin, schema) = db().await;
+    let security = Security {
+        bee_credential: Some("synthetic-bee".into()),
+        ..security()
+    };
+    let app = configured_router(pool.clone(), security.clone());
+    let private = internal_router(Access {
+        pool: pool.clone(),
+        security,
+    });
+    let browser = boot(&app).await;
+    login(&app, &browser).await;
+    let (_, created) = call(
+        &app,
+        &browser,
+        "POST",
+        "/rooms",
+        json!({"title":"Bee test"}),
+    )
+    .await;
+    let room = created["state"]["room"]["id"].as_str().unwrap();
+    let conversation = Uuid::new_v4();
+    let (status, bound) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"conversation_id":conversation,"source_conversation_id":null}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(bound["status"], "binding");
+    let state = call(
+        &app,
+        &browser,
+        "GET",
+        &format!("/rooms/{room}/state"),
+        json!({}),
+    )
+    .await
+    .1;
+    assert_eq!(state["bee"]["status"], "binding");
+    let mut request = Request::builder()
+        .uri("/internal/v1/bee/commands")
+        .header("authorization", "Bearer synthetic-bee")
+        .body(Body::empty())
+        .unwrap();
+    let commands = private.clone().oneshot(request).await.unwrap();
+    assert_eq!(commands.status(), 200);
+    let bytes = commands.into_body().collect().await.unwrap().to_bytes();
+    let list: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(list["commands"].as_array().unwrap().len(), 1);
+    let command = list["commands"][0]["command_id"].as_str().unwrap();
+    request = Request::builder()
+        .method("POST")
+        .uri(format!("/internal/v1/bee/commands/{command}/ack"))
+        .header("authorization", "Bearer synthetic-bee")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        private.clone().oneshot(request).await.unwrap().status(),
+        200
+    );
+    assert_eq!(
+        call(
+            &app,
+            &browser,
+            "GET",
+            &format!("/rooms/{room}/state"),
+            json!({})
+        )
+        .await
+        .1["bee"]["status"],
+        "bound"
+    );
+    finish(pool, admin, schema).await;
+}
