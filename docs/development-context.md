@@ -13,6 +13,14 @@ AWS deployment and Bee/model integrations are not complete. See the
 [environment verification record](environment-verification.md) for the exact
 container-only checklist.
 
+The `feat/topics-question-candidates` worktree adds a device-independent
+accepted-transcript delivery chain, Topics-owned projection/job/candidate
+storage, and an unpublished deterministic `stub-v1` preview visible only in
+speaker/TA room snapshots. Local unit/contracts and frontend checks are
+available; DB-backed cross-service delivery and Docker startup are not yet
+verified. This does not establish real Bee device/API behavior or a model
+integration.
+
 ## Implementation agreement
 
 The [foundation contract](foundation-contract.md) records the agreed Stage 0/Stage 1 boundaries, ownership, and integration details. Use it for the immediate local foundation scope; the broader architecture and AWS goals below remain the product direction, not completed implementation.

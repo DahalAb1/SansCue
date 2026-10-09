@@ -1,29 +1,29 @@
 # Local development runtime
 
-Local-only packaging of the static Preact/Vite build behind Caddy, sessions, and PostgreSQL. Run commands from the repository root. This is not a production configuration.
+Local-only packaging of the static Preact/Vite build behind Caddy, Sessions, Bee-connection, Topics-and-questions, and their separate PostgreSQL databases. Run commands from the repository root. This is not a production configuration.
 
 ## Prerequisites and integration
 
 - Docker Engine/Desktop with a running daemon and Compose v2 supporting `up --wait --wait-timeout`; host `curl` for checks.
-- Integrate frontend and sessions before building. This branch alone has no application source. Web expects `web/package.json`, `web/package-lock.json`, `npm run build`, and output `web/dist/`. Sessions expects root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, and Cargo package/binary `sessions-service` under `services/sessions/`. The service must embed its migrations at build time.
+- Web expects `web/package.json`, `web/package-lock.json`, `npm run build`, and output `web/dist/`. Sessions, Bee-connection, and Topics-and-questions are independent Rust workspace packages; each applies only its own DB migrations.
 - Free loopback ports 8080 and 5432; host development also needs 3000 and 5173.
 - Initial builds need image/package registry access. Official Node, Caddy, Rust, Debian, and PostgreSQL images provide the runtime; no custom orchestration.
 
-Both Dockerfiles use repository-root build contexts. Root `.dockerignore` defaults to deny and allows only the current manifests, build configuration, Rust/SQL source, and TypeScript/TSX/CSS source. New source or asset types require an explicit allowlist update; do not reinclude whole application directories. Sensitive directories and credential filenames are also denied after the allowlist. Terminal descendant exclusions for every allowed path prevent extension-shaped or manifest-named directories from admitting arbitrary children; keep these exclusions last when extending the allowlist. Run `python3 deploy/check-build-context.py` with Docker/BuildKit to verify 17 required inputs, 176 harmless credential/generated fixture paths, and 150 descendants of source-shaped or manifest-named directories using two isolated scratch builds (no actual credentials or application directories are copied). No database configuration enters the browser/web build. Application images explicitly install `curl` for probes. PostgreSQL 17 includes `pg_isready`, `psql`, `pg_dump`, and `pg_restore`.
+Dockerfiles use repository-root build contexts. Root `.dockerignore` defaults to deny and allows only the current manifests, build configuration, Rust/SQL source, and TypeScript/TSX/CSS source. New source or asset types require an explicit allowlist update; do not reinclude whole application directories. Sensitive directories and credential filenames are also denied after the allowlist. Terminal descendant exclusions for every allowed path prevent extension-shaped or manifest-named directories from admitting arbitrary children; keep these exclusions last when extending the allowlist. Run `python3 deploy/check-build-context.py` with Docker/BuildKit to verify the explicit required-input allowlist and ensure harmless credential/generated fixtures and descendants of source-shaped paths are excluded using isolated scratch builds (no actual credentials or application directories are copied). No database configuration enters the browser/web build. Application images explicitly install `curl` for probes. PostgreSQL 17 includes `pg_isready`, `psql`, `pg_dump`, and `pg_restore`.
 
 ## Configure and start
 
 ```sh
 cp deploy/.env.example deploy/.env
 chmod 600 deploy/.env
-# Edit deploy/.env locally; never commit it.
+# Edit deploy/.env locally; never commit it. Replace all local-only service DB passwords and service tokens.
 docker compose --env-file deploy/.env config --quiet
 docker compose --env-file deploy/.env up --build --wait --wait-timeout 120
 docker compose --env-file deploy/.env ps
-docker compose --env-file deploy/.env logs --tail=100 web sessions sessions-db
+docker compose --env-file deploy/.env logs --tail=100 web sessions sessions-db bee-connection topics-and-questions
 ```
 
-Keep database `sessions` and local role `sessions_app`. The sample password is local-only and not production-ready. Use only URL-unreserved password characters (letters, digits, `. _ ~ -`): Compose interpolates it directly into the private sessions `DATABASE_URL`. Do not export competing `POSTGRES_*` shell values: those override the env file. If needed, inspect `docker compose --env-file deploy/.env config` only locally. **Its resolved output contains credentials; never publish it, container environment inspection, or credentials in logs/issues.**
+Keep database `sessions` and local role `sessions_app`. Bee and Topics each use their own DB, role, password, and volume. Sample passwords/tokens are local-only and not production-ready; provision distinct random service tokens outside Git for any non-local use. Use only URL-unreserved password characters (letters, digits, `. _ ~ -`): Compose interpolates them directly into the private database URLs. Do not export competing `POSTGRES_*` shell values: those override the env file. If needed, inspect `docker compose --env-file deploy/.env config` only locally. **Its resolved output contains credentials; never publish it, container environment inspection, or credentials in logs/issues.**
 
 PostgreSQL creates the database and role on first initialization only. Its `POSTGRES_USER` is a local bootstrap superuser, not a least-privilege production role design. Changing `POSTGRES_*` does not update an existing database/password. Sessions owns and applies migrations and its pool; runtime creates no product tables or separate migration runner.
 
@@ -55,8 +55,11 @@ python3 -B -m unittest discover -s deploy -p 'test_*.py'
 ## Stack endpoints
 
 - Browser: `http://127.0.0.1:8080`; Caddy listens on container `:80`.
-- Sessions: `sessions:3000` internally, bound to `0.0.0.0:3000`; no published sessions host port.
-- PostgreSQL: `sessions-db:5432` internally, `127.0.0.1:5432` on the host.
+- Sessions: `sessions:3000` public app API and `sessions:3001` private service listener, bound on the container network; neither port is published.
+- Topics-and-questions: `topics-and-questions:3002`, private container network only.
+- PostgreSQL: three independent private DBs at `sessions-db:5432`, `bee-db:5432`, and `topics-db:5432`; only Sessions DB publishes `127.0.0.1:5432`.
+
+The Bee worker handles room-binding commands and retries accepted canonical transcript events through its transactional outbox. Its deterministic replay harness remains a separate local command; Compose does not start or claim a real Bee device transport. Topics processes one `stub-v1` development preview per accepted event and retries candidate delivery to Sessions. The preview is unpublished and visible only to room speakers/TAs; it is not model-generated and never appears to audience members. Live Bee device/API verification remains separate.
 
 Startup gates database health, then sessions readiness, then Caddy health. Sessions readiness uses its database pool; Caddy health probes its static root independently. Dependency gates apply at startup, not continuous supervision: a later database outage does not stop Caddy or restart sessions automatically. The 120-second wait is a health-wait bound, not an image download/build deadline or the service startup bound (documented by the sessions implementation).
 
@@ -135,7 +138,12 @@ docker compose --env-file deploy/.env down -v
 
 Keep backups private in ignored `local-data/`; they may contain future user data. Commands use the database image's PostgreSQL 17 clients, not host clients. Keep the same canonical role/database for restore.
 
-Back up the running database:
+The commands below cover the Sessions database only. Bee and Topics own
+separate databases/volumes, so a complete product backup must also dump and
+restore `bee-db` and `topics-db` independently. Those additional service
+database backup/restore procedures have not yet been acceptance-tested.
+
+Back up the running Sessions database:
 
 ```sh
 mkdir -p local-data/backups

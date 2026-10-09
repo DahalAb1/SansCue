@@ -75,6 +75,27 @@ test('frontend routes accept opaque path-segment tokens and role sections', () =
   assert.equal(selectedSection('speaker').selected, 'dashboard');
 });
 
+test('question candidates are staff-only development previews with traceable evidence', () => {
+  const candidate = {
+    candidate_id: memberId,
+    event_id: memberId,
+    text: 'What is the key implication?',
+    generator_version: 'stub-v1',
+    published: false,
+    created_at: '2026-10-09T00:00:00Z',
+    evidence: {
+      conversation_id: roomId,
+      ingest_ordinal: 1,
+      received_at: '2026-10-09T00:00:00Z',
+      excerpt: 'A transcript excerpt',
+    },
+  };
+  assert.deepEqual(parseRoomState({ ...state('speaker'), question_candidates: [candidate] }, roomId)?.question_candidates, [candidate]);
+  assert.equal(parseRoomState({ ...state('audience'), question_candidates: [candidate] }, roomId), null);
+  assert.equal(parseRoomState({ ...state('ta'), question_candidates: [{ ...candidate, published: true }] }, roomId), null);
+  assert.equal(parseRoomState({ ...state('speaker'), question_candidates: [{ ...candidate, evidence: { ...candidate.evidence, ingest_ordinal: 0 } }] }, roomId), null);
+});
+
 test('share links are same-origin path tokens and nothing else', () => {
   const join = '/join/' + token;
   const invite = '/invite/' + token;

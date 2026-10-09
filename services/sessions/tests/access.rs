@@ -604,6 +604,52 @@ async fn private_json(app: &Router, method: &str, path: &str, body: Value) -> (u
     )
 }
 
+async fn private_topics_json(app: &Router, method: &str, path: &str, body: Value) -> (u16, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", "Bearer synthetic-topics")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+fn topic_candidate(
+    event: Uuid,
+    conversation: Uuid,
+    room: Uuid,
+    session: Uuid,
+    excerpt: &str,
+) -> Value {
+    json!({
+        "candidate_id":event,
+        "event_id":event,
+        "room_id":room,
+        "session_id":session,
+        "text":format!("What is the implication of {excerpt}?"),
+        "generator_version":"stub-v1",
+        "evidence":{
+            "conversation_id":conversation,
+            "ingest_ordinal":1,
+            "received_at":"2026-10-09T00:00:00Z",
+            "excerpt":excerpt
+        },
+        "published":false
+    })
+}
+
 fn token_of(browser: &Browser) -> &str {
     browser.cookie.split_once('=').unwrap().1
 }
@@ -1576,5 +1622,145 @@ async fn superseded_binding_status_has_machine_readable_stale_outcome() {
     .await
     .1;
     assert_eq!(current["bee"]["status"], "unbound");
+    finish(pool, admin, schema).await;
+}
+
+#[tokio::test]
+async fn topic_candidate_receipts_survive_unbind_and_room_end() {
+    let (pool, admin, schema) = db().await;
+    let sec = Security {
+        topics_credential: Some("synthetic-topics".into()),
+        ..security()
+    };
+    let app = configured_router(pool.clone(), sec.clone());
+    let private = internal_router(Access {
+        pool: pool.clone(),
+        security: sec,
+    });
+    let browser = boot(&app).await;
+    login(&app, &browser).await;
+    let (_, created) = call(
+        &app,
+        &browser,
+        "POST",
+        "/rooms",
+        json!({"title":"candidate receipt"}),
+    )
+    .await;
+    let room = created["state"]["room"]["id"].as_str().unwrap().to_owned();
+    let conversation = Uuid::new_v4();
+    let (_, binding) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"conversation_id":conversation,"source_conversation_id":null}),
+    )
+    .await;
+    let session =
+        sqlx::query_scalar::<_, Uuid>("SELECT session_id FROM bee_room_bindings WHERE room_id=$1")
+            .bind(Uuid::parse_str(&room).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":binding["revision"]})).await.0,200);
+
+    let candidate_id = Uuid::new_v4();
+    let candidate = topic_candidate(
+        candidate_id,
+        conversation,
+        Uuid::parse_str(&room).unwrap(),
+        session,
+        "stable evidence",
+    );
+    assert_eq!(
+        private_topics_json(
+            &private,
+            "POST",
+            "/internal/v1/topics/candidates",
+            candidate.clone()
+        )
+        .await
+        .0,
+        202
+    );
+    let (_, unbind) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/unbind"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":null,"status":"unbound","has_gaps":false,"connectivity_revision":unbind["revision"]})).await.0,200);
+    let duplicate = private_topics_json(
+        &private,
+        "POST",
+        "/internal/v1/topics/candidates",
+        candidate.clone(),
+    )
+    .await;
+    assert_eq!(duplicate.0, 200);
+    assert_eq!(duplicate.1["duplicate"], true);
+    let mut conflict = candidate.clone();
+    conflict["text"] = json!("different text for same ID");
+    let conflicting =
+        private_topics_json(&private, "POST", "/internal/v1/topics/candidates", conflict).await;
+    assert_eq!(conflicting.0, 409);
+    assert_eq!(conflicting.1["code"], "topic_candidate_conflict");
+    let unseen = topic_candidate(
+        Uuid::new_v4(),
+        conversation,
+        Uuid::parse_str(&room).unwrap(),
+        session,
+        "never accepted",
+    );
+    let stale =
+        private_topics_json(&private, "POST", "/internal/v1/topics/candidates", unseen).await;
+    assert_eq!(stale.0, 410);
+    assert_eq!(stale.1["code"], "topic_candidate_stale");
+
+    let conversation2 = Uuid::new_v4();
+    let (_, binding2) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"conversation_id":conversation2,"source_conversation_id":null}),
+    )
+    .await;
+    assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":conversation2,"status":"bound","has_gaps":false,"connectivity_revision":binding2["revision"]})).await.0,200);
+    let (_, ended) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/end"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(ended["state"]["room"]["status"], "ended");
+    let replay_after_end = private_topics_json(
+        &private,
+        "POST",
+        "/internal/v1/topics/candidates",
+        candidate,
+    )
+    .await;
+    assert_eq!(replay_after_end.0, 200);
+    let stale_after_end = private_topics_json(
+        &private,
+        "POST",
+        "/internal/v1/topics/candidates",
+        topic_candidate(
+            Uuid::new_v4(),
+            conversation2,
+            Uuid::parse_str(&room).unwrap(),
+            session,
+            "never accepted after end",
+        ),
+    )
+    .await;
+    assert_eq!(stale_after_end.0, 410);
+    assert_eq!(stale_after_end.1["code"], "topic_candidate_stale");
     finish(pool, admin, schema).await;
 }

@@ -25,10 +25,20 @@ async fn run() -> Result<(), &'static str> {
             .map_err(|_| "SESSIONS_INTERNAL_URL is required")?;
         let token = std::env::var("SESSIONS_BEE_SERVICE_TOKEN")
             .map_err(|_| "SESSIONS_BEE_SERVICE_TOKEN is required")?;
+        let topics_url =
+            std::env::var("TOPICS_INTERNAL_URL").map_err(|_| "TOPICS_INTERNAL_URL is required")?;
+        let topics_token = std::env::var("TOPICS_BEE_SERVICE_TOKEN")
+            .map_err(|_| "TOPICS_BEE_SERVICE_TOKEN is required")?;
         let store = Store::connect(&url).await?;
         let consumer = Consumer::new(&sessions_url, &token, store.clone())?;
+        let topics = bee_connection::topics_consumer::TopicsConsumer::new(
+            &topics_url,
+            &topics_token,
+            store.clone(),
+        )?;
         tokio::select! {
             result=consumer.run()=>result,
+            result=topics.run()=>result,
             _=tokio::signal::ctrl_c()=>{store.close().await;Ok(())}
         }?;
         return Ok(());

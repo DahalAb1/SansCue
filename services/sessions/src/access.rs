@@ -68,6 +68,14 @@ fn conflict(code: &'static str, message: &'static str) -> ApiError {
     ApiError(StatusCode::CONFLICT, code, message)
 }
 
+fn stale_topic_candidate() -> ApiError {
+    ApiError(
+        StatusCode::GONE,
+        "topic_candidate_stale",
+        "Candidate no longer matches an active room binding",
+    )
+}
+
 fn reply(status: StatusCode, body: Value) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
 }
@@ -342,6 +350,11 @@ fn snapshot(room_row: &PgRow, member: &PgRow) -> Value {
                 && room_row.get::<String, _>("status") == "open"
         );
     }
+    if role == "speaker" || role == "ta" {
+        value["question_candidates"] = json!([]);
+    } else {
+        value["question_candidates"] = Value::Null;
+    }
     value
 }
 
@@ -374,16 +387,32 @@ async fn change(
     room_id: Uuid,
     speaker_only: bool,
 ) -> Result<()> {
+    let resources = if speaker_only {
+        json!(["memberships", "invitations"])
+    } else {
+        json!(["state"])
+    };
+    change_with_resources(
+        tx,
+        room_id,
+        if speaker_only { "speaker" } else { "all" },
+        resources,
+    )
+    .await
+}
+
+async fn change_with_resources(
+    tx: &mut Transaction<'_, Postgres>,
+    room_id: Uuid,
+    visibility: &str,
+    resources: Value,
+) -> Result<()> {
     let sequence: i64 =
         sqlx::query_scalar("UPDATE rooms SET sequence=sequence+1 WHERE id=$1 RETURNING sequence")
             .bind(room_id)
             .fetch_one(&mut **tx)
             .await?;
-    let payload = if speaker_only {
-        json!({"resources":["memberships","invitations"]})
-    } else {
-        json!({"resources":["state"]})
-    };
+    let payload = json!({"resources":resources});
     sqlx::query(
         "INSERT INTO room_events(event_id,room_id,sequence,payload,visibility) VALUES($1,$2,$3,$4,$5)",
     )
@@ -391,7 +420,7 @@ async fn change(
     .bind(room_id)
     .bind(sequence)
     .bind(payload)
-    .bind(if speaker_only { "speaker" } else { "all" })
+    .bind(visibility)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -868,8 +897,8 @@ async fn bind_bee(
     let speaker_session: Uuid = sqlx::query_scalar("SELECT session_id FROM memberships WHERE room_id=$1 AND role='speaker' AND status='active'")
         .bind(room_id).fetch_one(&mut **tx).await?;
     let payload = json!({"conversation_id":conversation,"source_conversation_id":source,"room_id":room_id,"session_id":speaker_session,"revision":rev});
-    sqlx::query("INSERT INTO bee_room_bindings(room_id,conversation_id,source_conversation_id,status,revision) VALUES($1,$2,$3,'binding',$4) ON CONFLICT(room_id) DO UPDATE SET conversation_id=EXCLUDED.conversation_id,source_conversation_id=EXCLUDED.source_conversation_id,status='binding',revision=EXCLUDED.revision,updated_at=now()")
-        .bind(room_id).bind(conversation).bind(source).bind(rev).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO bee_room_bindings(room_id,conversation_id,source_conversation_id,status,revision,session_id) VALUES($1,$2,$3,'binding',$4,$5) ON CONFLICT(room_id) DO UPDATE SET conversation_id=EXCLUDED.conversation_id,source_conversation_id=EXCLUDED.source_conversation_id,status='binding',revision=EXCLUDED.revision,session_id=EXCLUDED.session_id,updated_at=now()")
+        .bind(room_id).bind(conversation).bind(source).bind(rev).bind(speaker_session).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO bee_command_outbox(command_id,room_id,conversation_id,command_type,revision,payload) VALUES($1,$2,$3,'bind',$4,$5)").bind(command_id).bind(room_id).bind(conversation).bind(rev).bind(payload).execute(&mut **tx).await?;
     change(tx, room_id, false).await?;
     Ok(json!({"status":"binding","command_id":command_id,"revision":rev}))
@@ -877,7 +906,7 @@ async fn bind_bee(
 
 async fn unbind_bee(tx: &mut Transaction<'_, Postgres>, room_id: Uuid) -> Result<Value> {
     let row = sqlx::query(
-        "SELECT conversation_id,status FROM bee_room_bindings WHERE room_id=$1 FOR UPDATE",
+        "SELECT conversation_id,status,session_id FROM bee_room_bindings WHERE room_id=$1 FOR UPDATE",
     )
     .bind(room_id)
     .fetch_optional(&mut **tx)
@@ -1226,6 +1255,7 @@ async fn read(
         let mut state = snapshot(&room_row, &member);
         if member.get::<String, _>("role") != "audience" {
             state["bee"] = bee_snapshot(&mut tx, room_id).await?;
+            state["question_candidates"] = topic_candidates(&mut tx, room_id).await?;
         }
         state
     } else if p[2] == "memberships" || p[2] == "invitations" {
@@ -1374,8 +1404,196 @@ pub fn internal_router(access: Access) -> Router {
             post(bee_command_ack),
         )
         .route("/internal/v1/bee/rooms/{room}/status", post(bee_status))
+        .route("/internal/v1/topics/candidates", post(topics_candidate))
         .fallback(|| async { missing() })
         .with_state(access)
+}
+
+async fn topic_candidates(tx: &mut Transaction<'_, Postgres>, room: Uuid) -> Result<Value> {
+    let rows=sqlx::query("SELECT candidate_id,event_id,candidate_text,generator_version,evidence,created_at FROM topic_candidates WHERE room_id=$1 ORDER BY created_at DESC LIMIT 50")
+        .bind(room).fetch_all(&mut **tx).await?;
+    Ok(Value::Array(
+        rows.into_iter()
+            .map(|r| {
+                json!({
+                    "candidate_id":r.get::<Uuid,_>("candidate_id"),
+                    "event_id":r.get::<Uuid,_>("event_id"),
+                    "text":r.get::<String,_>("candidate_text"),
+                    "generator_version":r.get::<String,_>("generator_version"),
+                    "evidence":r.get::<Value,_>("evidence"),
+                    "created_at":r.get::<DateTime<Utc>,_>("created_at"),
+                    "published":false
+                })
+            })
+            .collect(),
+    ))
+}
+
+async fn topics_candidate(
+    State(access): State<Access>,
+    headers: HeaderMap,
+    Json(candidate): Json<Value>,
+) -> Result<Response> {
+    require_topics(&headers, &access)?;
+    if !candidate.is_object()
+        || candidate.as_object().is_some_and(|o| o.len() != 8)
+        || candidate["published"] != false
+        || candidate["generator_version"] != "stub-v1"
+        || candidate["text"]
+            .as_str()
+            .is_none_or(|s| s.trim().is_empty() || s.len() > 1000)
+        || candidate["evidence"]
+            .as_object()
+            .is_none_or(|o| o.len() != 4)
+    {
+        return Err(invalid());
+    }
+    let parse = |key: &str| {
+        candidate[key]
+            .as_str()
+            .and_then(|v| Uuid::parse_str(v).ok())
+            .filter(|v| !v.is_nil())
+            .ok_or_else(invalid)
+    };
+    let candidate_id = parse("candidate_id")?;
+    let event_id = parse("event_id")?;
+    let room_id = parse("room_id")?;
+    let session_id = parse("session_id")?;
+    if candidate_id != event_id {
+        return Err(invalid());
+    }
+    let conversation = parse_evidence_uuid(&candidate["evidence"]["conversation_id"])?;
+    let ordinal = candidate["evidence"]["ingest_ordinal"]
+        .as_u64()
+        .filter(|n| *n > 0 && *n <= i64::MAX as u64)
+        .ok_or_else(invalid)?;
+    let received = candidate["evidence"]["received_at"]
+        .as_str()
+        .filter(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+        .ok_or_else(invalid)?;
+    let excerpt = candidate["evidence"]["excerpt"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty() && s.len() <= 1000)
+        .ok_or_else(invalid)?;
+    if ordinal == 0 || excerpt.trim().is_empty() {
+        return Err(invalid());
+    }
+    let text = candidate["text"].as_str().unwrap_or_default();
+    let version = candidate["generator_version"].as_str().unwrap_or_default();
+    let mut tx = access.pool.begin().await?;
+    // A lost response may be replayed after an unbind, room end, or rebind.
+    // First recognize an already-committed identical callback independently
+    // of current room state; its original acceptance is durable.
+    let existing = sqlx::query("SELECT event_id,room_id,conversation_id,session_id,candidate_text,generator_version,evidence FROM topic_candidates WHERE candidate_id=$1 FOR UPDATE")
+        .bind(candidate_id).fetch_optional(&mut *tx).await?;
+    if let Some(row) = existing {
+        if !same_topic_candidate(&row, &candidate) {
+            return Err(conflict(
+                "topic_candidate_conflict",
+                "Candidate identity conflicts",
+            ));
+        }
+        tx.commit().await?;
+        return Ok(reply(
+            StatusCode::OK,
+            json!({"accepted":true,"duplicate":true,"candidate_id":candidate_id}),
+        ));
+    }
+
+    // Match the room-before-binding lock order used by room mutations. The
+    // second receipt lookup also serializes concurrent retries with the same ID.
+    let room_row = sqlx::query("SELECT status FROM rooms WHERE id=$1 FOR UPDATE")
+        .bind(room_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(room_row) = room_row else {
+        return Err(stale_topic_candidate());
+    };
+    let existing = sqlx::query("SELECT event_id,room_id,conversation_id,session_id,candidate_text,generator_version,evidence FROM topic_candidates WHERE candidate_id=$1 FOR UPDATE")
+        .bind(candidate_id).fetch_optional(&mut *tx).await?;
+    if let Some(row) = existing {
+        if !same_topic_candidate(&row, &candidate) {
+            return Err(conflict(
+                "topic_candidate_conflict",
+                "Candidate identity conflicts",
+            ));
+        }
+        tx.commit().await?;
+        return Ok(reply(
+            StatusCode::OK,
+            json!({"accepted":true,"duplicate":true,"candidate_id":candidate_id}),
+        ));
+    }
+    if room_row.get::<String, _>("status") != "open" {
+        return Err(stale_topic_candidate());
+    }
+    let binding = sqlx::query(
+        "SELECT conversation_id,status,session_id FROM bee_room_bindings WHERE room_id=$1 FOR UPDATE",
+    )
+    .bind(room_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(binding) = binding else {
+        return Err(stale_topic_candidate());
+    };
+    let binding_status: String = binding.get("status");
+    if binding.get::<Uuid, _>("conversation_id") != conversation
+        || binding.get::<Uuid, _>("session_id") != session_id
+        || binding_status == "unbound"
+        || binding_status == "unbinding"
+    {
+        return Err(stale_topic_candidate());
+    }
+    if binding_status != "bound" {
+        return Err(conflict(
+            "topic_binding_pending",
+            "Room binding is still being applied",
+        ));
+    }
+    sqlx::query("INSERT INTO topic_candidates(candidate_id,event_id,room_id,conversation_id,session_id,candidate_text,generator_version,evidence) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(candidate_id).bind(event_id).bind(room_id).bind(conversation).bind(session_id).bind(text).bind(version).bind(candidate["evidence"].clone()).execute(&mut *tx).await?;
+    change_with_resources(&mut tx, room_id, "speaker", json!(["question_candidates"])).await?;
+    tx.commit().await?;
+    let _ = received;
+    Ok(reply(
+        StatusCode::ACCEPTED,
+        json!({"accepted":true,"candidate_id":candidate_id}),
+    ))
+}
+
+fn same_topic_candidate(row: &PgRow, candidate: &Value) -> bool {
+    let uuid = |value: &Value| value.as_str().and_then(|value| Uuid::parse_str(value).ok());
+    row.get::<Uuid, _>("event_id") == uuid(&candidate["event_id"]).unwrap()
+        && row.get::<Uuid, _>("room_id") == uuid(&candidate["room_id"]).unwrap()
+        && row.get::<Uuid, _>("conversation_id")
+            == uuid(&candidate["evidence"]["conversation_id"]).unwrap()
+        && row.get::<Uuid, _>("session_id") == uuid(&candidate["session_id"]).unwrap()
+        && row.get::<String, _>("candidate_text") == candidate["text"].as_str().unwrap()
+        && row.get::<String, _>("generator_version")
+            == candidate["generator_version"].as_str().unwrap()
+        && row.get::<Value, _>("evidence") == candidate["evidence"]
+}
+
+fn parse_evidence_uuid(value: &Value) -> Result<Uuid> {
+    Uuid::parse_str(value.as_str().ok_or_else(invalid)?).map_err(|_| invalid())
+}
+
+fn require_topics(headers: &HeaderMap, access: &Access) -> Result<()> {
+    let Some(value) = h(headers, "authorization").and_then(|v| v.strip_prefix("Bearer ")) else {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "session_required",
+            "Service authentication required",
+        ));
+    };
+    if !credential_matches(&access.security.topics_credential, value) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "session_required",
+            "Service authentication required",
+        ));
+    }
+    Ok(())
 }
 
 fn require_bee(headers: &HeaderMap, access: &Access) -> Result<()> {

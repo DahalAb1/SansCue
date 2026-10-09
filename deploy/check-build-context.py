@@ -14,6 +14,11 @@ ALLOWED = [
     "services/bee-connection/Cargo.toml", "services/bee-connection/src/main.rs",
     "services/bee-connection/src/nested/module.rs",
     "services/bee-connection/migrations/0001_conversations.sql",
+    "services/topics-and-questions/Cargo.toml", "services/topics-and-questions/src/main.rs",
+    "services/topics-and-questions/src/nested/module.rs",
+    "services/topics-and-questions/migrations/0001_candidate_jobs.sql",
+    "services/sessions/Dockerfile", "services/bee-connection/Dockerfile",
+    "services/topics-and-questions/Dockerfile",
     "web/package.json", "web/package-lock.json", "web/index.html",
     "web/tsconfig.json", "web/vite.config.ts", "web/src/main.tsx",
     "web/src/app/App.tsx", "web/src/styles.css", "web/src/vite-env.d.ts",
@@ -58,7 +63,9 @@ def main():
                    ("", "web/", "web/src/", "services/", "services/sessions/",
                     "services/sessions/src/", "services/sessions/migrations/",
                     "services/bee-connection/", "services/bee-connection/src/",
-                    "services/bee-connection/migrations/", "deploy/") for name in BLOCKED_NAMES]
+                   "services/bee-connection/migrations/", "services/topics-and-questions/",
+                   "services/topics-and-questions/src/", "services/topics-and-questions/migrations/",
+                   "deploy/") for name in BLOCKED_NAMES]
         descendants = descendant_fixtures()
         for label, allowed, denied in (("normal", ALLOWED, blocked),
                                         ("directory-shaped", [], descendants)):

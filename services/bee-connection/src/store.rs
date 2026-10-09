@@ -179,11 +179,64 @@ impl Store {
         id: Uuid,
         observation: Observation,
     ) -> Result<Disposition, &'static str> {
-        self.update(
-            id,
-            |pipeline| Ok(pipeline.ingest(observation, Uuid::new_v4)),
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| "Bee transaction failed")?;
+        let state: Json<Pipeline> = sqlx::query_scalar(
+            "SELECT state FROM bee_conversations WHERE conversation_id = $1 FOR UPDATE",
         )
+        .bind(id)
+        .fetch_one(&mut *tx)
         .await
+        .map_err(|_| "Bee conversation lock failed")?;
+        let mut pipeline = state.0;
+        let disposition = pipeline.ingest(observation, Uuid::new_v4);
+        if let Disposition::Accepted { event_id } = &disposition {
+            let event = pipeline
+                .events()
+                .iter()
+                .find(|e| e.event_id == *event_id)
+                .ok_or("accepted Bee event missing")?;
+            let payload =
+                serde_json::to_value(event).map_err(|_| "Bee event serialization failed")?;
+            sqlx::query("INSERT INTO bee_topics_outbox(event_id,payload) VALUES($1,$2) ON CONFLICT(event_id) DO NOTHING")
+                .bind(*event_id).bind(Json(payload)).execute(&mut *tx).await.map_err(|_| "Bee topics outbox write failed")?;
+        }
+        sqlx::query("UPDATE bee_conversations SET state = $2 WHERE conversation_id = $1")
+            .bind(id)
+            .bind(Json(pipeline))
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| "Bee state write failed")?;
+        tx.commit().await.map_err(|_| "Bee commit failed")?;
+        Ok(disposition)
+    }
+
+    pub async fn pending_topics(&self) -> Result<Vec<(Uuid, Value)>, &'static str> {
+        let rows=sqlx::query("SELECT event_id,payload FROM bee_topics_outbox WHERE delivered_at IS NULL AND terminal_at IS NULL ORDER BY created_at LIMIT 50").fetch_all(&self.pool).await.map_err(|_| "Bee topics outbox poll failed")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get("event_id"), r.get::<Json<Value>, _>("payload").0))
+            .collect())
+    }
+    pub async fn acknowledge_topic(&self, id: Uuid) -> Result<(), &'static str> {
+        sqlx::query(
+            "UPDATE bee_topics_outbox SET delivered_at=now(),attempts=attempts+1 WHERE event_id=$1",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| "Bee topics outbox acknowledgement failed")?;
+        Ok(())
+    }
+
+    pub async fn reject_topic(&self, id: Uuid, code: &str) -> Result<(), &'static str> {
+        sqlx::query("UPDATE bee_topics_outbox SET terminal_at=now(),terminal_code=$2,attempts=attempts+1 WHERE event_id=$1 AND delivered_at IS NULL AND terminal_at IS NULL")
+            .bind(id).bind(code).execute(&self.pool).await
+            .map_err(|_| "Bee topics outbox terminal receipt failed")?;
+        Ok(())
     }
 
     async fn update<T>(
