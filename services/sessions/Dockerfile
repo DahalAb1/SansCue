@@ -4,6 +4,7 @@ FROM rust:bookworm AS build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY services/sessions/ services/sessions/
+COPY services/bee-connection/ services/bee-connection/
 RUN cargo build --locked --release --package sessions-service --bin sessions-service
 
 FROM debian:bookworm-slim AS runtime

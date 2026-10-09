@@ -11,6 +11,9 @@ ALLOWED = [
     "services/sessions/Cargo.toml", "services/sessions/src/main.rs",
     "services/sessions/src/nested/module.rs",
     "services/sessions/migrations/0001_bootstrap.sql",
+    "services/bee-connection/Cargo.toml", "services/bee-connection/src/main.rs",
+    "services/bee-connection/src/nested/module.rs",
+    "services/bee-connection/migrations/0001_conversations.sql",
     "web/package.json", "web/package-lock.json", "web/index.html",
     "web/tsconfig.json", "web/vite.config.ts", "web/src/main.tsx",
     "web/src/app/App.tsx", "web/src/styles.css", "web/src/vite-env.d.ts",
@@ -53,7 +56,9 @@ def main():
         # Never copy application directories or inspect actual credentials.
         blocked = [prefix + name for prefix in
                    ("", "web/", "web/src/", "services/", "services/sessions/",
-                    "services/sessions/src/", "services/sessions/migrations/", "deploy/") for name in BLOCKED_NAMES]
+                    "services/sessions/src/", "services/sessions/migrations/",
+                    "services/bee-connection/", "services/bee-connection/src/",
+                    "services/bee-connection/migrations/", "deploy/") for name in BLOCKED_NAMES]
         descendants = descendant_fixtures()
         for label, allowed, denied in (("normal", ALLOWED, blocked),
                                         ("directory-shaped", [], descendants)):
