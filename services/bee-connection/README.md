@@ -74,3 +74,26 @@ DB settings fail loudly, not skip. Persistence tests cover repeat migrations,
 concurrent deduplication, restart equality, immutable binding, raw quarantine,
 arrival continuation and persisted suspected gaps. Real process/database outage,
 backup/restore, container builds and live-device recovery are separate checks.
+
+### Authoring verification (October 9, 2026)
+
+- Formatting and strict workspace Clippy passed.
+- Focused contract/replay tests: 3 passed; pipeline tests: 13 passed.
+- Sessions library regression tests: 6 passed.
+- Bee persistence test and full workspace suite were attempted and failed on the
+  required missing BEE_TEST_DATABASE_URL (not skipped). DATABASE_URL was also
+  absent. Native PostgreSQL accepts connections, but the current OS role has no
+  database role and postgres peer authentication is unavailable to this process.
+  No separate Bee test database credentials were provided; no sessions database
+  was repurposed and no database/credential infrastructure was changed.
+- Static Docker allowlist validation passed: 21 allowed fixture inputs and 180
+  terminal-descendant fixture cases. Actual Docker context/build verification
+  failed its prerequisite: Docker with BuildKit is unavailable.
+- Standalone executable rejects missing arguments, invalid UUIDs and missing
+  BEE_DATABASE_URL with exit status 1 and non-sensitive messages. Successful
+  PostgreSQL-backed sample execution remains pending DB provisioning.
+
+Persistence code and tests compile, but this record does **not** claim successful
+PostgreSQL persistence, concurrency, migrations or restart verification. Supply
+the two separate disposable test database URLs and rerun the exact checks above
+before integration approval.
