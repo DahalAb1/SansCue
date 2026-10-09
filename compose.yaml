@@ -26,12 +26,16 @@ services:
       DATABASE_URL: "postgresql://${POSTGRES_USER:?Set POSTGRES_USER in deploy/.env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}@sessions-db:5432/${POSTGRES_DB:?Set POSTGRES_DB in deploy/.env}"
       HTTP_HOST: "0.0.0.0"
       HTTP_PORT: "3000"
+      SESSIONS_INTERNAL_HOST: "0.0.0.0"
+      SESSIONS_INTERNAL_PORT: "3001"
       SESSIONS_PUBLIC_ORIGIN: "http://127.0.0.1:8080"
       SESSIONS_ALLOW_INSECURE_LOOPBACK: "true"
       # Operator access stays disabled (fail closed) unless all three are provisioned in deploy/.env.
       SESSIONS_OPERATOR_TOKEN_SHA256: "${SESSIONS_OPERATOR_TOKEN_SHA256:-}"
       SESSIONS_OPERATOR_EPOCH: "${SESSIONS_OPERATOR_EPOCH:-}"
       SESSIONS_IDEMPOTENCY_HMAC_KEY: "${SESSIONS_IDEMPOTENCY_HMAC_KEY:-}"
+      SESSIONS_BEE_SERVICE_TOKEN: "${SESSIONS_BEE_SERVICE_TOKEN:?Set SESSIONS_BEE_SERVICE_TOKEN in deploy/.env}"
+      SESSIONS_TOPICS_SERVICE_TOKEN: "${SESSIONS_TOPICS_SERVICE_TOKEN:?Set SESSIONS_TOPICS_SERVICE_TOKEN in deploy/.env}"
       RUST_LOG: "info"
     depends_on:
       sessions-db:
@@ -40,6 +44,77 @@ services:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://127.0.0.1:3000/readyz"]
       interval: 5s
       timeout: 4s
+      retries: 12
+      start_period: 10s
+
+  topics-and-questions:
+    build:
+      context: .
+      dockerfile: services/topics-and-questions/Dockerfile
+    environment:
+      TOPICS_DATABASE_URL: "postgresql://${TOPICS_POSTGRES_USER:?Set TOPICS_POSTGRES_USER in deploy/.env}:${TOPICS_POSTGRES_PASSWORD:?Set TOPICS_POSTGRES_PASSWORD in deploy/.env}@topics-db:5432/${TOPICS_POSTGRES_DB:?Set TOPICS_POSTGRES_DB in deploy/.env}"
+      TOPICS_BEE_SERVICE_TOKEN: "${TOPICS_BEE_SERVICE_TOKEN:?Set TOPICS_BEE_SERVICE_TOKEN in deploy/.env}"
+      SESSIONS_INTERNAL_URL: "http://sessions:3001"
+      SESSIONS_TOPICS_SERVICE_TOKEN: "${SESSIONS_TOPICS_SERVICE_TOKEN:?Set SESSIONS_TOPICS_SERVICE_TOKEN in deploy/.env}"
+      HTTP_HOST: "0.0.0.0"
+      HTTP_PORT: "3002"
+    depends_on:
+      topics-db:
+        condition: service_healthy
+      sessions:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://127.0.0.1:3002/readyz"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 10s
+
+  topics-db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: "${TOPICS_POSTGRES_DB:?Set TOPICS_POSTGRES_DB in deploy/.env}"
+      POSTGRES_USER: "${TOPICS_POSTGRES_USER:?Set TOPICS_POSTGRES_USER in deploy/.env}"
+      POSTGRES_PASSWORD: "${TOPICS_POSTGRES_PASSWORD:?Set TOPICS_POSTGRES_PASSWORD in deploy/.env}"
+    volumes:
+      - topics-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  bee-connection:
+    build:
+      context: .
+      dockerfile: services/bee-connection/Dockerfile
+    environment:
+      BEE_DATABASE_URL: "postgresql://${BEE_POSTGRES_USER:?Set BEE_POSTGRES_USER in deploy/.env}:${BEE_POSTGRES_PASSWORD:?Set BEE_POSTGRES_PASSWORD in deploy/.env}@bee-db:5432/${BEE_POSTGRES_DB:?Set BEE_POSTGRES_DB in deploy/.env}"
+      SESSIONS_INTERNAL_URL: "http://sessions:3001"
+      SESSIONS_BEE_SERVICE_TOKEN: "${SESSIONS_BEE_SERVICE_TOKEN:?Set SESSIONS_BEE_SERVICE_TOKEN in deploy/.env}"
+      TOPICS_INTERNAL_URL: "http://topics-and-questions:3002"
+      TOPICS_BEE_SERVICE_TOKEN: "${TOPICS_BEE_SERVICE_TOKEN:?Set TOPICS_BEE_SERVICE_TOKEN in deploy/.env}"
+    depends_on:
+      bee-db:
+        condition: service_healthy
+      sessions:
+        condition: service_healthy
+      topics-and-questions:
+        condition: service_healthy
+
+  bee-db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: "${BEE_POSTGRES_DB:?Set BEE_POSTGRES_DB in deploy/.env}"
+      POSTGRES_USER: "${BEE_POSTGRES_USER:?Set BEE_POSTGRES_USER in deploy/.env}"
+      POSTGRES_PASSWORD: "${BEE_POSTGRES_PASSWORD:?Set BEE_POSTGRES_PASSWORD in deploy/.env}"
+    volumes:
+      - bee-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
       retries: 12
       start_period: 10s
 
@@ -63,3 +138,7 @@ services:
 volumes:
   sessions-db-data:
     name: sessions-db-data
+  topics-db-data:
+    name: topics-db-data
+  bee-db-data:
+    name: bee-db-data

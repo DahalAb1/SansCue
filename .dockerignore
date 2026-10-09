@@ -14,6 +14,12 @@
 !services/bee-connection/Cargo.toml
 !services/bee-connection/src/**/*.rs
 !services/bee-connection/migrations/**/*.sql
+!services/topics-and-questions/Cargo.toml
+!services/topics-and-questions/src/**/*.rs
+!services/topics-and-questions/migrations/**/*.sql
+!services/topics-and-questions/Dockerfile
+!services/bee-connection/Dockerfile
+!services/sessions/Dockerfile
 !web/package.json
 !web/package-lock.json
 !web/index.html
@@ -69,3 +75,9 @@ deploy/Caddyfile/**
 services/bee-connection/Cargo.toml/**
 services/bee-connection/src/**/*.rs/**
 services/bee-connection/migrations/**/*.sql/**
+services/topics-and-questions/Cargo.toml/**
+services/topics-and-questions/src/**/*.rs/**
+services/topics-and-questions/migrations/**/*.sql/**
+services/topics-and-questions/Dockerfile/**
+services/bee-connection/Dockerfile/**
+services/sessions/Dockerfile/**
