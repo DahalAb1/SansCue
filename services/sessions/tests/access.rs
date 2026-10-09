@@ -582,6 +582,28 @@ async fn once(
     )
 }
 
+async fn private_json(app: &Router, method: &str, path: &str, body: Value) -> (u16, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", "Bearer synthetic-bee")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 fn token_of(browser: &Browser) -> &str {
     browser.cookie.split_once('=').unwrap().1
 }
@@ -1310,17 +1332,16 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
     let bytes = commands.into_body().collect().await.unwrap().to_bytes();
     let list: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(list["commands"].as_array().unwrap().len(), 1);
-    let command = list["commands"][0]["command_id"].as_str().unwrap();
-    request = Request::builder()
-        .method("POST")
-        .uri(format!("/internal/v1/bee/commands/{command}/ack"))
-        .header("authorization", "Bearer synthetic-bee")
-        .body(Body::empty())
-        .unwrap();
-    assert_eq!(
-        private.clone().oneshot(request).await.unwrap().status(),
-        200
+    assert!(
+        Uuid::parse_str(
+            list["commands"][0]["payload"]["session_id"]
+                .as_str()
+                .unwrap()
+        )
+        .is_ok()
     );
+    let command = list["commands"][0]["command_id"].as_str().unwrap();
+    let revision = bound["revision"].as_i64().unwrap();
     assert_eq!(
         call(
             &app,
@@ -1333,5 +1354,138 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
         .1["bee"]["status"],
         "bound"
     );
+    let status_body = json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":revision});
+    assert_eq!(
+        private_json(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/rooms/{room}/status"),
+            status_body.clone()
+        )
+        .await
+        .0,
+        200
+    );
+    request = Request::builder()
+        .method("POST")
+        .uri(format!("/internal/v1/bee/commands/{command}/ack"))
+        .header("authorization", "Bearer synthetic-bee")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        private.clone().oneshot(request).await.unwrap().status(),
+        200
+    );
+    let before: i64 = sqlx::query_scalar("SELECT sequence FROM rooms WHERE id=$1")
+        .bind(Uuid::parse_str(room).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let duplicate = once(
+        &private,
+        "POST",
+        &format!("/internal/v1/bee/commands/{command}/ack"),
+        Some(("authorization", "Bearer synthetic-bee")),
+    )
+    .await;
+    assert_eq!(duplicate.0, 200);
+    let after: i64 = sqlx::query_scalar("SELECT sequence FROM rooms WHERE id=$1")
+        .bind(Uuid::parse_str(room).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after, "duplicate ack must not emit a room event");
+
+    let (_, unbind) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/unbind"),
+        json!({}),
+    )
+    .await;
+    let unbind_command = unbind["command_id"].as_str().unwrap();
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/commands/{unbind_command}/ack"),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, new_binding) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"conversation_id":Uuid::new_v4(),"source_conversation_id":null}),
+    )
+    .await;
+    let (_, commands) = once(
+        &private,
+        "GET",
+        "/internal/v1/bee/commands",
+        Some(("authorization", "Bearer synthetic-bee")),
+    )
+    .await;
+    let new_command = commands["commands"][0]["command_id"].as_str().unwrap();
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/commands/{new_command}/ack"),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    let new_conversation = Uuid::parse_str(
+        commands["commands"][0]["payload"]["conversation_id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":new_conversation,"status":"bound","has_gaps":false,"connectivity_revision":new_binding["revision"]})).await.0,200);
+    let events_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM room_events WHERE room_id=$1")
+            .bind(Uuid::parse_str(room).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/commands/{unbind_command}/ack"),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    let events_after: i64 = sqlx::query_scalar("SELECT count(*) FROM room_events WHERE room_id=$1")
+        .bind(Uuid::parse_str(room).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        events_before, events_after,
+        "old duplicate unbind ack must not emit a room event"
+    );
+    let current = call(
+        &app,
+        &browser,
+        "GET",
+        &format!("/rooms/{room}/state"),
+        json!({}),
+    )
+    .await
+    .1;
+    assert_eq!(current["bee"]["binding_id"], new_conversation.to_string());
+    assert_eq!(current["bee"]["status"], "bound");
     finish(pool, admin, schema).await;
 }
