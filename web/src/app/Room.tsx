@@ -391,7 +391,13 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
             <p id="draft-help">{ended ? 'This room is read-only.' : 'Draft only — not sent or saved to the server.'} Your draft survives section changes in this page, but not a page reload.</p>
           </> : <p>Private Q&A review is not implemented in this stage. No participant questions are loaded here.</p> : <>
             <p>{ended ? 'The room has ended. There is no active question.' : state.active_question ? 'A published question exists. Question display and participation arrive in a later stage.' : 'No active question. Waiting for the speaker to publish one.'}</p>
-            <p>{selected === 'dashboard' ? 'Response metrics are not implemented in this stage.' : selected === 'questions' ? 'Generation, review and publication are not implemented in this stage.' : 'Response submission is not implemented in this stage.'}</p>
+            {selected === 'questions' && state.membership.role !== 'audience' ? <>
+              <p><strong>Development preview — deterministic stub-v1, not AI-generated.</strong> Candidates are unpublished and visible only to the speaker and TAs. One preview is created per accepted transcript event for pipeline development.</p>
+              {(state.question_candidates ?? []).length === 0 ? <p role="status">No development candidates yet. Candidates appear after a transcript event is processed.</p> : <ul class="access-list">{state.question_candidates!.map(candidate => <li key={candidate.candidate_id}>
+                <div><strong>{candidate.text}</strong><p>Unpublished · {candidate.generator_version} · evidence ordinal {candidate.evidence.ingest_ordinal}</p><blockquote>{candidate.evidence.excerpt}</blockquote><small>Transcript event {candidate.event_id}</small></div>
+              </li>)}</ul>}
+              <p>Publishing, audience display, rating, and model-based generation are not enabled.</p>
+            </> : <p>{selected === 'dashboard' ? 'Response metrics are not implemented in this stage.' : selected === 'questions' ? 'Candidate preview is not available to audience members.' : 'Response submission is not implemented in this stage.'}</p>}
           </>}
         </>}
     </div>
