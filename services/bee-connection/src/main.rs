@@ -1,5 +1,6 @@
 use bee_connection::{
     adapter::{BeeAdapter, ReplayAdapter},
+    consumer::Consumer,
     domain::Binding,
     store::Store,
 };
@@ -17,8 +18,22 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<(), &'static str> {
-    // Local trusted harness, not a sessions authorization or production API.
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--worker"] {
+        let url = std::env::var("BEE_DATABASE_URL").map_err(|_| "BEE_DATABASE_URL is required")?;
+        let sessions_url = std::env::var("SESSIONS_INTERNAL_URL")
+            .map_err(|_| "SESSIONS_INTERNAL_URL is required")?;
+        let token = std::env::var("SESSIONS_BEE_SERVICE_TOKEN")
+            .map_err(|_| "SESSIONS_BEE_SERVICE_TOKEN is required")?;
+        let store = Store::connect(&url).await?;
+        let consumer = Consumer::new(&sessions_url, &token, store.clone())?;
+        tokio::select! {
+            result=consumer.run()=>result,
+            _=tokio::signal::ctrl_c()=>{store.close().await;Ok(())}
+        }?;
+        return Ok(());
+    }
+    // Local trusted replay harness, independent of live device access.
     if args.len() != 4 {
         return Err("usage: bee-connection RECORDING CONVERSATION_UUID ROOM_UUID SESSION_UUID");
     }
