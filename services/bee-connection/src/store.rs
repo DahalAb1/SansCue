@@ -45,6 +45,18 @@ impl Store {
         Ok(())
     }
 
+    /// Ensure a command-target conversation exists without changing any
+    /// previously persisted transport capability assertion.
+    pub async fn ensure_command_conversation(&self, id: Uuid) -> Result<(), &'static str> {
+        if id.is_nil() {
+            return Err("invalid conversation ID");
+        }
+        sqlx::query("INSERT INTO bee_conversations (conversation_id,state) VALUES ($1,$2) ON CONFLICT DO NOTHING")
+            .bind(id).bind(Json(Pipeline::new(id, Capabilities::default())))
+            .execute(&self.pool).await.map_err(|_| "Bee conversation creation failed")?;
+        Ok(())
+    }
+
     pub async fn load(&self, id: Uuid) -> Result<Pipeline, &'static str> {
         let state: Json<Pipeline> =
             sqlx::query_scalar("SELECT state FROM bee_conversations WHERE conversation_id = $1")
@@ -83,6 +95,43 @@ impl Store {
             tx.commit().await.map_err(|_| "Bee commit failed")?;
             return Ok(());
         }
+        sqlx::query("INSERT INTO bee_room_revision(room_id,revision,conversation_id) VALUES($1,0,NULL) ON CONFLICT(room_id) DO NOTHING")
+            .bind(binding.room_id).execute(&mut *tx).await.map_err(|_| "Bee room revision initialization failed")?;
+        let fence = sqlx::query(
+            "SELECT revision,conversation_id FROM bee_room_revision WHERE room_id=$1 FOR UPDATE",
+        )
+        .bind(binding.room_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| "Bee room revision lock failed")?;
+        let latest: i64 = fence.get("revision");
+        let current: Option<Uuid> = fence.get("conversation_id");
+        if revision <= latest {
+            sqlx::query("INSERT INTO bee_command_inbox(command_id,room_id,conversation_id,revision,command_type,result) VALUES($1,$2,$3,$4,$5,'{\"stale\":true}') ON CONFLICT(command_id) DO NOTHING")
+                .bind(command_id).bind(binding.room_id).bind(binding.conversation_id).bind(revision).bind(action).execute(&mut *tx).await.map_err(|_| "Bee stale command receipt write failed")?;
+            tx.commit().await.map_err(|_| "Bee commit failed")?;
+            return Ok(());
+        }
+        if action == "bind" && current.is_some_and(|id| id != binding.conversation_id) {
+            let previous = current.expect("checked above");
+            if let Some(old) = sqlx::query_scalar::<_, Json<Pipeline>>(
+                "SELECT state FROM bee_conversations WHERE conversation_id=$1 FOR UPDATE",
+            )
+            .bind(previous)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| "Bee prior conversation load failed")?
+            {
+                let mut pipeline = old.0;
+                pipeline.unbind(previous)?;
+                sqlx::query("UPDATE bee_conversations SET state=$2 WHERE conversation_id=$1")
+                    .bind(previous)
+                    .bind(Json(pipeline))
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|_| "Bee prior binding close failed")?;
+            }
+        }
         let state: Json<Pipeline> = sqlx::query_scalar(
             "SELECT state FROM bee_conversations WHERE conversation_id=$1 FOR UPDATE",
         )
@@ -108,6 +157,8 @@ impl Store {
             .map_err(|_| "Bee state write failed")?;
         sqlx::query("INSERT INTO bee_command_inbox(command_id,room_id,conversation_id,revision,command_type,result) VALUES($1,$2,$3,$4,$5,'{}')")
             .bind(command_id).bind(binding.room_id).bind(binding.conversation_id).bind(revision).bind(action).execute(&mut *tx).await.map_err(|_| "Bee command receipt write failed")?;
+        sqlx::query("UPDATE bee_room_revision SET revision=$2,conversation_id=$3,updated_at=now() WHERE room_id=$1")
+            .bind(binding.room_id).bind(revision).bind(if action == "bind" {Some(binding.conversation_id)} else {None}).execute(&mut *tx).await.map_err(|_| "Bee room revision update failed")?;
         tx.commit().await.map_err(|_| "Bee commit failed")?;
         Ok(())
     }

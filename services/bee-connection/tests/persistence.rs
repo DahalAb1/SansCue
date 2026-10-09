@@ -117,3 +117,47 @@ async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine
     );
     restarted.close().await;
 }
+
+#[tokio::test]
+async fn room_revision_fence_rejects_delayed_bind_after_unbind() {
+    let url=std::env::var("BEE_TEST_DATABASE_URL").expect("BEE_TEST_DATABASE_URL must name a disposable Bee-only PostgreSQL database; this test never skips");
+    let store = Store::connect(&url).await.unwrap();
+    let conversation = Uuid::new_v4();
+    let room = Uuid::new_v4();
+    let session = Uuid::new_v4();
+    let binding = Binding {
+        conversation_id: conversation,
+        source_conversation_id: Some("synthetic-conversation".into()),
+        room_id: room,
+        session_id: session,
+    };
+    store
+        .ensure_command_conversation(conversation)
+        .await
+        .unwrap();
+    let bind = Uuid::new_v4();
+    let unbind = Uuid::new_v4();
+    store
+        .apply_command(bind, 2, "bind", binding.clone())
+        .await
+        .unwrap();
+    assert!(store.load(conversation).await.unwrap().binding().is_some());
+    store
+        .apply_command(unbind, 3, "unbind", binding.clone())
+        .await
+        .unwrap();
+    assert!(store.load(conversation).await.unwrap().binding().is_none());
+    // A delayed, previously unseen bind must be receipt-acked but not applied.
+    store
+        .apply_command(Uuid::new_v4(), 1, "bind", binding.clone())
+        .await
+        .unwrap();
+    assert!(store.load(conversation).await.unwrap().binding().is_none());
+    // Retrying the original command ID remains idempotent.
+    store
+        .apply_command(unbind, 3, "unbind", binding)
+        .await
+        .unwrap();
+    assert!(store.load(conversation).await.unwrap().binding().is_none());
+    store.close().await;
+}
