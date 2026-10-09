@@ -165,6 +165,8 @@ pub fn router(access: Access) -> Router {
         .route("/rooms/{room}/join-link/rotate", post(mutate))
         .route("/rooms/{room}/join-link/revoke", post(mutate))
         .route("/rooms/{room}/end", post(mutate))
+        .route("/rooms/{room}/bee/bind", post(mutate))
+        .route("/rooms/{room}/bee/unbind", post(mutate))
         .fallback(|| async { missing() })
         .with_state(access)
 }
@@ -343,6 +345,30 @@ fn snapshot(room_row: &PgRow, member: &PgRow) -> Value {
     value
 }
 
+async fn bee_snapshot(tx: &mut Transaction<'_, Postgres>, room_id: Uuid) -> Result<Value> {
+    if let Some(row) = sqlx::query("SELECT status FROM bee_room_status WHERE room_id=$1")
+        .bind(room_id)
+        .fetch_optional(&mut **tx)
+        .await?
+    {
+        return Ok(row.get::<Value, _>("status"));
+    }
+    if let Some(row) = sqlx::query(
+        "SELECT conversation_id,status,revision FROM bee_room_bindings WHERE room_id=$1",
+    )
+    .bind(room_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        return Ok(
+            json!({"binding_id":row.get::<Uuid,_>("conversation_id"),"status":row.get::<String,_>("status"),"has_gaps":false,"pending_command_id":null,"pending_command_revision":row.get::<i64,_>("revision"),"latest_command":null,"connectivity_revision":0}),
+        );
+    }
+    Ok(
+        json!({"binding_id":null,"status":"unbound","has_gaps":false,"pending_command_id":null,"pending_command_revision":null,"latest_command":null,"connectivity_revision":0}),
+    )
+}
+
 async fn change(
     tx: &mut Transaction<'_, Postgres>,
     room_id: Uuid,
@@ -416,6 +442,19 @@ fn json_content_type(headers: &HeaderMap) -> bool {
 
 fn check_shape(path: &str, body: &Value) -> Result<()> {
     let object = body.as_object().ok_or_else(invalid)?;
+    if path.ends_with("/bee/bind") {
+        let allowed = ["conversation_id", "source_conversation_id"];
+        if !object.contains_key("conversation_id")
+            || object.keys().any(|k| !allowed.contains(&k.as_str()))
+            || !body["conversation_id"].is_string()
+            || body
+                .get("source_conversation_id")
+                .is_some_and(|v| !v.is_null() && !v.is_string())
+        {
+            return Err(invalid());
+        }
+        return Ok(());
+    }
     let expected = if path == "/operator/login" {
         Some("credential")
     } else if path == "/rooms" {
@@ -485,7 +524,7 @@ async fn reject_bad_login(
 }
 
 fn allowed_when_ended(path: &str) -> bool {
-    path.ends_with("/revoke") || path.ends_with("/end")
+    path.ends_with("/revoke") || path.ends_with("/end") || path.ends_with("/bee/unbind")
 }
 
 fn ended_block(path: &str) -> ApiError {
@@ -778,6 +817,10 @@ async fn apply(
         revoke_join(tx, room_id).await?
     } else if p.get(2) == Some(&"end") && p.len() == 3 {
         end_room(tx, room_id).await?
+    } else if p.get(2) == Some(&"bee") && p.len() == 4 && p[3] == "bind" {
+        bind_bee(tx, room_id, body).await?
+    } else if p.get(2) == Some(&"bee") && p.len() == 4 && p[3] == "unbind" {
+        unbind_bee(tx, room_id).await?
     } else {
         return Err(missing());
     };
@@ -786,6 +829,77 @@ async fn apply(
         body,
         room_id: Some(room_id),
     })
+}
+
+async fn bind_bee(
+    tx: &mut Transaction<'_, Postgres>,
+    room_id: Uuid,
+    body: &Value,
+) -> Result<Value> {
+    let conversation = Uuid::parse_str(body["conversation_id"].as_str().ok_or_else(invalid)?)
+        .map_err(|_| invalid())?;
+    if conversation.is_nil() {
+        return Err(invalid());
+    }
+    let source = body["source_conversation_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if source.is_some_and(|s| s.len() > 256) {
+        return Err(invalid());
+    }
+    if let Some(old) =
+        sqlx::query("SELECT status FROM bee_room_bindings WHERE room_id=$1 FOR UPDATE")
+            .bind(room_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        && old.get::<String, _>("status") != "unbound"
+    {
+        return Err(conflict(
+            "bee_already_bound",
+            "Unbind the current conversation before changing it",
+        ));
+    }
+    let rev: i64 = sqlx::query_scalar("SELECT sequence+1 FROM rooms WHERE id=$1")
+        .bind(room_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    let command_id = Uuid::new_v4();
+    let speaker_session: Uuid = sqlx::query_scalar("SELECT session_id FROM memberships WHERE room_id=$1 AND role='speaker' AND status='active'")
+        .bind(room_id).fetch_one(&mut **tx).await?;
+    let payload = json!({"conversation_id":conversation,"source_conversation_id":source,"room_id":room_id,"session_id":speaker_session,"revision":rev});
+    sqlx::query("INSERT INTO bee_room_bindings(room_id,conversation_id,source_conversation_id,status,revision) VALUES($1,$2,$3,'binding',$4) ON CONFLICT(room_id) DO UPDATE SET conversation_id=EXCLUDED.conversation_id,source_conversation_id=EXCLUDED.source_conversation_id,status='binding',revision=EXCLUDED.revision,updated_at=now()")
+        .bind(room_id).bind(conversation).bind(source).bind(rev).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO bee_command_outbox(command_id,room_id,conversation_id,command_type,revision,payload) VALUES($1,$2,$3,'bind',$4,$5)").bind(command_id).bind(room_id).bind(conversation).bind(rev).bind(payload).execute(&mut **tx).await?;
+    change(tx, room_id, false).await?;
+    Ok(json!({"status":"binding","command_id":command_id,"revision":rev}))
+}
+
+async fn unbind_bee(tx: &mut Transaction<'_, Postgres>, room_id: Uuid) -> Result<Value> {
+    let row = sqlx::query(
+        "SELECT conversation_id,status FROM bee_room_bindings WHERE room_id=$1 FOR UPDATE",
+    )
+    .bind(room_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(missing)?;
+    let conversation: Uuid = row.get("conversation_id");
+    let state: String = row.get("status");
+    if state == "unbound" {
+        return Ok(json!({"status":"unbound"}));
+    }
+    let rev: i64 = sqlx::query_scalar("SELECT sequence+1 FROM rooms WHERE id=$1")
+        .bind(room_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    let command_id = Uuid::new_v4();
+    let speaker_session: Uuid = sqlx::query_scalar("SELECT session_id FROM memberships WHERE room_id=$1 AND role='speaker' AND status='active'")
+        .bind(room_id).fetch_one(&mut **tx).await?;
+    let payload = json!({"conversation_id":conversation,"room_id":room_id,"session_id":speaker_session,"revision":rev});
+    sqlx::query("UPDATE bee_room_bindings SET status='unbinding',revision=$2,updated_at=now() WHERE room_id=$1").bind(room_id).bind(rev).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO bee_command_outbox(command_id,room_id,conversation_id,command_type,revision,payload) VALUES($1,$2,$3,'unbind',$4,$5)").bind(command_id).bind(room_id).bind(conversation).bind(rev).bind(payload).execute(&mut **tx).await?;
+    change(tx, room_id, false).await?;
+    Ok(json!({"status":"unbinding","command_id":command_id,"revision":rev}))
 }
 
 async fn create_room(
@@ -1109,7 +1223,11 @@ async fn read(
     let room_row = room(&mut tx, room_id).await?;
     let member = membership(&mut tx, room_id, &session, &access.security).await?;
     let body = if p[2] == "state" {
-        snapshot(&room_row, &member)
+        let mut state = snapshot(&room_row, &member);
+        if member.get::<String, _>("role") != "audience" {
+            state["bee"] = bee_snapshot(&mut tx, room_id).await?;
+        }
+        state
     } else if p[2] == "memberships" || p[2] == "invitations" {
         require_speaker(&member)?;
         let (limit, after) = list_window(uri.query())?;
@@ -1250,8 +1368,146 @@ fn invitation_item(row: &PgRow) -> Value {
 pub fn internal_router(access: Access) -> Router {
     Router::new()
         .route("/internal/v1/readyz", get(internal_ready))
+        .route("/internal/v1/bee/commands", get(bee_commands))
+        .route(
+            "/internal/v1/bee/commands/{command}/ack",
+            post(bee_command_ack),
+        )
+        .route("/internal/v1/bee/rooms/{room}/status", post(bee_status))
         .fallback(|| async { missing() })
         .with_state(access)
+}
+
+fn require_bee(headers: &HeaderMap, access: &Access) -> Result<()> {
+    let Some(value) = h(headers, "authorization").and_then(|v| v.strip_prefix("Bearer ")) else {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "session_required",
+            "Service authentication required",
+        ));
+    };
+    if !credential_matches(&access.security.bee_credential, value) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "session_required",
+            "Service authentication required",
+        ));
+    }
+    Ok(())
+}
+
+async fn bee_commands(State(access): State<Access>, headers: HeaderMap) -> Result<Response> {
+    require_bee(&headers, &access)?;
+    let rows=sqlx::query("SELECT command_id,room_id,conversation_id,command_type,revision,payload FROM bee_command_outbox WHERE delivered_at IS NULL ORDER BY created_at LIMIT 100").fetch_all(&access.pool).await?;
+    let commands: Vec<Value>=rows.into_iter().map(|r| json!({"command_id":r.get::<Uuid,_>("command_id"),"room_id":r.get::<Uuid,_>("room_id"),"conversation_id":r.get::<Uuid,_>("conversation_id"),"type":r.get::<String,_>("command_type"),"revision":r.get::<i64,_>("revision"),"payload":r.get::<Value,_>("payload")})).collect();
+    Ok(reply(StatusCode::OK, json!({"commands":commands})))
+}
+
+async fn bee_command_ack(
+    State(access): State<Access>,
+    axum::extract::Path(command): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Result<Response> {
+    require_bee(&headers, &access)?;
+    let id = Uuid::parse_str(&command).map_err(|_| invalid())?;
+    let mut tx = access.pool.begin().await?;
+    let row = sqlx::query("SELECT room_id,command_type,revision,delivered_at FROM bee_command_outbox WHERE command_id=$1 FOR UPDATE")
+        .bind(id).fetch_optional(&mut *tx).await?.ok_or_else(missing)?;
+    if row
+        .get::<Option<DateTime<Utc>>, _>("delivered_at")
+        .is_some()
+    {
+        tx.commit().await?;
+        return Ok(reply(
+            StatusCode::OK,
+            json!({"accepted":true,"duplicate":true}),
+        ));
+    }
+    let room_id: Uuid = row.get("room_id");
+    let ty: String = row.get("command_type");
+    let rev: i64 = row.get("revision");
+    sqlx::query("UPDATE bee_command_outbox SET delivered_at=now() WHERE command_id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let changed = sqlx::query(
+        "UPDATE bee_room_bindings SET status=$2,updated_at=now() WHERE room_id=$1 AND revision=$3",
+    )
+    .bind(room_id)
+    .bind(if ty == "bind" { "bound" } else { "unbound" })
+    .bind(rev)
+    .execute(&mut *tx)
+    .await?;
+    if changed.rows_affected() > 0 && ty == "unbind" {
+        sqlx::query("DELETE FROM bee_room_status WHERE room_id=$1")
+            .bind(room_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if changed.rows_affected() > 0 {
+        change(&mut tx, room_id, false).await?;
+    }
+    tx.commit().await?;
+    Ok(reply(StatusCode::OK, json!({"accepted":true})))
+}
+
+async fn bee_status(
+    State(access): State<Access>,
+    axum::extract::Path(room): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(status): Json<Value>,
+) -> Result<Response> {
+    require_bee(&headers, &access)?;
+    let room = Uuid::parse_str(&room).map_err(|_| missing())?;
+    if !status.is_object() || status.as_object().is_some_and(|o| o.len() > 16) {
+        return Err(invalid());
+    }
+    let conversation = Uuid::parse_str(status["binding_id"].as_str().unwrap_or("")).ok();
+    let mut tx = access.pool.begin().await?;
+    let binding = sqlx::query(
+        "SELECT conversation_id,status,revision FROM bee_room_bindings WHERE room_id=$1",
+    )
+    .bind(room)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(missing)?;
+    let bound: Uuid = binding.get("conversation_id");
+    let bind_status: String = binding.get("status");
+    let revision: i64 = binding.get("revision");
+    let incoming_revision = status["connectivity_revision"].as_i64();
+    if incoming_revision.is_some_and(|incoming| incoming < revision) {
+        return Err(conflict(
+            "bee_binding_stale",
+            "A newer binding revision superseded this status",
+        ));
+    }
+    let valid_bind = status["status"] == "bound"
+        && matches!(bind_status.as_str(), "binding" | "bound")
+        && conversation == Some(bound);
+    let valid_unbind =
+        status["status"] == "unbound" && bind_status == "unbinding" && conversation.is_none();
+    if incoming_revision != Some(revision) || !(valid_bind || valid_unbind) {
+        return Err(conflict(
+            "bee_binding_mismatch",
+            "Status does not match room binding",
+        ));
+    }
+    if let Some(previous) = sqlx::query("SELECT status FROM bee_room_status WHERE room_id=$1")
+        .bind(room)
+        .fetch_optional(&mut *tx)
+        .await?
+        && previous.get::<Value, _>("status") == status
+    {
+        tx.commit().await?;
+        return Ok(reply(
+            StatusCode::OK,
+            json!({"accepted":true,"duplicate":true}),
+        ));
+    }
+    sqlx::query("INSERT INTO bee_room_status(room_id,status) VALUES($1,$2) ON CONFLICT(room_id) DO UPDATE SET status=EXCLUDED.status,updated_at=now()").bind(room).bind(status).execute(&mut *tx).await?;
+    change(&mut tx, room, false).await?;
+    tx.commit().await?;
+    Ok(reply(StatusCode::OK, json!({"accepted":true})))
 }
 
 async fn internal_ready(State(access): State<Access>, headers: HeaderMap) -> Result<Response> {

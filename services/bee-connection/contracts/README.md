@@ -1,59 +1,47 @@
 # Bee boundary v1
 
 This crate owns its models and its own PostgreSQL database. It does not import
-sessions business logic or read sessions tables. Existing-solution preflight:
-reuse the repository's Serde, UUID, Chrono, Tokio and SQLx dependencies; there is
-no existing Bee client or verified protocol in this repository. No speculative
-SDK or new transport dependency is introduced.
+sessions business logic or read sessions tables. No real Bee protocol is
+assumed by the canonical contract or binding worker.
 
-## Internal room binding delivery (contract, not an HTTP endpoint)
+## Sessions-authoritative room binding
 
-An authenticated sessions producer must deliver a version-1 command containing
-an internal SansCue conversation UUID, room UUID and session UUID. Sessions owns
-speaker permission checks and room lifecycle authorization. Bee owns the stored
-mapping. Retrying the same mapping is idempotent; changing an existing mapping
-is rejected, so retries cannot move earlier transcripts into another room.
-Use a new conversation UUID for a new source stream or session. UUIDs here do
-not assert that Bee supplies any identifier. Unbound ingestion is quarantined,
-not guessed, and is not silently reattached later.
+The speaker-only sessions routes create immutable command intents and a durable
+outbox in the sessions database. A command contains its stable command UUID,
+monotonic room revision, operation (`bind` or `unbind`), internal conversation
+UUID, room UUID, authorized speaker session UUID and an optional external source
+conversation identifier. The optional source identity is only a value provided
+at bind time; the integration does not infer one.
 
-Production transport/authentication, end-room/unbind delivery and transactional
-outbox/inbox integration are deliberately not exposed yet. No public endpoint
-accepts a room binding. This first implementation accepts trusted internal calls
-and local sample input only. It is not a speaker authorization replacement.
+The authenticated private sessions listener exposes command polling,
+acknowledgement and a binding-scoped Bee status-summary endpoint. Bee polls,
+applies command plus inbox receipt atomically in its own database, delivers a
+status summary, then acknowledges. Repeats are safe. Bee-local room revision
+fences reject delayed older commands; a later bind closes an earlier local
+binding when switching conversations. Sessions remains authoritative for
+speaker permission and room lifecycle. Neither service queries the other's DB.
+
+The current worker is device-independent; it is not a Bee transport. Exactly
+one worker instance is supported because poll rows are not leased. Keep its
+internal URL and service token on trusted private transport/network only; do not
+expose the sessions private listener or token publicly. The repo's local Compose
+file does not yet provision this service/credential. No public endpoint accepts
+service credentials.
 
 ## Canonical conversation event v1
 
-The serialized Rust ConversationEvent is the canonical owned contract:
-schema_version=1, internal event_id UUID, immutable binding, ingest_ordinal,
-received_at (UTC), optional source_id/source_sequence, and text. The immutable
-binding can carry an independently supplied source-conversation identity; when
-present, every transcript observation must carry exactly the same identity.
-If the source genuinely omits that identity, both values remain absent; the
-pipeline does not substitute its internal UUID. Raw bytes are
-retained separately for every observation, including malformed and duplicate
-observations. Arrival ordinal is conversation-local and includes control,
-quarantine and duplicate observations, so event ordinals need not be contiguous.
-Arrival order is never described as speech order. Wall-clock times may regress.
+The serialized Rust `ConversationEvent` is the canonical owned contract:
+`schema_version=1`, internal `event_id` UUID, immutable binding,
+`ingest_ordinal`, `received_at` (UTC), optional `source_id`/`source_sequence`,
+and text. The binding may carry a separately supplied source-conversation
+identity; when present, transcript observations must match it exactly. If the
+source omits identity, it remains absent; the pipeline does not substitute an
+internal UUID. Raw bytes are retained for every observation, including malformed
+and duplicate observations. Arrival ordinal is conversation-local, not speech
+order; timestamps may regress.
 
-Only a source-verified capability permits source-ID/sequence deduplication.
-Capabilities apply to one immutable conversation stream: stable IDs cannot be
-reused for revisions, and contiguous sequence numbers cannot reset or roll over.
-If a real source differs, its adapter must map those semantics explicitly or
-disable the capability; numeric metadata alone does not enable it.
+Only source-verified capabilities enable source-ID/sequence deduplication.
 Without identity evidence, identical text is two observations, not a duplicate.
-The recording format is a SansCue synthetic fixture, NOT a Bee wire protocol.
-
-Future delivery is at least once, keyed by internal event_id. Consumers must
-idempotently accept schema version 1, retain binding and original ordinal, and
-not assume arrival equals speech order. Acknowledgement must follow durable
-consumer commit. Transactional outbound delivery is not implemented in this
-branch; persisted events are not a claim of delivered jobs.
-
-## External acceptance blocker
-
-**REAL BEE DEVICE / LIVE API VERIFICATION**: authentication, exact raw payloads,
-source identity scope, source ordering/reset semantics, reconnect behavior,
-history/replay availability and recovery guarantees require real device/API
-observations. Actual Bee-to-room acceptance is not complete. No claimed SDK,
-endpoint, sequence field or recovery guarantee substitutes for that check.
+The recording format and fixture are SansCue synthetic data, not a Bee wire
+protocol. Real source identity scope, ordering/reset semantics, reconnect,
+history and recovery guarantees still require device/API verification.

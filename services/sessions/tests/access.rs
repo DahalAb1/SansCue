@@ -582,6 +582,28 @@ async fn once(
     )
 }
 
+async fn private_json(app: &Router, method: &str, path: &str, body: Value) -> (u16, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", "Bearer synthetic-bee")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 fn token_of(browser: &Browser) -> &str {
     browser.cookie.split_once('=').unwrap().1
 }
@@ -1253,5 +1275,306 @@ async fn private_readiness_is_not_a_public_route() {
     let (status, body) = once(&app, "GET", "/readyz", None).await;
     assert_eq!(status, 200);
     assert_eq!(body["status"], "ready");
+    finish(pool, admin, schema).await;
+}
+
+#[tokio::test]
+async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable() {
+    let (pool, admin, schema) = db().await;
+    let security = Security {
+        bee_credential: Some("synthetic-bee".into()),
+        ..security()
+    };
+    let app = configured_router(pool.clone(), security.clone());
+    let private = internal_router(Access {
+        pool: pool.clone(),
+        security,
+    });
+    let browser = boot(&app).await;
+    login(&app, &browser).await;
+    let (_, created) = call(
+        &app,
+        &browser,
+        "POST",
+        "/rooms",
+        json!({"title":"Bee test"}),
+    )
+    .await;
+    let room = created["state"]["room"]["id"].as_str().unwrap();
+    let conversation = Uuid::new_v4();
+    let (status, bound) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"conversation_id":conversation,"source_conversation_id":null}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(bound["status"], "binding");
+    let state = call(
+        &app,
+        &browser,
+        "GET",
+        &format!("/rooms/{room}/state"),
+        json!({}),
+    )
+    .await
+    .1;
+    assert_eq!(state["bee"]["status"], "binding");
+    let mut request = Request::builder()
+        .uri("/internal/v1/bee/commands")
+        .header("authorization", "Bearer synthetic-bee")
+        .body(Body::empty())
+        .unwrap();
+    let commands = private.clone().oneshot(request).await.unwrap();
+    assert_eq!(commands.status(), 200);
+    let bytes = commands.into_body().collect().await.unwrap().to_bytes();
+    let list: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(list["commands"].as_array().unwrap().len(), 1);
+    assert!(
+        Uuid::parse_str(
+            list["commands"][0]["payload"]["session_id"]
+                .as_str()
+                .unwrap()
+        )
+        .is_ok()
+    );
+    let command = list["commands"][0]["command_id"].as_str().unwrap();
+    let revision = bound["revision"].as_i64().unwrap();
+    assert_eq!(
+        call(
+            &app,
+            &browser,
+            "GET",
+            &format!("/rooms/{room}/state"),
+            json!({})
+        )
+        .await
+        .1["bee"]["status"],
+        "bound"
+    );
+    let status_body = json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":revision});
+    assert_eq!(
+        private_json(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/rooms/{room}/status"),
+            status_body.clone()
+        )
+        .await
+        .0,
+        200
+    );
+    request = Request::builder()
+        .method("POST")
+        .uri(format!("/internal/v1/bee/commands/{command}/ack"))
+        .header("authorization", "Bearer synthetic-bee")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        private.clone().oneshot(request).await.unwrap().status(),
+        200
+    );
+    let before: i64 = sqlx::query_scalar("SELECT sequence FROM rooms WHERE id=$1")
+        .bind(Uuid::parse_str(room).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let duplicate = once(
+        &private,
+        "POST",
+        &format!("/internal/v1/bee/commands/{command}/ack"),
+        Some(("authorization", "Bearer synthetic-bee")),
+    )
+    .await;
+    assert_eq!(duplicate.0, 200);
+    let after: i64 = sqlx::query_scalar("SELECT sequence FROM rooms WHERE id=$1")
+        .bind(Uuid::parse_str(room).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after, "duplicate ack must not emit a room event");
+
+    let (_, unbind) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/unbind"),
+        json!({}),
+    )
+    .await;
+    let unbind_command = unbind["command_id"].as_str().unwrap();
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/commands/{unbind_command}/ack"),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, new_binding) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"conversation_id":Uuid::new_v4(),"source_conversation_id":null}),
+    )
+    .await;
+    let (_, commands) = once(
+        &private,
+        "GET",
+        "/internal/v1/bee/commands",
+        Some(("authorization", "Bearer synthetic-bee")),
+    )
+    .await;
+    let new_command = commands["commands"][0]["command_id"].as_str().unwrap();
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/commands/{new_command}/ack"),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    let new_conversation = Uuid::parse_str(
+        commands["commands"][0]["payload"]["conversation_id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":new_conversation,"status":"bound","has_gaps":false,"connectivity_revision":new_binding["revision"]})).await.0,200);
+    let events_before: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM room_events WHERE room_id=$1")
+            .bind(Uuid::parse_str(room).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/commands/{unbind_command}/ack"),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    let events_after: i64 = sqlx::query_scalar("SELECT count(*) FROM room_events WHERE room_id=$1")
+        .bind(Uuid::parse_str(room).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        events_before, events_after,
+        "old duplicate unbind ack must not emit a room event"
+    );
+    let current = call(
+        &app,
+        &browser,
+        "GET",
+        &format!("/rooms/{room}/state"),
+        json!({}),
+    )
+    .await
+    .1;
+    assert_eq!(current["bee"]["binding_id"], new_conversation.to_string());
+    assert_eq!(current["bee"]["status"], "bound");
+    finish(pool, admin, schema).await;
+}
+
+#[tokio::test]
+async fn superseded_binding_status_has_machine_readable_stale_outcome() {
+    let (pool, admin, schema) = db().await;
+    let security = Security {
+        bee_credential: Some("synthetic-bee".into()),
+        ..security()
+    };
+    let app = configured_router(pool.clone(), security.clone());
+    let private = internal_router(Access {
+        pool: pool.clone(),
+        security,
+    });
+    let browser = boot(&app).await;
+    login(&app, &browser).await;
+    let (_, created) = call(
+        &app,
+        &browser,
+        "POST",
+        "/rooms",
+        json!({"title":"stale status"}),
+    )
+    .await;
+    let room = created["state"]["room"]["id"].as_str().unwrap();
+    let conversation = Uuid::new_v4();
+    let (_, bind) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"conversation_id":conversation,"source_conversation_id":null}),
+    )
+    .await;
+    let (_, unbind) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/unbind"),
+        json!({}),
+    )
+    .await;
+    let stale=private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":conversation,"status":"bound","connectivity_revision":bind["revision"]})).await;
+    assert_eq!(stale.0, 409);
+    assert_eq!(stale.1["code"], "bee_binding_stale");
+    assert_eq!(
+        private_json(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/rooms/{room}/status"),
+            json!({"binding_id":null,"status":"unbound","connectivity_revision":unbind["revision"]})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/commands/{}/ack", bind["command_id"]),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/commands/{}/ack", unbind["command_id"]),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    let current = call(
+        &app,
+        &browser,
+        "GET",
+        &format!("/rooms/{room}/state"),
+        json!({}),
+    )
+    .await
+    .1;
+    assert_eq!(current["bee"]["status"], "unbound");
     finish(pool, admin, schema).await;
 }

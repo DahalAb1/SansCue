@@ -1,4 +1,8 @@
-use bee_connection::{domain::*, pipeline::*, store::Store};
+use bee_connection::{
+    domain::*,
+    pipeline::*,
+    store::{CommandOutcome, Store},
+};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -116,4 +120,53 @@ async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine
         GapStatus::Recovered
     );
     restarted.close().await;
+}
+
+#[tokio::test]
+async fn room_revision_fence_rejects_delayed_bind_after_unbind() {
+    let url=std::env::var("BEE_TEST_DATABASE_URL").expect("BEE_TEST_DATABASE_URL must name a disposable Bee-only PostgreSQL database; this test never skips");
+    let store = Store::connect(&url).await.unwrap();
+    let conversation = Uuid::new_v4();
+    let room = Uuid::new_v4();
+    let session = Uuid::new_v4();
+    let binding = Binding {
+        conversation_id: conversation,
+        source_conversation_id: Some("synthetic-conversation".into()),
+        room_id: room,
+        session_id: session,
+    };
+    store
+        .ensure_command_conversation(conversation)
+        .await
+        .unwrap();
+    let unbind = Uuid::new_v4();
+    let unbind_result = store
+        .apply_command(unbind, 2, "unbind", binding.clone())
+        .await
+        .unwrap();
+    assert_eq!(unbind_result, CommandOutcome::Applied);
+    assert!(store.load(conversation).await.unwrap().binding().is_none());
+    // Bind r1 remained pending while a later unbind r2 was applied.
+    let stale = store
+        .apply_command(Uuid::new_v4(), 1, "bind", binding.clone())
+        .await
+        .unwrap();
+    assert_eq!(stale, CommandOutcome::Stale);
+    assert!(store.load(conversation).await.unwrap().binding().is_none());
+    // The caller can ack that stale row (without publishing status) and proceed.
+    let next = store
+        .apply_command(Uuid::new_v4(), 3, "bind", binding.clone())
+        .await
+        .unwrap();
+    assert_eq!(next, CommandOutcome::Applied);
+    assert!(store.load(conversation).await.unwrap().binding().is_some());
+    assert_eq!(
+        store
+            .apply_command(unbind, 2, "unbind", binding)
+            .await
+            .unwrap(),
+        CommandOutcome::Stale
+    );
+    assert!(store.load(conversation).await.unwrap().binding().is_some());
+    store.close().await;
 }
