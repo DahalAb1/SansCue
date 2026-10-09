@@ -1423,6 +1423,13 @@ async fn bee_command_ack(
     .bind(rev)
     .execute(&mut *tx)
     .await?;
+    if ty == "unbind" {
+        sqlx::query("DELETE FROM bee_room_status WHERE room_id=$1")
+            .bind(room_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    change(&mut tx, room_id, false).await?;
     tx.commit().await?;
     Ok(reply(StatusCode::OK, json!({"accepted":true})))
 }
