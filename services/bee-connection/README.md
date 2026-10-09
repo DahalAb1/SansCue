@@ -32,13 +32,18 @@ the worker (set `SESSIONS_INTERNAL_HOST=0.0.0.0` in a container network). Run:
 cargo run -p bee-connection -- --worker
 ~~~
 
+Exactly one worker instance is supported for now; commands are not leased, so
+multiple workers may race delivery/acknowledgement. Keep the sessions internal
+URL and service token on trusted private transport/network only. Never expose
+the private listener or token on a public route/network. The local Compose file
+does not yet provision this worker.
+
 The worker polls sessions commands, atomically applies each command and its
 idempotency receipt in Bee PostgreSQL, posts a binding status summary, then
 acknowledges the sessions outbox row. Stale revisions are acknowledged without
 publishing old status, so a stale head command cannot starve later work. Failures retry on the next poll. The worker
 handles only binding control; it starts no Bee/device transport or transcript
-flow. The local Compose file does not yet provision this service or its private
-credential.
+flow.
 
 ## Storage and gap semantics
 

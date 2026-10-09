@@ -21,9 +21,12 @@ fences reject delayed older commands; a later bind closes an earlier local
 binding when switching conversations. Sessions remains authoritative for
 speaker permission and room lifecycle. Neither service queries the other's DB.
 
-The current worker is device-independent; it is not a Bee transport. The repo's
-local Compose file does not yet provision this service/credential. No public
-endpoint accepts service credentials.
+The current worker is device-independent; it is not a Bee transport. Exactly
+one worker instance is supported because poll rows are not leased. Keep its
+internal URL and service token on trusted private transport/network only; do not
+expose the sessions private listener or token publicly. The repo's local Compose
+file does not yet provision this service/credential. No public endpoint accepts
+service credentials.
 
 ## Canonical conversation event v1
 
