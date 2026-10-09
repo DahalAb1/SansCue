@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import { ApiError, api, deniesRoomRead, errorMessage, parseRoomState, paths } from './api';
 import type { State, Invitation, Membership, Page, LinkResult, QuestionCandidate } from './api';
 import { followLink, selectedSection, sharePath, tabLabel } from './navigation';
-import { draftKey, keepDraft, keepInvite, keepJoin, memoryDraft, memoryInvite, memoryJoin } from './pageMemory';
+import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft } from './pageMemory';
 import { parseRoomEvent, reconnectDelay } from './live';
 
 function when(value: string): string {
@@ -40,18 +40,35 @@ export function ShareLink({ value, kind }: { value: string; kind: 'join' | 'invi
 function QuestionsPanel({ state, refresh, ended }: { state: State; refresh: () => Promise<boolean>; ended: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [draft, setDraft] = useState(state.active_question?.text ?? '');
+  const owner = draftKey(state.room.id, state.membership.id, 'question-publication');
+  const active = state.active_question;
+  const [draft, setDraft] = useState(() => active
+    ? memoryPublishedQuestionDraft(owner, active.id, active.version, active.text)
+    : '');
+  useEffect(() => {
+    setDraft(active ? memoryPublishedQuestionDraft(owner, active.id, active.version, active.text) : '');
+  }, [owner, active?.id, active?.version]);
   const candidates = state.question_candidates ?? [];
   async function publish(candidate: QuestionCandidate) {
     setBusy(true); setError('');
-    try { await api.mutate(paths.publishQuestion(state.room.id, candidate.candidate_id)); await refresh(); }
+    try {
+      const result = await api.mutate<{ question_id?: string; version?: number }>(paths.publishQuestion(state.room.id, candidate.candidate_id));
+      if (result.question_id && Number.isSafeInteger(result.version)) keepPublishedQuestionDraft(owner, result.question_id, result.version!, candidate.text);
+      else clearPublishedQuestionDraft(owner);
+      await refresh();
+    }
     catch (reason) { setError(errorMessage(reason)); }
     finally { setBusy(false); }
   }
   async function addVersion() {
     if (!state.active_question || draft.trim() === '') return;
     setBusy(true); setError('');
-    try { await api.mutate(paths.questionVersion(state.room.id, state.active_question.id), { text: draft }); await refresh(); }
+    try {
+      const result = await api.mutate<{ question_id?: string; version?: number }>(paths.questionVersion(state.room.id, state.active_question.id), { text: draft });
+      if (result.question_id && Number.isSafeInteger(result.version)) keepPublishedQuestionDraft(owner, result.question_id, result.version!, draft);
+      else clearPublishedQuestionDraft(owner);
+      await refresh();
+    }
     catch (reason) { setError(errorMessage(reason)); }
     finally { setBusy(false); }
   }
@@ -62,7 +79,11 @@ function QuestionsPanel({ state, refresh, ended }: { state: State; refresh: () =
       <p>{state.active_question.text} <small>Version {state.active_question.version}</small></p>
       {state.active_question.versions && <ul aria-label="Immutable published versions">{state.active_question.versions.map(item => <li key={item.version}><strong>Version {item.version}</strong>: {item.text} <small>{when(item.created_at)}</small></li>)}</ul>}
       {state.membership.role === 'speaker' && !ended && <>
-        <label>New immutable version<textarea rows={3} maxLength={1000} value={draft} onInput={e => setDraft(e.currentTarget.value)} /></label>
+        <label>New immutable version<textarea rows={3} maxLength={1000} value={draft} onInput={e => {
+          const value = e.currentTarget.value;
+          setDraft(value);
+          keepPublishedQuestionDraft(owner, state.active_question!.id, state.active_question!.version, value);
+        }} /></label>
         <button disabled={busy || draft.trim() === state.active_question.text} onClick={() => void addVersion()}>Publish new version</button>
       </>}
     </> : <p>No question is published.</p>}

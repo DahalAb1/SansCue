@@ -13,7 +13,7 @@ await server.close();
 
 const { SessionsApi, ApiError, errorMessage, paths, parseRoomState, preferState, deniesRoomRead } = apiModule;
 const { parseRoute, tabsFor, selectedSection, sharePath } = navigation;
-const { keepJoin, memoryJoin, keepInvite, memoryInvite, keepDraft, memoryDraft, draftKey } = memory;
+const { keepJoin, memoryJoin, keepInvite, memoryInvite, keepDraft, memoryDraft, draftKey, keepPublishedQuestionDraft, memoryPublishedQuestionDraft, clearPublishedQuestionDraft } = memory;
 const { parseRoomEvent, reconnectDelay } = live;
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const roomId = '00000000-0000-4000-8000-000000000001';
@@ -344,6 +344,20 @@ test('written Q&A drafts are keyed by membership and survive section unmounts', 
   assert.equal(memoryDraft(draftKey(roomId, roomId, 'audience')), '');
   assert.equal(memoryDraft(draftKey(roomId, memberId, 'ta')), '');
   keepDraft(key, '');
+});
+
+test('speaker version drafts survive tab changes but reset when publication version changes', () => {
+  const key = draftKey(roomId, memberId, 'question-publication');
+  keepPublishedQuestionDraft(key, memberId, 1, 'Unsaved speaker edit');
+  // Returning to Questions remounts the panel with the same room, member and active version.
+  assert.equal(memoryPublishedQuestionDraft(key, memberId, 1, 'Published v1'), 'Unsaved speaker edit');
+  // A new publication/version invalidates the stale unsaved draft and uses the published baseline.
+  assert.equal(memoryPublishedQuestionDraft(key, memberId, 2, 'Published v2'), 'Published v2');
+  keepPublishedQuestionDraft(key, memberId, 2, 'Published v2');
+  assert.equal(memoryPublishedQuestionDraft(key, memberId, 2, 'fallback'), 'Published v2');
+  assert.equal(memoryPublishedQuestionDraft(draftKey(roomId, roomId, 'question-publication'), memberId, 2, 'Other member'), 'Other member');
+  clearPublishedQuestionDraft(key);
+  assert.equal(memoryPublishedQuestionDraft(key, memberId, 2, 'Published v2'), 'Published v2');
 });
 
 test('client source does not persist secrets or log them', () => {
