@@ -848,14 +848,12 @@ async fn bind_bee(
     if source.is_some_and(|s| s.len() > 256) {
         return Err(invalid());
     }
-    if let Some(old) = sqlx::query(
-        "SELECT conversation_id,status FROM bee_room_bindings WHERE room_id=$1 FOR UPDATE",
-    )
-    .bind(room_id)
-    .fetch_optional(&mut **tx)
-    .await?
-        && (old.get::<Uuid, _>("conversation_id") != conversation
-            || old.get::<String, _>("status") != "unbound")
+    if let Some(old) =
+        sqlx::query("SELECT status FROM bee_room_bindings WHERE room_id=$1 FOR UPDATE")
+            .bind(room_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        && old.get::<String, _>("status") != "unbound"
     {
         return Err(conflict(
             "bee_already_bound",
