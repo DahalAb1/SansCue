@@ -1,7 +1,23 @@
 # Environment verification status
 
-Updated October 8, 2026. This records checks that need a Docker-capable host; it
-does not replace the PostgreSQL-backed sessions test suite.
+Updated October 9, 2026. The earlier native-PostgreSQL/frontend results below
+are a historical foundation record, not a claim that the full current MVP or
+the new synthetic acceptance procedure has run on this checkout. This document
+tracks Docker-only checks and does not replace current service-specific
+PostgreSQL verification.
+
+## Current acceptance gates
+
+- **Hardware-independent synthetic flow:** the procedure at
+  [`services/acceptance`](../services/acceptance/README.md) is available and
+  requires three distinct native PostgreSQL databases. Its result is pending
+  until explicitly run on the target commit.
+- **Local code checks:** current branch checks should be reported with the exact
+  commit and the observed frontend/Rust commands; prior foundation results below
+  should not be generalized to newly added services.
+- **Live Bee/device/API, model quality, AWS, Docker/Compose, production
+  performance, and backup/restore:** unverified separate gates. Synthetic input
+  is not a live Bee validation, and `stub-v1` is not model-quality evidence.
 
 ## Passed without containers
 

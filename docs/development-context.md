@@ -1,25 +1,25 @@
 # Development Context
 
-Updated October 8, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
+Updated October 9, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
 
 ## Current implementation status
 
-`dev` contains the web room/access flow, PostgreSQL-backed sessions service,
-durable room updates, and local Compose packaging. Rust checks and tests against
-the provisioned native PostgreSQL 17 database, frontend checks, and runtime
-configuration unit/static checks pass. Docker/Compose build, proxy, real outage,
-named-volume persistence, and backup/restore checks remain environment-blocked;
-AWS deployment and Bee/model integrations are not complete. See the
-[environment verification record](environment-verification.md) for the exact
-container-only checklist.
+Current `dev` contains room/access and durable updates; Bee-owned event storage,
+internal binding commands and transactional delivery; Topics-owned transcript
+projection/job/candidate storage; and Sessions-owned question publication,
+audience ratings, written Q&A, and dashboard counts. `stub-v1` is a deterministic
+development placeholder, not a model result. The
+[synthetic acceptance procedure](../services/acceptance/README.md) starts all
+three services locally and drives the fixture through the audience flow using
+three isolated PostgreSQL databases. Whether it has run successfully on a given
+host/commit must be stated from observed results, not inferred from its
+availability.
 
-The `feat/topics-question-candidates` worktree adds a device-independent
-accepted-transcript delivery chain, Topics-owned projection/job/candidate
-storage, and an unpublished deterministic `stub-v1` preview visible only in
-speaker/TA room snapshots. Local unit/contracts and frontend checks are
-available; DB-backed cross-service delivery and Docker startup are not yet
-verified. This does not establish real Bee device/API behavior or a model
-integration.
+Real Bee hardware/live API, AWS deployment, model quality, Docker/Compose
+startup/routing/outage/persistence/backup, and production capacity/performance
+are unverified external gates. PostgreSQL-backed verification is not Docker
+verification. See the [environment verification record](environment-verification.md)
+for Docker-only checks and the [MVP plan](mvp-plan.md) for the acceptance scope.
 
 ## Implementation agreement
 
@@ -217,14 +217,10 @@ Within a feature, separate HTTP handling, business rules, types/errors, and SQL 
 
 ## Development sequence and open decisions
 
-- The local implementation covers the frontend shell, sessions service, room creation/join/access, and live updates. Local Compose packaging exists but awaits Docker verification; AWS account/domain readiness and deployment are unverified.
-- Step 6 reconnect and room-ending behavior is implemented and frontend-verified. The Step 7 first branch adds a separate Bee core boundary, canonical events, internal room binding, deterministic synthetic replay, gap evidence and Bee-owned PostgreSQL aggregate storage. See [Bee connection](../services/bee-connection/README.md). Sessions speaker endpoints/auth, service delivery transport/outbox and live Bee integration remain outside this branch. Actual Step 7 acceptance is blocked on **REAL BEE DEVICE / LIVE API VERIFICATION**. Continue native PostgreSQL tests for every relevant service change; the Bee persistence test requires its own disposable database, separate from sessions.
-- Build general infrastructure, connect the services, then optimize the complete flow. Add timing measurements during integration; fix issues that block useful testing immediately.
-- Access to a Bee-enabled Apple Watch must be scheduled. Authentication, data access, live delivery, and performance have not been verified for this project.
-- Recorded transcripts can support repeatable development tests. Validate the final flow with actual Bee data.
-- Step 8: decide an initial question format, topic behavior, and context selection; connect a provisional model.
-- Step 9: compare models using the same transcripts and instructions; choose based on quality, complete-question delay, and cost. Record model and prompt versions. Bedrock is a candidate, not a finalized choice.
-- Step 10: decide response options, publishing rules, timers, Q&A visibility/moderation, dashboard attention, and TA permissions.
-- Service message transport, exact AWS capacity, and performance targets remain open. SQS is a candidate, not an installed requirement.
+- Steps 6, 7's device-independent boundary, the `stub-v1` candidate preview, and a minimum Step 10 loop (speaker publication, audience ratings, written Q&A, staff counts) are implemented on `dev`. See the per-service READMEs and [synthetic acceptance procedure](../services/acceptance/README.md). Do not describe live Bee as implemented: device transport/auth, real Bee payload identity/order, and real gap recovery remain unverified.
+- The question generator is deterministic `stub-v1`, not a model. Model/provider selection and quality evaluation remain open. Do not present preview output as AI-generated or as accepted question quality.
+- The current response controls are clear / partly clear / need help. Product decisions still open include timers, Q&A moderation/visibility policy beyond the implemented author-plus-staff scope, TA permissions beyond Questions, and dashboard attention design.
+- The hardware-independent end-to-end procedure uses three distinct native PostgreSQL databases. Its availability is not evidence it ran; report the exact commit and result only after execution. Docker/Compose, AWS account/domain readiness and deployment, production capacity/performance, backup/restore, and real-device/live-API verification are separate gates.
+- Service transport beyond the current authenticated HTTP outboxes, exact AWS capacity, and performance targets remain open. SQS remains a candidate, not an installed requirement.
 
 Update these notes when decisions change. Never add credentials, participant data, private recordings, or machine-specific paths.

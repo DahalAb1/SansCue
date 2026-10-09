@@ -121,9 +121,14 @@ function FeedbackPanel({ state, ended, refresh }: { state: State; ended: boolean
 function DashboardPanel({ state }: { state: State }) {
   const dashboard = state.dashboard;
   if (!dashboard) return <p role="status">Response dashboard unavailable.</p>;
+  const percent = (value: number | null) => typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)}%` : '—';
   return <>
     <p>{dashboard.respondents} audience response{dashboard.respondents === 1 ? '' : 's'}</p>
-    <dl><dt>Clear</dt><dd>{dashboard.counts.clear}</dd><dt>Partly clear</dt><dd>{dashboard.counts.partly_clear}</dd><dt>Need help</dt><dd>{dashboard.counts.need_help}</dd></dl>
+    <dl>
+      <dt>Clear</dt><dd>{dashboard.counts.clear} ({percent(dashboard.percentages.clear)})</dd>
+      <dt>Partly clear</dt><dd>{dashboard.counts.partly_clear} ({percent(dashboard.percentages.partly_clear)})</dd>
+      <dt>Need help</dt><dd>{dashboard.counts.need_help} ({percent(dashboard.percentages.need_help)})</dd>
+    </dl>
   </>;
 }
 

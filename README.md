@@ -4,15 +4,21 @@ A planned conference web app that uses Bee's spoken context to generate short au
 
 Built for the Bee track of the [Build, Ship, Shape: Amazon Developer Hackathon](https://amazonappdev2026.devpost.com/).
 
-**Status:** MVP implementation is underway on `dev`. The repository now contains
-the web app shell and room/access flow, a PostgreSQL-backed Rust sessions service,
-live room updates, and a documented local Compose runtime.
+**Status:** The `dev` branch now includes room/access and live updates, a
+device-independent Bee replay/binding/outbox service, deterministic
+transcript-to-candidate preview, and question publication, audience ratings,
+written Q&A, and staff response counts. Candidate generation is the explicit
+`stub-v1` placeholder, not a model integration. The new
+[hardware-independent acceptance procedure](services/acceptance/README.md)
+exercises this flow with a synthetic fixture and three separate PostgreSQL
+databases.
 
-Native PostgreSQL and frontend checks pass. Docker/Compose image, routing,
-outage/recovery, persistence, and backup/restore verification remain pending;
-AWS deployment, Bee integration, and generated-question workflows are not yet
-verified or complete. See the [verification status](docs/environment-verification.md)
-for exact remaining environment checks.
+Do not infer that the acceptance procedure or every database gate has run:
+record execution status for the current host/commit separately. Live Bee/API,
+AWS, model quality, Docker/Compose runtime, and production resilience/performance
+remain distinct unverified gates. See [verification status](docs/environment-verification.md)
+for Docker checks and [development context](docs/development-context.md) for
+current implementation boundaries.
 
 ## Documents
 

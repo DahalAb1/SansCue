@@ -145,7 +145,15 @@ flowchart TD
 
 **Service:** New Bee-connection microservice.
 
-**Success:** Actual Bee events reach the correct room's transcript store; connection gaps are visible.
+**Implemented development boundary:** A canonical event/replay pipeline, Bee-owned
+storage, room binding commands, and outbox delivery are implemented independently
+of physical hardware. The checked-in synthetic fixture exercises ordering,
+duplicate handling, reconnect/gap evidence, and malformed observations.
+
+**Still unverified:** **REAL BEE DEVICE / LIVE API VERIFICATION** is an external
+gate. No live transport, device authentication, real source identity/order, or
+real recovery behavior is claimed. Synthetic fixture success does not satisfy
+live Bee acceptance.
 
 ```mermaid
 flowchart TD
@@ -170,6 +178,13 @@ flowchart TD
 **Service:** New topics-and-questions microservice; preview through sessions-and-feedback.
 
 **Success:** A short question has traceable transcript evidence; slow generation leaves room updates responsive.
+
+**Current boundary:** The deterministic `stub-v1` preview is unpublished and
+staff-only; it is not a model result or Step 8 quality acceptance. A local
+synthetic replay acceptance procedure is documented in
+[`services/acceptance`](../services/acceptance/README.md). It requires three
+isolated PostgreSQL databases and must be run explicitly. Model quality, live
+Bee behavior, and Docker startup are separate unverified gates.
 
 **Current development slice:** The device-independent accepted-event outbox is
 connected to a new Topics-and-questions-owned transcript projection, idempotent
@@ -233,6 +248,13 @@ flowchart TD
 
 **Success:** Published questions stay stable; saved responses produce correct counts and live dashboard updates.
 
+**Current implementation:** Speaker publication copies evidence into an
+immutable question version; audience responses are idempotent and aggregate
+counts/percentages are returned only to staff. Written Q&A is separate from
+ratings and private to the audience author plus speaker/TAs. The frontend shows
+counts and one-decimal percentages (an em dash for null percentages when there
+are no respondents). This minimal flow does not establish load/performance.
+
 ```mermaid
 flowchart TD
     Bee["Bee stream"] --> B["Bee connection"]
@@ -257,6 +279,15 @@ flowchart TD
 3. Improve measured bottlenecks and retest. Choose server capacity from results; add replicas only with shared event delivery between them.
 
 **Service:** All three microservices and frontend. Each step also gets its own checks during development.
+
+**Hardware-independent acceptance procedure:**
+[`services/acceptance/synthetic-mvp.py`](../services/acceptance/README.md) starts
+the three local Rust services and Bee worker, replays the deterministic fixture,
+then checks candidate idempotency, staff-only evidence, publication, audience
+rating/Q&A, counts, and audience privacy using three distinct PostgreSQL DB URLs.
+It requires neither Docker nor device/model/AWS access. It is an available check,
+not a passed check until run. Live Bee, model quality, Docker/Compose, AWS,
+performance, and backup/restore remain independent acceptance gates.
 
 **Success:** The agreed workload meets correctness, delay, and cost targets.
 
