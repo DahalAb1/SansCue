@@ -170,3 +170,103 @@ async fn room_revision_fence_rejects_delayed_bind_after_unbind() {
     assert!(store.load(conversation).await.unwrap().binding().is_some());
     store.close().await;
 }
+
+#[derive(Clone)]
+struct TopicsStub {
+    rejected: Uuid,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+async fn topics_stub(
+    axum::extract::State(state): axum::extract::State<TopicsStub>,
+    axum::Json(event): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::Ordering;
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    let id = Uuid::parse_str(event["event_id"].as_str().unwrap()).unwrap();
+    if id == state.rejected {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            axum::Json(serde_json::json!({"code":"event_identity_conflict"})),
+        )
+            .into_response();
+    }
+    (
+        axum::http::StatusCode::ACCEPTED,
+        axum::Json(serde_json::json!({"accepted":true,"event_id":id})),
+    )
+        .into_response()
+}
+
+#[tokio::test]
+async fn terminal_topics_rejection_does_not_block_later_bee_outbox_row() {
+    use bee_connection::topics_consumer::TopicsConsumer;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let url = std::env::var("BEE_TEST_DATABASE_URL").expect("BEE_TEST_DATABASE_URL must name a disposable Bee-only PostgreSQL database; this test never skips");
+    let store = Store::connect(&url).await.unwrap();
+    let room = Uuid::new_v4();
+    let session = Uuid::new_v4();
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    for (index, conversation) in [first, second].into_iter().enumerate() {
+        store
+            .open(conversation, Capabilities::default())
+            .await
+            .unwrap();
+        store
+            .bind(Binding {
+                conversation_id: conversation,
+                source_conversation_id: None,
+                room_id: room,
+                session_id: session,
+            })
+            .await
+            .unwrap();
+        store
+            .ingest(
+                conversation,
+                Observation {
+                    received_at: "2026-10-09T00:00:00Z".parse().unwrap(),
+                    raw: format!("synthetic-{index}").into_bytes(),
+                    decoded: Ok(Signal::Transcript(Transcript {
+                        text: format!("synthetic transcript {index}"),
+                        source_conversation_id: None,
+                        source_id: None,
+                        source_sequence: None,
+                    })),
+                },
+            )
+            .await
+            .unwrap();
+        if index == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let app = axum::Router::new()
+        .route(
+            "/internal/v1/transcript-events",
+            axum::routing::post(topics_stub),
+        )
+        .with_state(TopicsStub {
+            rejected: first,
+            calls: calls.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let consumer = TopicsConsumer::new(
+        &format!("http://{address}"),
+        "synthetic-topics-token",
+        store.clone(),
+    )
+    .unwrap();
+    assert_eq!(consumer.poll_once().await.unwrap(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(store.pending_topics().await.unwrap().is_empty());
+    assert_eq!(consumer.poll_once().await.unwrap(), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    server.abort();
+    store.close().await;
+}

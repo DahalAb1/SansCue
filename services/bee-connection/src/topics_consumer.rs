@@ -34,6 +34,7 @@ impl TopicsConsumer {
     pub async fn poll_once(&self) -> Result<usize, &'static str> {
         let rows = self.store.pending_topics().await?;
         let mut done = 0;
+        let mut retryable_failure = false;
         for (id, payload) in rows {
             let result = self
                 .client
@@ -41,27 +42,52 @@ impl TopicsConsumer {
                 .bearer_auth(&self.token)
                 .json(&payload)
                 .send()
-                .await
-                .map_err(|_| "topics event delivery failed")?;
-            if !result.status().is_success() {
-                return Err("topics event delivery rejected");
+                .await;
+            let result = match result {
+                Ok(response) => response,
+                Err(_) => {
+                    retryable_failure = true;
+                    continue;
+                }
             };
-            let body: Value = result
-                .json()
-                .await
-                .map_err(|_| "topics event acknowledgement invalid")?;
+            if !result.status().is_success() {
+                let status = result.status().as_u16();
+                let body: Value = result.json().await.unwrap_or(Value::Null);
+                if let Some(code) = terminal_rejection(status, &body) {
+                    self.store.reject_topic(id, code).await?;
+                    done += 1;
+                } else {
+                    retryable_failure = true;
+                }
+                continue;
+            };
+            let body: Value = match result.json().await {
+                Ok(body) => body,
+                Err(_) => {
+                    retryable_failure = true;
+                    continue;
+                }
+            };
             if body["accepted"] != true
                 || body["event_id"]
                     .as_str()
                     .and_then(|value| Uuid::parse_str(value).ok())
                     != Some(id)
             {
-                return Err("topics event acknowledgement invalid");
+                retryable_failure = true;
+                continue;
             };
-            self.store.acknowledge_topic(id).await?;
+            if self.store.acknowledge_topic(id).await.is_err() {
+                retryable_failure = true;
+                continue;
+            }
             done += 1;
         }
-        Ok(done)
+        if retryable_failure {
+            Err("some Topics event deliveries remain pending for retry")
+        } else {
+            Ok(done)
+        }
     }
     pub async fn run(self) -> Result<(), &'static str> {
         loop {
@@ -70,5 +96,43 @@ impl TopicsConsumer {
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
+    }
+}
+
+fn terminal_rejection(status: u16, body: &Value) -> Option<&'static str> {
+    match (status, body["code"].as_str()) {
+        (400, Some("invalid_transcript_event")) => Some("invalid_transcript_event"),
+        (409, Some("event_identity_conflict")) => Some("event_identity_conflict"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_rejection;
+    use serde_json::json;
+
+    #[test]
+    fn only_explicit_permanent_topics_rejections_are_terminal() {
+        assert_eq!(
+            terminal_rejection(400, &json!({"code":"invalid_transcript_event"})),
+            Some("invalid_transcript_event")
+        );
+        assert_eq!(
+            terminal_rejection(409, &json!({"code":"event_identity_conflict"})),
+            Some("event_identity_conflict")
+        );
+        assert_eq!(
+            terminal_rejection(401, &json!({"code":"service_auth_required"})),
+            None
+        );
+        assert_eq!(
+            terminal_rejection(503, &json!({"code":"storage_unavailable"})),
+            None
+        );
+        assert_eq!(
+            terminal_rejection(400, &json!({"code":"some_future_error"})),
+            None
+        );
     }
 }

@@ -215,7 +215,7 @@ impl Store {
     }
 
     pub async fn pending_topics(&self) -> Result<Vec<(Uuid, Value)>, &'static str> {
-        let rows=sqlx::query("SELECT event_id,payload FROM bee_topics_outbox WHERE delivered_at IS NULL ORDER BY created_at LIMIT 50").fetch_all(&self.pool).await.map_err(|_| "Bee topics outbox poll failed")?;
+        let rows=sqlx::query("SELECT event_id,payload FROM bee_topics_outbox WHERE delivered_at IS NULL AND terminal_at IS NULL ORDER BY created_at LIMIT 50").fetch_all(&self.pool).await.map_err(|_| "Bee topics outbox poll failed")?;
         Ok(rows
             .into_iter()
             .map(|r| (r.get("event_id"), r.get::<Json<Value>, _>("payload").0))
@@ -229,6 +229,13 @@ impl Store {
         .execute(&self.pool)
         .await
         .map_err(|_| "Bee topics outbox acknowledgement failed")?;
+        Ok(())
+    }
+
+    pub async fn reject_topic(&self, id: Uuid, code: &str) -> Result<(), &'static str> {
+        sqlx::query("UPDATE bee_topics_outbox SET terminal_at=now(),terminal_code=$2,attempts=attempts+1 WHERE event_id=$1 AND delivered_at IS NULL AND terminal_at IS NULL")
+            .bind(id).bind(code).execute(&self.pool).await
+            .map_err(|_| "Bee topics outbox terminal receipt failed")?;
         Ok(())
     }
 

@@ -50,7 +50,9 @@ idempotency receipt in Bee PostgreSQL, posts a binding status summary, then
 acknowledges the sessions outbox row. Stale revisions are acknowledged without
 publishing old status, so a stale head command cannot starve later work. It
 also polls Bee's event outbox and acknowledges an event only after Topics
-confirms receipt; outages leave events pending for retry. The worker starts no
+confirms receipt. Explicit invalid/conflicting event callbacks are marked
+terminal with their machine-readable rejection code; transient errors remain
+retryable, and one terminal row does not block later rows. The worker starts no
 Bee/device transport. Its candidate path requires an authoritative room binding
 made through Sessions; the local replay CLI's standalone binding is only a
 Bee-store harness.
