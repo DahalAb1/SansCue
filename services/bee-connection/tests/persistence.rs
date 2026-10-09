@@ -3,12 +3,41 @@ use bee_connection::{
     pipeline::*,
     store::{CommandOutcome, Store},
 };
+use sqlx::{
+    Executor, PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
+use std::str::FromStr;
 use uuid::Uuid;
+
+async fn db() -> (Store, PgConnectOptions, PgPool, String) {
+    let url = std::env::var("BEE_TEST_DATABASE_URL")
+        .expect("BEE_TEST_DATABASE_URL must name a disposable Bee-only PostgreSQL database; this test never skips");
+    let admin = PgPoolOptions::new().connect(&url).await.unwrap();
+    let schema = format!("bee_test_{}", Uuid::new_v4().simple());
+    admin
+        .execute(format!("CREATE SCHEMA {schema}").as_str())
+        .await
+        .unwrap();
+    let options = PgConnectOptions::from_str(&url)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let store = Store::connect_with_options(options.clone()).await.unwrap();
+    (store, options, admin, schema)
+}
+
+async fn finish(store: Store, admin: PgPool, schema: &str) {
+    store.close().await;
+    admin
+        .execute(format!("DROP SCHEMA {schema} CASCADE").as_str())
+        .await
+        .unwrap();
+    admin.close().await;
+}
 
 #[tokio::test]
 async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine() {
-    let url = std::env::var("BEE_TEST_DATABASE_URL").expect("BEE_TEST_DATABASE_URL must name a disposable Bee-only PostgreSQL database; this test never skips");
-    let store = Store::connect(&url).await.unwrap();
+    let (store, options, admin, schema) = db().await;
     let id = Uuid::new_v4();
     let capabilities = Capabilities {
         stable_ids: true,
@@ -75,7 +104,7 @@ async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine
         .unwrap();
     let before = store.load(id).await.unwrap();
     store.close().await;
-    let restarted = Store::connect(&url).await.unwrap();
+    let restarted = Store::connect_with_options(options).await.unwrap();
     assert_eq!(restarted.load(id).await.unwrap(), before);
     assert!(matches!(
         restarted.ingest(id, observation).await.unwrap(),
@@ -115,17 +144,21 @@ async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine
         )
         .await
         .unwrap();
-    assert_eq!(
-        restarted.load(id).await.unwrap().gaps()[0].status,
-        GapStatus::Recovered
+    let gaps = restarted.load(id).await.unwrap().gaps().to_vec();
+    assert!(
+        gaps.iter()
+            .any(|gap| gap.disconnect && gap.status == GapStatus::Recovered)
     );
-    restarted.close().await;
+    assert!(
+        gaps.iter()
+            .any(|gap| !gap.disconnect && gap.status == GapStatus::Suspected)
+    );
+    finish(restarted, admin, &schema).await;
 }
 
 #[tokio::test]
 async fn room_revision_fence_rejects_delayed_bind_after_unbind() {
-    let url=std::env::var("BEE_TEST_DATABASE_URL").expect("BEE_TEST_DATABASE_URL must name a disposable Bee-only PostgreSQL database; this test never skips");
-    let store = Store::connect(&url).await.unwrap();
+    let (store, _options, admin, schema) = db().await;
     let conversation = Uuid::new_v4();
     let room = Uuid::new_v4();
     let session = Uuid::new_v4();
@@ -168,7 +201,7 @@ async fn room_revision_fence_rejects_delayed_bind_after_unbind() {
         CommandOutcome::Stale
     );
     assert!(store.load(conversation).await.unwrap().binding().is_some());
-    store.close().await;
+    finish(store, admin, &schema).await;
 }
 
 #[derive(Clone)]
@@ -203,8 +236,7 @@ async fn topics_stub(
 async fn terminal_topics_rejection_does_not_block_later_bee_outbox_row() {
     use bee_connection::topics_consumer::TopicsConsumer;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let url = std::env::var("BEE_TEST_DATABASE_URL").expect("BEE_TEST_DATABASE_URL must name a disposable Bee-only PostgreSQL database; this test never skips");
-    let store = Store::connect(&url).await.unwrap();
+    let (store, _options, admin, schema) = db().await;
     let room = Uuid::new_v4();
     let session = Uuid::new_v4();
     let first = Uuid::new_v4();
@@ -268,5 +300,5 @@ async fn terminal_topics_rejection_does_not_block_later_bee_outbox_row() {
     assert_eq!(consumer.poll_once().await.unwrap(), 0);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     server.abort();
-    store.close().await;
+    finish(store, admin, &schema).await;
 }
