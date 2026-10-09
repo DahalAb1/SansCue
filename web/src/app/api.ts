@@ -4,7 +4,9 @@ export type State = {
   membership: { id: string; role: Role };
   revision: number;
   sequence: number;
-  active_question: { id: string; text?: string } | null;
+  active_question: { id: string; version: number; text: string; evidence?: unknown; versions?: Array<{ version: number; text: string; created_at: string }> } | null;
+  my_response?: 'clear' | 'partly_clear' | 'need_help' | null;
+  dashboard?: { respondents: number; counts: { clear: number; partly_clear: number; need_help: number }; percentages: { clear: number | null; partly_clear: number | null; need_help: number | null } } | null;
   join_link_enabled?: boolean;
   question_candidates?: QuestionCandidate[] | null;
 };
@@ -48,6 +50,10 @@ export const paths = {
   rotateJoin: (id: string) => '/rooms/' + segment(id) + '/join-link/rotate',
   revokeJoin: (id: string) => '/rooms/' + segment(id) + '/join-link/revoke',
   end: (id: string) => '/rooms/' + segment(id) + '/end',
+  qa: (id: string) => '/rooms/' + segment(id) + '/qa',
+  publishQuestion: (id: string, candidateId: string) => '/rooms/' + segment(id) + '/questions/' + segment(candidateId) + '/publish',
+  questionVersion: (id: string, questionId: string) => '/rooms/' + segment(id) + '/questions/' + segment(questionId) + '/versions',
+  respond: (id: string, questionId: string) => '/rooms/' + segment(id) + '/questions/' + segment(questionId) + '/response',
   page(path: string, cursor?: string | null): string | null {
     if (!cursor) return path + '?limit=50';
     // Cursors are opaque: pass them through unchanged with no length cap, only encoded for a query value.
@@ -95,6 +101,11 @@ export function parseRoomState(value: unknown, expectedId?: string): State | nul
   if (!Number.isSafeInteger(state.revision) || state.revision < 0) return null;
   if (!Number.isSafeInteger(state.sequence) || state.sequence < 0) return null;
   if (state.active_question !== null && (typeof state.active_question !== 'object' || state.active_question === null || Array.isArray(state.active_question))) return null;
+  if (state.active_question !== null && (typeof state.active_question.id !== 'string' || !UUID.test(state.active_question.id) || !Number.isSafeInteger(state.active_question.version) || state.active_question.version < 1 || typeof state.active_question.text !== 'string' || state.active_question.text.trim() === '')) return null;
+  if (state.membership.role === 'audience' && state.active_question !== null && Object.keys(state.active_question).some(key => !['id','version','text'].includes(key))) return null;
+  if (state.my_response !== undefined && state.my_response !== null && !['clear','partly_clear','need_help'].includes(state.my_response)) return null;
+  if (state.membership.role === 'audience' && state.dashboard !== undefined && state.dashboard !== null) return null;
+  if (state.membership.role !== 'audience' && state.dashboard !== undefined && state.dashboard !== null && (typeof state.dashboard.respondents !== 'number' || !Number.isSafeInteger(state.dashboard.respondents) || !state.dashboard.counts || !state.dashboard.percentages)) return null;
   if (state.join_link_enabled !== undefined && typeof state.join_link_enabled !== 'boolean') return null;
   if (state.question_candidates !== undefined && state.membership.role === 'audience' && state.question_candidates !== null) return null;
   if (state.question_candidates !== undefined && state.membership.role !== 'audience' && state.question_candidates === null) return null;
