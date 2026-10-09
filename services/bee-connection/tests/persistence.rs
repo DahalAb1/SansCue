@@ -15,6 +15,7 @@ async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine
     assert!(store.open(id, Capabilities::default()).await.is_err());
     let binding = Binding {
         conversation_id: id,
+        source_conversation_id: None,
         room_id: Uuid::new_v4(),
         session_id: Uuid::new_v4(),
     };
@@ -28,6 +29,7 @@ async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine
         raw: b"original raw".to_vec(),
         decoded: Ok(Signal::Transcript(Transcript {
             text: "hello".into(),
+            source_conversation_id: None,
             source_id: Some("synthetic-1".into()),
             source_sequence: Some(1),
         })),
@@ -101,6 +103,7 @@ async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine
                 raw: b"second".to_vec(),
                 decoded: Ok(Signal::Transcript(Transcript {
                     text: "second".into(),
+                    source_conversation_id: None,
                     source_id: Some("synthetic-2".into()),
                     source_sequence: Some(2),
                 })),

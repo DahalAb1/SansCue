@@ -25,6 +25,7 @@ async fn run() -> Result<(), &'static str> {
     let parse_id = |value: &str| Uuid::parse_str(value).map_err(|_| "invalid binding UUID");
     let binding = Binding {
         conversation_id: parse_id(&args[1])?,
+        source_conversation_id: None,
         room_id: parse_id(&args[2])?,
         session_id: parse_id(&args[3])?,
     };

@@ -40,6 +40,15 @@ pub struct Gap {
     pub recovered_at_ordinal: Option<u64>,
 }
 
+/// Latest reconciliation result, separate from immutable incident history.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverySummary {
+    pub last_attempt_ordinal: Option<u64>,
+    pub last_completed_ordinal: Option<u64>,
+    pub complete_through_sequence: Option<u64>,
+    pub unresolved_gap_count: usize,
+}
+
 /// One conversation aggregate. Persist atomically before acknowledging ingestion.
 /// IDs are assigned only on acceptance; injecting the ID factory makes tests exact.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +59,8 @@ pub struct Pipeline {
     observations: Vec<StoredObservation>,
     events: Vec<ConversationEvent>,
     gaps: Vec<Gap>,
+    #[serde(default)]
+    recovery: RecoverySummary,
     seen_sequences: BTreeSet<u64>,
     high_sequence: Option<u64>,
     active_disconnect: Option<usize>,
@@ -64,6 +75,12 @@ impl Pipeline {
             observations: vec![],
             events: vec![],
             gaps: vec![],
+            recovery: RecoverySummary {
+                last_attempt_ordinal: None,
+                last_completed_ordinal: None,
+                complete_through_sequence: None,
+                unresolved_gap_count: 0,
+            },
             seen_sequences: BTreeSet::new(),
             high_sequence: None,
             active_disconnect: None,
@@ -72,6 +89,10 @@ impl Pipeline {
 
     pub fn bind(&mut self, binding: Binding) -> Result<(), &'static str> {
         if binding.conversation_id != self.conversation_id
+            || binding
+                .source_conversation_id
+                .as_ref()
+                .is_some_and(|id| id.trim().is_empty())
             || binding.room_id.is_nil()
             || binding.session_id.is_nil()
             || binding.conversation_id.is_nil()
@@ -101,6 +122,9 @@ impl Pipeline {
     pub fn gaps(&self) -> &[Gap] {
         &self.gaps
     }
+    pub fn recovery_summary(&self) -> &RecoverySummary {
+        &self.recovery
+    }
 
     pub fn ingest(
         &mut self,
@@ -109,9 +133,12 @@ impl Pipeline {
     ) -> Disposition {
         let ordinal = self.observations.len() as u64 + 1;
         let disposition = match &observation.decoded {
-            Err(reason) => Disposition::Quarantined {
-                reason: format!("decode: {reason}"),
-            },
+            Err(reason) => {
+                self.record_unresolved_gap(ordinal, observation.received_at);
+                Disposition::Quarantined {
+                    reason: format!("decode: {reason}"),
+                }
+            }
             Ok(Signal::Transcript(transcript)) => {
                 self.transcript(transcript, &observation, ordinal, new_id)
             }
@@ -139,6 +166,7 @@ impl Pipeline {
                 Disposition::Control
             }
             Ok(Signal::RecoveryUnavailable { reason }) => {
+                self.recovery.last_attempt_ordinal = Some(ordinal);
                 for gap in &mut self.gaps {
                     if matches!(gap.status, GapStatus::Suspected | GapStatus::Confirmed) {
                         gap.status = GapStatus::Unrecoverable {
@@ -148,12 +176,19 @@ impl Pipeline {
                 }
                 Disposition::Control
             }
+            Ok(Signal::RecoveryCompleted { through_sequence }) => {
+                self.recovery.last_attempt_ordinal = Some(ordinal);
+                self.recovery.last_completed_ordinal = Some(ordinal);
+                self.recovery.complete_through_sequence = *through_sequence;
+                Disposition::Control
+            }
         };
         self.observations.push(StoredObservation {
             ordinal,
             observation,
             disposition: disposition.clone(),
         });
+        self.refresh_unresolved_gap_count();
         disposition
     }
 
@@ -164,19 +199,25 @@ impl Pipeline {
         ordinal: u64,
         new_id: impl FnOnce() -> Uuid,
     ) -> Disposition {
-        let quarantine = |reason: &str| Disposition::Quarantined {
-            reason: reason.into(),
+        let quarantine = |this: &mut Self, reason: &str| {
+            this.record_unresolved_gap(ordinal, observation.received_at);
+            Disposition::Quarantined {
+                reason: reason.into(),
+            }
         };
         let Some(binding) = self.binding.clone() else {
-            return quarantine("unbound conversation");
+            return quarantine(self, "unbound conversation");
         };
+        if transcript.source_conversation_id != binding.source_conversation_id {
+            return quarantine(self, "source conversation identity mismatch");
+        }
         if transcript.text.trim().is_empty()
             || transcript
                 .source_id
                 .as_ref()
                 .is_some_and(|id| id.trim().is_empty())
         {
-            return quarantine("empty transcript or source ID");
+            return quarantine(self, "empty transcript or source ID");
         }
         let by_id = self.events.iter().find(|event| {
             self.capabilities.stable_ids
@@ -196,7 +237,7 @@ impl Pipeline {
                 || existing.source_id != transcript.source_id
                 || existing.source_sequence != transcript.source_sequence
             {
-                return quarantine("conflicting source identity");
+                return quarantine(self, "conflicting source identity");
             }
             return Disposition::Duplicate {
                 event_id: existing.event_id,
@@ -204,7 +245,7 @@ impl Pipeline {
         }
         let event_id = new_id();
         if event_id.is_nil() || self.events.iter().any(|event| event.event_id == event_id) {
-            return quarantine("invalid internal event ID");
+            return quarantine(self, "invalid internal event ID");
         }
         if self.capabilities.contiguous_sequence {
             if let Some(sequence) = transcript.source_sequence {
@@ -234,6 +275,39 @@ impl Pipeline {
             text: transcript.text.clone(),
         });
         Disposition::Accepted { event_id }
+    }
+
+    fn record_unresolved_gap(&mut self, ordinal: u64, at: DateTime<Utc>) {
+        self.gaps.push(Gap {
+            detected_ordinal: ordinal,
+            started_at: at,
+            reconnected_at: None,
+            missing: None,
+            status: GapStatus::Suspected,
+            after_sequence: self.high_sequence,
+            disconnect: false,
+            recovered_at_ordinal: None,
+        });
+    }
+
+    fn refresh_unresolved_gap_count(&mut self) {
+        let through = self.recovery.complete_through_sequence;
+        self.recovery.unresolved_gap_count = self
+            .gaps
+            .iter()
+            .filter(|gap| {
+                if gap.status == GapStatus::Recovered {
+                    return false;
+                }
+                match (gap.missing, through) {
+                    (Some((_, end)), Some(complete_through)) => end > complete_through,
+                    (None, Some(complete_through)) => gap
+                        .after_sequence
+                        .is_none_or(|after| after >= complete_through),
+                    _ => true,
+                }
+            })
+            .count();
     }
 
     fn record_sequence(&mut self, sequence: u64, ordinal: u64, at: DateTime<Utc>) {

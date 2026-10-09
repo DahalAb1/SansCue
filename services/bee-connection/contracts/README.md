@@ -26,7 +26,11 @@ and local sample input only. It is not a speaker authorization replacement.
 
 The serialized Rust ConversationEvent is the canonical owned contract:
 schema_version=1, internal event_id UUID, immutable binding, ingest_ordinal,
-received_at (UTC), optional source_id/source_sequence, and text. Raw bytes are
+received_at (UTC), optional source_id/source_sequence, and text. The immutable
+binding can carry an independently supplied source-conversation identity; when
+present, every transcript observation must carry exactly the same identity.
+If the source genuinely omits that identity, both values remain absent; the
+pipeline does not substitute its internal UUID. Raw bytes are
 retained separately for every observation, including malformed and duplicate
 observations. Arrival ordinal is conversation-local and includes control,
 quarantine and duplicate observations, so event ordinals need not be contiguous.

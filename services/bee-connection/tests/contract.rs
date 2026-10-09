@@ -11,6 +11,7 @@ fn canonical_event_round_trips_without_invented_source_identity() {
         event_id: Uuid::new_v4(),
         binding: Binding {
             conversation_id: Uuid::new_v4(),
+            source_conversation_id: None,
             room_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
         },
@@ -51,6 +52,7 @@ fn recorded_pipeline_replays_deterministically() {
         pipeline
             .bind(Binding {
                 conversation_id: Uuid::from_u128(1),
+                source_conversation_id: None,
                 room_id: Uuid::from_u128(2),
                 session_id: Uuid::from_u128(3),
             })
@@ -72,6 +74,13 @@ fn recorded_pipeline_replays_deterministically() {
         first
             .gaps()
             .iter()
-            .all(|gap| gap.status == GapStatus::Recovered)
+            .any(|gap| gap.status == GapStatus::Recovered)
+    );
+    assert!(
+        first
+            .gaps()
+            .iter()
+            .any(|gap| gap.status == GapStatus::Suspected),
+        "malformed raw observation must remain visible as unresolved evidence"
     );
 }

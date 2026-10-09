@@ -4,6 +4,7 @@ use uuid::Uuid;
 fn binding(id: u128) -> Binding {
     Binding {
         conversation_id: Uuid::from_u128(id),
+        source_conversation_id: None,
         room_id: Uuid::from_u128(id + 100),
         session_id: Uuid::from_u128(id + 200),
     }
@@ -23,9 +24,37 @@ fn observation(signal: Signal) -> Observation {
 fn transcript(seq: Option<u64>, id: Option<&str>, text: &str) -> Observation {
     observation(Signal::Transcript(Transcript {
         text: text.into(),
+        source_conversation_id: None,
         source_id: id.map(str::to_owned),
         source_sequence: seq,
     }))
+}
+
+#[test]
+fn supplied_source_conversation_must_match_pipeline_identity() {
+    let mut p = Pipeline::new(binding(1).conversation_id, evidence());
+    let mut bound = binding(1);
+    bound.source_conversation_id = Some("source-conv-1".into());
+    p.bind(bound).unwrap();
+    let mut wrong = transcript(Some(1), Some("a"), "hello");
+    if let Ok(Signal::Transcript(value)) = &mut wrong.decoded {
+        value.source_conversation_id = Some("source-conv-2".into());
+    }
+    assert!(matches!(
+        ingest(&mut p, wrong),
+        Disposition::Quarantined { .. }
+    ));
+    assert!(p.events().is_empty());
+    assert_eq!(p.gaps().len(), 1);
+    assert_eq!(p.gaps()[0].status, GapStatus::Suspected);
+    let mut absent = transcript(Some(1), Some("b"), "hello");
+    if let Ok(Signal::Transcript(value)) = &mut absent.decoded {
+        value.source_conversation_id = Some("source-conv-1".into());
+    }
+    assert!(matches!(
+        ingest(&mut p, absent),
+        Disposition::Accepted { .. }
+    ));
 }
 fn ingest(p: &mut Pipeline, o: Observation) -> Disposition {
     let id = Uuid::from_u128(p.observations().len() as u128 + 1000);
@@ -80,6 +109,12 @@ fn quarantines_unbound_malformed_empty_and_identity_conflicts() {
     assert_eq!(p.observations()[1].observation, malformed);
     assert_eq!(p.events().len(), 1);
     assert_eq!(p.events()[0].ingest_ordinal, 4);
+    assert_eq!(
+        p.gaps().len(),
+        4,
+        "decode failure and each rejected transcript remain visible"
+    );
+    assert_eq!(p.recovery_summary().unresolved_gap_count, 4);
 }
 
 #[test]
@@ -164,6 +199,35 @@ fn unrecoverable_gap_remains_explicit_even_if_late_data_arrives() {
         p.gaps()[0].status,
         GapStatus::Unrecoverable { .. }
     ));
+}
+
+#[test]
+fn successful_reconciliation_updates_summary_without_erasing_failed_attempt() {
+    let mut p = pipeline(evidence());
+    ingest(&mut p, transcript(Some(1), None, "one"));
+    ingest(&mut p, transcript(Some(3), None, "three"));
+    ingest(
+        &mut p,
+        observation(Signal::RecoveryUnavailable {
+            reason: "history expired".into(),
+        }),
+    );
+    let historical = p.gaps()[0].clone();
+    ingest(&mut p, transcript(Some(2), None, "two"));
+    ingest(
+        &mut p,
+        observation(Signal::RecoveryCompleted {
+            through_sequence: Some(3),
+        }),
+    );
+    assert_eq!(p.gaps()[0], historical);
+    assert!(matches!(
+        p.gaps()[0].status,
+        GapStatus::Unrecoverable { .. }
+    ));
+    assert_eq!(p.recovery_summary().last_completed_ordinal, Some(5));
+    assert_eq!(p.recovery_summary().complete_through_sequence, Some(3));
+    assert_eq!(p.recovery_summary().unresolved_gap_count, 0);
 }
 
 #[test]
