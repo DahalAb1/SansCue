@@ -113,6 +113,14 @@ impl Pipeline {
     pub fn binding(&self) -> Option<&Binding> {
         self.binding.as_ref()
     }
+
+    pub fn unbind(&mut self, conversation_id: Uuid) -> Result<(), &'static str> {
+        if conversation_id != self.conversation_id {
+            return Err("conversation mismatch");
+        }
+        self.binding = None;
+        Ok(())
+    }
     pub fn events(&self) -> &[ConversationEvent] {
         &self.events
     }

@@ -2,7 +2,7 @@ use crate::{
     domain::*,
     pipeline::{Disposition, Pipeline},
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Json};
+use sqlx::{PgPool, Row, postgres::PgPoolOptions, types::Json};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -58,6 +58,58 @@ impl Store {
     pub async fn bind(&self, binding: Binding) -> Result<(), &'static str> {
         self.update(binding.conversation_id, |pipeline| pipeline.bind(binding))
             .await
+    }
+
+    /// Apply a sessions-authoritative command once. The command receipt and
+    /// conversation aggregate are committed atomically in Bee's own database.
+    pub async fn apply_command(
+        &self,
+        command_id: Uuid,
+        revision: i64,
+        action: &str,
+        binding: Binding,
+    ) -> Result<(), &'static str> {
+        if command_id.is_nil() || revision < 1 || !matches!(action, "bind" | "unbind") {
+            return Err("invalid command");
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| "Bee transaction failed")?;
+        if let Some(row)=sqlx::query("SELECT conversation_id,room_id,revision,command_type FROM bee_command_inbox WHERE command_id=$1")
+            .bind(command_id).fetch_optional(&mut *tx).await.map_err(|_| "Bee command receipt load failed")? {
+            if row.get::<Uuid,_>("conversation_id") != binding.conversation_id || row.get::<Uuid,_>("room_id") != binding.room_id || row.get::<i64,_>("revision") != revision || row.get::<String,_>("command_type") != action { return Err("command identity conflict"); }
+            tx.commit().await.map_err(|_| "Bee commit failed")?;
+            return Ok(());
+        }
+        let state: Json<Pipeline> = sqlx::query_scalar(
+            "SELECT state FROM bee_conversations WHERE conversation_id=$1 FOR UPDATE",
+        )
+        .bind(binding.conversation_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| "Bee conversation lock failed")?;
+        let mut pipeline = state.0;
+        if action == "bind" {
+            pipeline.bind(binding.clone())?;
+        } else if pipeline.binding().is_some_and(|current| {
+            current.room_id != binding.room_id || current.session_id != binding.session_id
+        }) {
+            return Err("unbind binding mismatch");
+        } else {
+            pipeline.unbind(binding.conversation_id)?;
+        }
+        sqlx::query("UPDATE bee_conversations SET state=$2 WHERE conversation_id=$1")
+            .bind(binding.conversation_id)
+            .bind(Json(pipeline))
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| "Bee state write failed")?;
+        sqlx::query("INSERT INTO bee_command_inbox(command_id,room_id,conversation_id,revision,command_type,result) VALUES($1,$2,$3,$4,$5,'{}')")
+            .bind(command_id).bind(binding.room_id).bind(binding.conversation_id).bind(revision).bind(action).execute(&mut *tx).await.map_err(|_| "Bee command receipt write failed")?;
+        tx.commit().await.map_err(|_| "Bee commit failed")?;
+        Ok(())
     }
 
     pub async fn ingest(
