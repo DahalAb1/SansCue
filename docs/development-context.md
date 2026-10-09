@@ -210,7 +210,7 @@ Within a feature, separate HTTP handling, business rules, types/errors, and SQL 
 ## Development sequence and open decisions
 
 - The local implementation covers the frontend shell, sessions service, room creation/join/access, and live updates. Local Compose packaging exists but awaits Docker verification; AWS account/domain readiness and deployment are unverified.
-- Step 6 reconnect and room-ending behavior is implemented and frontend-verified. Next, agree on the listed Bee integration decisions before Step 7. Continue native PostgreSQL tests for every relevant service change.
+- Step 6 reconnect and room-ending behavior is implemented and frontend-verified. The Step 7 first branch adds a separate Bee core boundary, canonical events, internal room binding, deterministic synthetic replay, gap evidence and Bee-owned PostgreSQL aggregate storage. See [Bee connection](../services/bee-connection/README.md). Sessions speaker endpoints/auth, service delivery transport/outbox and live Bee integration remain outside this branch. Actual Step 7 acceptance is blocked on **REAL BEE DEVICE / LIVE API VERIFICATION**. Continue native PostgreSQL tests for every relevant service change; the Bee persistence test requires its own disposable database, separate from sessions.
 - Build general infrastructure, connect the services, then optimize the complete flow. Add timing measurements during integration; fix issues that block useful testing immediately.
 - Access to a Bee-enabled Apple Watch must be scheduled. Authentication, data access, live delivery, and performance have not been verified for this project.
 - Recorded transcripts can support repeatable development tests. Validate the final flow with actual Bee data.

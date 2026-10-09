@@ -11,6 +11,9 @@
 !services/sessions/Cargo.toml
 !services/sessions/src/**/*.rs
 !services/sessions/migrations/**/*.sql
+!services/bee-connection/Cargo.toml
+!services/bee-connection/src/**/*.rs
+!services/bee-connection/migrations/**/*.sql
 !web/package.json
 !web/package-lock.json
 !web/index.html
@@ -63,3 +66,6 @@ web/src/**/*.ts/**
 web/src/**/*.tsx/**
 web/src/**/*.css/**
 deploy/Caddyfile/**
+services/bee-connection/Cargo.toml/**
+services/bee-connection/src/**/*.rs/**
+services/bee-connection/migrations/**/*.sql/**
