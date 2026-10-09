@@ -68,6 +68,14 @@ fn conflict(code: &'static str, message: &'static str) -> ApiError {
     ApiError(StatusCode::CONFLICT, code, message)
 }
 
+fn stale_topic_candidate() -> ApiError {
+    ApiError(
+        StatusCode::GONE,
+        "topic_candidate_stale",
+        "Candidate no longer matches an active room binding",
+    )
+}
+
 fn reply(status: StatusCode, body: Value) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
 }
@@ -1473,34 +1481,13 @@ async fn topics_candidate(
     let text = candidate["text"].as_str().unwrap_or_default();
     let version = candidate["generator_version"].as_str().unwrap_or_default();
     let mut tx = access.pool.begin().await?;
-    let binding = sqlx::query(
-        "SELECT conversation_id,status,session_id FROM bee_room_bindings WHERE room_id=$1 FOR UPDATE",
-    )
-    .bind(room_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(missing)?;
-    if binding.get::<Uuid, _>("conversation_id") != conversation
-        || binding.get::<Uuid, _>("session_id") != session_id
-        || binding.get::<String, _>("status") != "bound"
-    {
-        return Err(conflict(
-            "topic_binding_mismatch",
-            "Candidate does not match the active room binding",
-        ));
-    }
-    let room_row = room(&mut tx, room_id).await?;
-    if room_row.get::<String, _>("status") != "open" {
-        return Err(conflict("room_ended", "Room is ended"));
-    }
-    let existing=sqlx::query("SELECT event_id,session_id,candidate_text,generator_version,evidence FROM topic_candidates WHERE candidate_id=$1 FOR UPDATE").bind(candidate_id).fetch_optional(&mut *tx).await?;
+    // A lost response may be replayed after an unbind, room end, or rebind.
+    // First recognize an already-committed identical callback independently
+    // of current room state; its original acceptance is durable.
+    let existing = sqlx::query("SELECT event_id,room_id,conversation_id,session_id,candidate_text,generator_version,evidence FROM topic_candidates WHERE candidate_id=$1 FOR UPDATE")
+        .bind(candidate_id).fetch_optional(&mut *tx).await?;
     if let Some(row) = existing {
-        if row.get::<Uuid, _>("event_id") != event_id
-            || row.get::<Uuid, _>("session_id") != session_id
-            || row.get::<String, _>("candidate_text") != text
-            || row.get::<String, _>("generator_version") != version
-            || row.get::<Value, _>("evidence") != candidate["evidence"]
-        {
+        if !same_topic_candidate(&row, &candidate) {
             return Err(conflict(
                 "topic_candidate_conflict",
                 "Candidate identity conflicts",
@@ -1512,6 +1499,57 @@ async fn topics_candidate(
             json!({"accepted":true,"duplicate":true,"candidate_id":candidate_id}),
         ));
     }
+
+    // Match the room-before-binding lock order used by room mutations. The
+    // second receipt lookup also serializes concurrent retries with the same ID.
+    let room_row = sqlx::query("SELECT status FROM rooms WHERE id=$1 FOR UPDATE")
+        .bind(room_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(room_row) = room_row else {
+        return Err(stale_topic_candidate());
+    };
+    let existing = sqlx::query("SELECT event_id,room_id,conversation_id,session_id,candidate_text,generator_version,evidence FROM topic_candidates WHERE candidate_id=$1 FOR UPDATE")
+        .bind(candidate_id).fetch_optional(&mut *tx).await?;
+    if let Some(row) = existing {
+        if !same_topic_candidate(&row, &candidate) {
+            return Err(conflict(
+                "topic_candidate_conflict",
+                "Candidate identity conflicts",
+            ));
+        }
+        tx.commit().await?;
+        return Ok(reply(
+            StatusCode::OK,
+            json!({"accepted":true,"duplicate":true,"candidate_id":candidate_id}),
+        ));
+    }
+    if room_row.get::<String, _>("status") != "open" {
+        return Err(stale_topic_candidate());
+    }
+    let binding = sqlx::query(
+        "SELECT conversation_id,status,session_id FROM bee_room_bindings WHERE room_id=$1 FOR UPDATE",
+    )
+    .bind(room_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(binding) = binding else {
+        return Err(stale_topic_candidate());
+    };
+    let binding_status: String = binding.get("status");
+    if binding.get::<Uuid, _>("conversation_id") != conversation
+        || binding.get::<Uuid, _>("session_id") != session_id
+        || binding_status == "unbound"
+        || binding_status == "unbinding"
+    {
+        return Err(stale_topic_candidate());
+    }
+    if binding_status != "bound" {
+        return Err(conflict(
+            "topic_binding_pending",
+            "Room binding is still being applied",
+        ));
+    }
     sqlx::query("INSERT INTO topic_candidates(candidate_id,event_id,room_id,conversation_id,session_id,candidate_text,generator_version,evidence) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
         .bind(candidate_id).bind(event_id).bind(room_id).bind(conversation).bind(session_id).bind(text).bind(version).bind(candidate["evidence"].clone()).execute(&mut *tx).await?;
     change_with_resources(&mut tx, room_id, "speaker", json!(["question_candidates"])).await?;
@@ -1521,6 +1559,19 @@ async fn topics_candidate(
         StatusCode::ACCEPTED,
         json!({"accepted":true,"candidate_id":candidate_id}),
     ))
+}
+
+fn same_topic_candidate(row: &PgRow, candidate: &Value) -> bool {
+    let uuid = |value: &Value| value.as_str().and_then(|value| Uuid::parse_str(value).ok());
+    row.get::<Uuid, _>("event_id") == uuid(&candidate["event_id"]).unwrap()
+        && row.get::<Uuid, _>("room_id") == uuid(&candidate["room_id"]).unwrap()
+        && row.get::<Uuid, _>("conversation_id")
+            == uuid(&candidate["evidence"]["conversation_id"]).unwrap()
+        && row.get::<Uuid, _>("session_id") == uuid(&candidate["session_id"]).unwrap()
+        && row.get::<String, _>("candidate_text") == candidate["text"].as_str().unwrap()
+        && row.get::<String, _>("generator_version")
+            == candidate["generator_version"].as_str().unwrap()
+        && row.get::<Value, _>("evidence") == candidate["evidence"]
 }
 
 fn parse_evidence_uuid(value: &Value) -> Result<Uuid> {
