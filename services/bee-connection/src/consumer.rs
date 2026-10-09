@@ -1,6 +1,9 @@
 //! Device-independent sessions command consumer. It handles only canonical
 //! SansCue bind/unbind commands; transport-specific adapters remain separate.
-use crate::{domain::Binding, store::Store};
+use crate::{
+    domain::Binding,
+    store::{CommandOutcome, Store},
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -61,9 +64,15 @@ impl Consumer {
             self.store
                 .ensure_command_conversation(binding.conversation_id)
                 .await?;
-            self.store
+            let outcome = self
+                .store
                 .apply_command(id, revision, action, binding.clone())
                 .await?;
+            if !should_publish_status(outcome) {
+                self.acknowledge(id).await?;
+                completed += 1;
+                continue;
+            }
             let summary = if action == "bind" {
                 json!({"binding_id":binding.conversation_id,"status":"bound","has_gaps":false,"connectivity_revision":revision})
             } else {
@@ -83,19 +92,27 @@ impl Consumer {
             if !status.status().is_success() {
                 return Err("sessions status delivery rejected");
             }
-            let ack = self
-                .client
-                .post(format!("{}/internal/v1/bee/commands/{id}/ack", self.base))
-                .bearer_auth(&self.token)
-                .send()
-                .await
-                .map_err(|_| "sessions command acknowledgement failed")?;
-            if !ack.status().is_success() {
-                return Err("sessions command acknowledgement rejected");
-            }
+            self.acknowledge(id).await?;
             completed += 1;
         }
         Ok(completed)
+    }
+
+    async fn acknowledge(&self, command: Uuid) -> Result<(), &'static str> {
+        let response = self
+            .client
+            .post(format!(
+                "{}/internal/v1/bee/commands/{command}/ack",
+                self.base
+            ))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|_| "sessions command acknowledgement failed")?;
+        if !response.status().is_success() {
+            return Err("sessions command acknowledgement rejected");
+        }
+        Ok(())
     }
 
     pub async fn run(self) -> Result<(), &'static str> {
@@ -107,6 +124,10 @@ impl Consumer {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     }
+}
+
+fn should_publish_status(outcome: CommandOutcome) -> bool {
+    outcome == CommandOutcome::Applied
 }
 
 fn parse_command(command: &Value) -> Result<(Uuid, i64, &'static str, Binding), &'static str> {
@@ -150,5 +171,11 @@ mod tests {
         assert!(!binding.session_id.is_nil());
         let invalid = json!({"command_id":Uuid::new_v4(),"revision":1,"type":"bind","payload":{"conversation_id":id,"room_id":Uuid::new_v4()}});
         assert!(parse_command(&invalid).is_err());
+    }
+
+    #[test]
+    fn stale_commands_are_acknowledged_without_status_publication() {
+        assert!(!should_publish_status(CommandOutcome::Stale));
+        assert!(should_publish_status(CommandOutcome::Applied));
     }
 }

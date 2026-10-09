@@ -2,6 +2,7 @@ use crate::{
     domain::*,
     pipeline::{Disposition, Pipeline},
 };
+use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions, types::Json};
 use std::time::Duration;
 use uuid::Uuid;
@@ -11,6 +12,12 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandOutcome {
+    Applied,
+    Stale,
 }
 
 impl Store {
@@ -80,7 +87,7 @@ impl Store {
         revision: i64,
         action: &str,
         binding: Binding,
-    ) -> Result<(), &'static str> {
+    ) -> Result<CommandOutcome, &'static str> {
         if command_id.is_nil() || revision < 1 || !matches!(action, "bind" | "unbind") {
             return Err("invalid command");
         }
@@ -89,11 +96,15 @@ impl Store {
             .begin()
             .await
             .map_err(|_| "Bee transaction failed")?;
-        if let Some(row)=sqlx::query("SELECT conversation_id,room_id,revision,command_type FROM bee_command_inbox WHERE command_id=$1")
+        if let Some(row)=sqlx::query("SELECT conversation_id,room_id,revision,command_type,result FROM bee_command_inbox WHERE command_id=$1")
             .bind(command_id).fetch_optional(&mut *tx).await.map_err(|_| "Bee command receipt load failed")? {
             if row.get::<Uuid,_>("conversation_id") != binding.conversation_id || row.get::<Uuid,_>("room_id") != binding.room_id || row.get::<i64,_>("revision") != revision || row.get::<String,_>("command_type") != action { return Err("command identity conflict"); }
+            let recorded_stale=row.get::<Value,_>("result")["stale"] == true;
+            let latest:Option<i64>=sqlx::query_scalar("SELECT revision FROM bee_room_revision WHERE room_id=$1")
+                .bind(binding.room_id).fetch_optional(&mut *tx).await.map_err(|_| "Bee room revision load failed")?;
+            let stale=recorded_stale || latest.is_some_and(|current| current > revision);
             tx.commit().await.map_err(|_| "Bee commit failed")?;
-            return Ok(());
+            return Ok(if stale {CommandOutcome::Stale} else {CommandOutcome::Applied});
         }
         sqlx::query("INSERT INTO bee_room_revision(room_id,revision,conversation_id) VALUES($1,0,NULL) ON CONFLICT(room_id) DO NOTHING")
             .bind(binding.room_id).execute(&mut *tx).await.map_err(|_| "Bee room revision initialization failed")?;
@@ -110,7 +121,7 @@ impl Store {
             sqlx::query("INSERT INTO bee_command_inbox(command_id,room_id,conversation_id,revision,command_type,result) VALUES($1,$2,$3,$4,$5,'{\"stale\":true}') ON CONFLICT(command_id) DO NOTHING")
                 .bind(command_id).bind(binding.room_id).bind(binding.conversation_id).bind(revision).bind(action).execute(&mut *tx).await.map_err(|_| "Bee stale command receipt write failed")?;
             tx.commit().await.map_err(|_| "Bee commit failed")?;
-            return Ok(());
+            return Ok(CommandOutcome::Stale);
         }
         if action == "bind" && current.is_some_and(|id| id != binding.conversation_id) {
             let previous = current.expect("checked above");
@@ -160,7 +171,7 @@ impl Store {
         sqlx::query("UPDATE bee_room_revision SET revision=$2,conversation_id=$3,updated_at=now() WHERE room_id=$1")
             .bind(binding.room_id).bind(revision).bind(if action == "bind" {Some(binding.conversation_id)} else {None}).execute(&mut *tx).await.map_err(|_| "Bee room revision update failed")?;
         tx.commit().await.map_err(|_| "Bee commit failed")?;
-        Ok(())
+        Ok(CommandOutcome::Applied)
     }
 
     pub async fn ingest(

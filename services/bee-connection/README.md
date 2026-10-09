@@ -34,7 +34,8 @@ cargo run -p bee-connection -- --worker
 
 The worker polls sessions commands, atomically applies each command and its
 idempotency receipt in Bee PostgreSQL, posts a binding status summary, then
-acknowledges the sessions outbox row. Failures retry on the next poll. The worker
+acknowledges the sessions outbox row. Stale revisions are acknowledged without
+publishing old status, so a stale head command cannot starve later work. Failures retry on the next poll. The worker
 handles only binding control; it starts no Bee/device transport or transcript
 flow. The local Compose file does not yet provision this service or its private
 credential.
