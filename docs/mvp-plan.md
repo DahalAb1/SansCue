@@ -193,8 +193,10 @@ one deterministic, unpublished preview per accepted event. Sessions checks the
 active conversation and bound speaker session before storing the candidate;
 only speaker/TA snapshots expose it. No model/provider is called, no candidate
 can be published or shown to the audience, and this slice is not Step 8
-acceptance. See the service contract and README; live Bee and Docker validation
-remain separate.
+acceptance. Generation jobs now use row-locked leases, heartbeats, bounded
+retries, timeout, and fenced completion; candidate, candidate outbox, and
+completed status commit atomically. See the service contract and README; live
+Bee, model quality, and Docker validation remain separate.
 
 ```mermaid
 flowchart TD
