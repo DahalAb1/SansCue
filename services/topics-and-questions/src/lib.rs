@@ -13,6 +13,8 @@ use sqlx::{PgPool, Row};
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use uuid::Uuid;
 
+const DEFAULT_GENERATION_DEADLINE: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct App {
     pub pool: PgPool,
@@ -25,6 +27,7 @@ pub struct Delivery {
     pub sessions_token: String,
     client: reqwest::Client,
     generator: Arc<dyn QuestionGenerator>,
+    generation_deadline: Duration,
 }
 
 pub type GenerationFuture<'a> =
@@ -279,12 +282,21 @@ impl Delivery {
             sessions_token: sessions_token.to_owned(),
             client,
             generator: Arc::new(StubV1Generator),
+            generation_deadline: DEFAULT_GENERATION_DEADLINE,
         })
     }
 
     pub fn with_generator(mut self, generator: Arc<dyn QuestionGenerator>) -> Self {
         self.generator = generator;
         self
+    }
+
+    pub fn with_generation_deadline(mut self, deadline: Duration) -> Result<Self, &'static str> {
+        if deadline.is_zero() {
+            return Err("generation deadline must be positive");
+        }
+        self.generation_deadline = deadline;
+        Ok(self)
     }
 
     pub async fn run(self) -> Result<(), &'static str> {
@@ -389,21 +401,25 @@ impl Delivery {
         let jobs = self.claim_generation_jobs(1).await?;
         let mut completed = 0;
         for (event, lease) in jobs {
-            let heartbeat = self.start_lease_heartbeat(event.event_id, lease);
-            let result = self
-                .generator
-                .generate(GenerationInput {
+            let (heartbeat, stop_heartbeat) = self.start_lease_heartbeat(event.event_id, lease);
+            let result = tokio::time::timeout(
+                self.generation_deadline,
+                self.generator.generate(GenerationInput {
                     event: event.clone(),
-                })
-                .await;
-            heartbeat.abort();
+                }),
+            )
+            .await;
+            // Gracefully stop and join the heartbeat before clearing the lease.
+            // This prevents an in-flight extension from racing the retry update.
+            let _ = stop_heartbeat.send(true);
+            let _ = heartbeat.await;
             match result {
-                Ok(output) if valid_generated_question(&output) => {
+                Ok(Ok(output)) if valid_generated_question(&output) => {
                     if self.complete_generation(&event, &lease, output).await? {
                         completed += 1;
                     }
                 }
-                Ok(_) => {
+                Ok(Ok(_)) => {
                     self.fail_generation(
                         event.event_id,
                         lease,
@@ -414,7 +430,18 @@ impl Delivery {
                     )
                     .await?
                 }
-                Err(failure) => self.fail_generation(event.event_id, lease, failure).await?,
+                Ok(Err(failure)) => self.fail_generation(event.event_id, lease, failure).await?,
+                Err(_) => {
+                    self.fail_generation(
+                        event.event_id,
+                        lease,
+                        GenerationFailure {
+                            code: "generation_timeout",
+                            retryable: true,
+                        },
+                    )
+                    .await?
+                }
             }
         }
         Ok(completed)
@@ -471,20 +498,37 @@ impl Delivery {
         Ok(claimed)
     }
 
-    fn start_lease_heartbeat(&self, event_id: Uuid, lease: Uuid) -> tokio::task::JoinHandle<()> {
+    fn start_lease_heartbeat(
+        &self,
+        event_id: Uuid,
+        lease: Uuid,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::watch::Sender<bool>,
+    ) {
         let pool = self.pool.clone();
-        tokio::spawn(async move {
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.tick().await;
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    changed = stopped.changed() => {
+                        if changed.is_err() || *stopped.borrow() { return; }
+                    }
+                    _ = interval.tick() => {}
+                }
+                if *stopped.borrow() {
+                    return;
+                }
                 let result = sqlx::query("UPDATE generation_jobs SET lease_until=now()+interval '60 seconds',updated_at=now() WHERE event_id=$1 AND status='processing' AND lease_token=$2")
                     .bind(event_id).bind(lease).execute(&pool).await;
                 if !matches!(result, Ok(ref result) if result.rows_affected() == 1) {
                     return;
                 }
             }
-        })
+        });
+        (task, stop)
     }
 
     async fn complete_generation(

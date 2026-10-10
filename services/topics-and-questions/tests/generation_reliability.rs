@@ -118,6 +118,78 @@ impl QuestionGenerator for InvalidOutput {
     }
 }
 
+struct NeverCompletes;
+impl QuestionGenerator for NeverCompletes {
+    fn generate<'a>(&'a self, _input: GenerationInput) -> GenerationFuture<'a> {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test]
+async fn generator_timeout_releases_lease_and_retries_to_exhaustion() {
+    let pool = pool().await;
+    let event = event("never-completing generator input");
+    insert_pending(&pool, &event).await;
+    sqlx::query("UPDATE generation_jobs SET max_attempts=2 WHERE event_id=$1")
+        .bind(event.event_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let delivery = Delivery::new(pool.clone(), "http://127.0.0.1:1", "sessions-token")
+        .unwrap()
+        .with_generator(Arc::new(NeverCompletes))
+        .with_generation_deadline(Duration::from_millis(25))
+        .unwrap();
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), delivery.generate_once())
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    let first = sqlx::query("SELECT status,attempts,next_attempt_at,last_error_code,lease_token FROM generation_jobs WHERE event_id=$1")
+        .bind(event.event_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(first.get::<String, _>("status"), "pending");
+    assert_eq!(first.get::<i32, _>("attempts"), 1);
+    assert_eq!(
+        first.get::<String, _>("last_error_code"),
+        "generation_timeout"
+    );
+    assert!(first.get::<Option<Uuid>, _>("lease_token").is_none());
+    let retry_at: chrono::DateTime<Utc> = first.get("next_attempt_at");
+    assert!(retry_at > Utc::now());
+
+    sqlx::query("UPDATE generation_jobs SET next_attempt_at=now() WHERE event_id=$1")
+        .bind(event.event_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), delivery.generate_once())
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    let exhausted = sqlx::query(
+        "SELECT status,attempts,last_error_code,lease_token FROM generation_jobs WHERE event_id=$1",
+    )
+    .bind(event.event_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(exhausted.get::<String, _>("status"), "failed");
+    assert_eq!(exhausted.get::<i32, _>("attempts"), 2);
+    assert_eq!(
+        exhausted.get::<String, _>("last_error_code"),
+        "generation_timeout"
+    );
+    assert!(exhausted.get::<Option<Uuid>, _>("lease_token").is_none());
+    cleanup(&pool, &[event.event_id]).await;
+    pool.close().await;
+}
+
 #[tokio::test]
 async fn invalid_generator_output_is_terminal_without_candidate() {
     let pool = pool().await;
