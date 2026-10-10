@@ -285,9 +285,11 @@ flowchart TD
 the three local Rust services and Bee worker, replays the deterministic fixture,
 then checks candidate idempotency, staff-only evidence, publication, audience
 rating/Q&A, counts, and audience privacy using three distinct PostgreSQL DB URLs.
-It requires neither Docker nor device/model/AWS access. It is an available check,
-not a passed check until run. Live Bee, model quality, Docker/Compose, AWS,
-performance, and backup/restore remain independent acceptance gates.
+It requires neither Docker nor device/model/AWS access. This synthetic flow and
+the service PostgreSQL suites have passed against the source tree integrated as
+`dev` commit `3ce885b`; see [environment verification](environment-verification.md)
+for exact scope. Live Bee, model quality, Docker/Compose, AWS, performance, and
+backup/restore remain independent acceptance gates.
 
 **Success:** The agreed workload meets correctness, delay, and cost targets.
 

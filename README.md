@@ -14,8 +14,8 @@ exercises this flow with a synthetic fixture and three separate PostgreSQL
 databases.
 
 The synthetic end-to-end procedure and the relevant service PostgreSQL suites
-passed on `test/mvp-acceptance-matrix` at `707e23c` against native PostgreSQL
-17.11; this is not Docker verification. See the
+passed against the exact source tree now integrated in `dev` as `3ce885b`, using
+native PostgreSQL 17.11; this is not Docker verification. See the
 [verification record](docs/environment-verification.md) for exact check scope.
 Live Bee/API, AWS, model quality, Docker/Compose runtime, and production
 resilience/performance remain distinct unverified gates. See the

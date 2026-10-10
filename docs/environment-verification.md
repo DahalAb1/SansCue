@@ -1,22 +1,24 @@
 # Environment verification status
 
-Updated October 9, 2026. This records an observed hardware-independent run and
-separates native-PostgreSQL checks from Docker-only checks. It does not claim
-that live Bee, AWS, model quality, or production acceptance has passed.
+Updated October 10, 2026. The verification below was run against the source tree
+now integrated as `dev` commit `3ce885b` (the tests ran on its feature branch
+before the equivalent source tree was squash-merged). It separates
+native-PostgreSQL checks from Docker-only checks. It does not claim that live
+Bee, AWS, model quality, or production acceptance has passed.
 
 ## Current acceptance gates
 
-- **Hardware-independent synthetic flow:** passed on branch
-  `test/mvp-acceptance-matrix` at `707e23c` using three fresh, separate native
+- **Hardware-independent synthetic flow:** passed against the source tree now
+  integrated in `dev` as `3ce885b`, using three fresh, separate native
   PostgreSQL 17.11 databases. The procedure in
   [`services/acceptance`](../services/acceptance/README.md) replayed the
   synthetic fixture twice and verified binding/outbox delivery, event and
   candidate deduplication, staff-only candidate/evidence, publication, an
   audience rating and written Q&A, staff counts, and audience privacy.
-- **Service PostgreSQL suites on the same branch/commit:** Sessions access 9/9,
+- **Service PostgreSQL suites on the same source tree:** Sessions access 9/9,
   Bee persistence 3/3, and Topics persistence 2/2 passed after correcting test
   sequencing and isolating Bee persistence tests by schema.
-- **Database-independent checks on the same branch/commit:** Sessions unit 6/6,
+- **Database-independent checks on the same source tree:** Sessions unit 6/6,
   Bee unit/contract/pipeline/worker 23/23, Topics unit/contract 3/3; 18 frontend
   tests, frontend typecheck and production build; workspace Clippy and Rust
   formatting passed. The checks used native services/databases and did not use
