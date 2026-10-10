@@ -16,8 +16,9 @@ Bee, AWS, model quality, or production acceptance has passed.
   candidate deduplication, staff-only candidate/evidence, publication, an
   audience rating and written Q&A, staff counts, and audience privacy.
 - **Service PostgreSQL suites on the same source tree:** Sessions access 9/9,
-  Bee persistence 3/3, and Topics persistence 2/2 passed after correcting test
-  sequencing and isolating Bee persistence tests by schema.
+  Bee persistence 3/3, Topics persistence 2/2, and Topics generation-reliability
+  tests 4/4 passed. The latter cover retry/backoff, permanent failure, timeout,
+  atomic completion, slow-generation ingress, lease expiry, and fencing.
 - **Database-independent checks on the same source tree:** Sessions unit 6/6,
   Bee unit/contract/pipeline/worker 23/23, Topics unit/contract 3/3; 18 frontend
   tests, frontend typecheck and production build; workspace Clippy and Rust

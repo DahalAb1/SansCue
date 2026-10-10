@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Digest;
 use sqlx::{PgPool, Row};
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use uuid::Uuid;
+
+const DEFAULT_GENERATION_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct App {
@@ -24,6 +26,43 @@ pub struct Delivery {
     pub sessions_url: String,
     pub sessions_token: String,
     client: reqwest::Client,
+    generator: Arc<dyn QuestionGenerator>,
+    generation_deadline: Duration,
+}
+
+pub type GenerationFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<GeneratedQuestion, GenerationFailure>> + Send + 'a>>;
+
+/// Provider-neutral generator seam. The current deployment installs only StubV1Generator.
+pub trait QuestionGenerator: Send + Sync {
+    fn generate<'a>(&'a self, input: GenerationInput) -> GenerationFuture<'a>;
+}
+
+#[derive(Clone, Debug)]
+pub struct GenerationInput {
+    pub event: TranscriptEvent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedQuestion {
+    pub text: String,
+    pub generator_version: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationFailure {
+    /// Stable, non-sensitive diagnostic classification persisted for operators.
+    pub code: &'static str,
+    pub retryable: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct StubV1Generator;
+
+impl QuestionGenerator for StubV1Generator {
+    fn generate<'a>(&'a self, input: GenerationInput) -> GenerationFuture<'a> {
+        Box::pin(async move { Ok(stub_question(&input.event)) })
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TranscriptEvent {
@@ -180,15 +219,27 @@ pub fn validate(e: &TranscriptEvent) -> Result<(), &'static str> {
 }
 /// Deliberately transparent deterministic fallback, not a model or production question generator.
 pub fn generate(e: &TranscriptEvent) -> Candidate {
-    let excerpt = e.text.trim().chars().take(240).collect::<String>();
+    candidate_from(e, stub_question(e))
+}
+
+fn stub_question(event: &TranscriptEvent) -> GeneratedQuestion {
+    let excerpt = event.text.trim().chars().take(240).collect::<String>();
     let clean = excerpt.trim_end_matches(['.', '?', '!']);
+    GeneratedQuestion {
+        text: format!("What is the key implication of: {clean}?"),
+        generator_version: "stub-v1".into(),
+    }
+}
+
+fn candidate_from(e: &TranscriptEvent, output: GeneratedQuestion) -> Candidate {
+    let excerpt = e.text.trim().chars().take(240).collect::<String>();
     Candidate {
         candidate_id: e.event_id,
         event_id: e.event_id,
         room_id: e.binding.room_id,
         session_id: e.binding.session_id,
-        text: format!("What is the key implication of: {clean}?"),
-        generator_version: "stub-v1".into(),
+        text: output.text,
+        generator_version: output.generator_version,
         evidence: Evidence {
             conversation_id: e.binding.conversation_id,
             ingest_ordinal: e.ingest_ordinal,
@@ -197,6 +248,13 @@ pub fn generate(e: &TranscriptEvent) -> Candidate {
         },
         published: false,
     }
+}
+
+fn valid_generated_question(output: &GeneratedQuestion) -> bool {
+    !output.text.trim().is_empty()
+        && output.text.len() <= 1000
+        && !output.generator_version.trim().is_empty()
+        && output.generator_version.len() <= 128
 }
 impl Delivery {
     pub fn new(
@@ -223,56 +281,53 @@ impl Delivery {
             sessions_url: sessions_url.trim_end_matches('/').to_owned(),
             sessions_token: sessions_token.to_owned(),
             client,
+            generator: Arc::new(StubV1Generator),
+            generation_deadline: DEFAULT_GENERATION_DEADLINE,
         })
     }
 
+    pub fn with_generator(mut self, generator: Arc<dyn QuestionGenerator>) -> Self {
+        self.generator = generator;
+        self
+    }
+
+    pub fn with_generation_deadline(mut self, deadline: Duration) -> Result<Self, &'static str> {
+        if deadline.is_zero() {
+            return Err("generation deadline must be positive");
+        }
+        self.generation_deadline = deadline;
+        Ok(self)
+    }
+
     pub async fn run(self) -> Result<(), &'static str> {
+        let generator_worker = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(error) = generator_worker.generate_pending().await {
+                    eprintln!("topics-and-questions generation worker failed; retrying ({error})");
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
         loop {
-            if let Err(e) = self.poll_once().await {
-                eprintln!("topics-and-questions delivery failed; retrying ({e})");
+            if let Err(error) = self.deliver_once().await {
+                eprintln!("topics-and-questions candidate delivery failed; retrying ({error})");
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
     pub async fn poll_once(&self) -> Result<usize, &'static str> {
-        let jobs=sqlx::query("SELECT j.event_id,e.schema_version,e.conversation_id,e.room_id,e.session_id,e.source_conversation_id,e.source_id,e.source_sequence,e.ingest_ordinal,e.received_at,e.text FROM generation_jobs j JOIN transcript_events e USING(event_id) WHERE j.status='pending' ORDER BY e.created_at LIMIT 50").fetch_all(&self.pool).await.map_err(|_|"job poll failed")?;
+        let generated = self.generate_once().await?;
+        let delivered = self.deliver_once().await?;
+        Ok(generated + delivered)
+    }
+
+    pub async fn generate_once(&self) -> Result<usize, &'static str> {
+        self.generate_pending().await
+    }
+
+    pub async fn deliver_once(&self) -> Result<usize, &'static str> {
         let mut count = 0;
-        for row in jobs {
-            let e = TranscriptEvent {
-                schema_version: row.get::<i16, _>("schema_version") as u16,
-                event_id: row.get("event_id"),
-                binding: Binding {
-                    conversation_id: row.get("conversation_id"),
-                    source_conversation_id: row.get("source_conversation_id"),
-                    room_id: row.get("room_id"),
-                    session_id: row.get("session_id"),
-                },
-                ingest_ordinal: row.get::<i64, _>("ingest_ordinal") as u64,
-                received_at: row.get("received_at"),
-                source_id: row.get("source_id"),
-                source_sequence: row
-                    .get::<Option<String>, _>("source_sequence")
-                    .and_then(|v| v.parse().ok()),
-                text: row.get("text"),
-            };
-            let c = generate(&e);
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|_| "generation transaction failed")?;
-            sqlx::query("INSERT INTO question_candidates(candidate_id,event_id,room_id,session_id,text,generator_version,evidence) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(event_id) DO NOTHING").bind(c.candidate_id).bind(c.event_id).bind(c.room_id).bind(c.session_id).bind(&c.text).bind(&c.generator_version).bind(sqlx::types::Json(&c.evidence)).execute(&mut *tx).await.map_err(|_|"candidate save failed")?;
-            sqlx::query(
-                "INSERT INTO candidate_outbox(candidate_id) VALUES($1) ON CONFLICT DO NOTHING",
-            )
-            .bind(c.candidate_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| "candidate outbox save failed")?;
-            sqlx::query("UPDATE generation_jobs SET status='complete',attempts=attempts+1,updated_at=now() WHERE event_id=$1").bind(e.event_id).execute(&mut *tx).await.map_err(|_|"job completion save failed")?;
-            tx.commit().await.map_err(|_| "generation commit failed")?;
-            count += 1;
-        }
         let outbox=sqlx::query("SELECT c.candidate_id,c.event_id,c.room_id,c.session_id,c.text,c.generator_version,c.evidence FROM candidate_outbox o JOIN question_candidates c USING(candidate_id) WHERE o.delivered_at IS NULL AND o.terminal_at IS NULL ORDER BY o.created_at LIMIT 50").fetch_all(&self.pool).await.map_err(|_|"candidate outbox poll failed")?;
         let mut retryable_failure = false;
         for row in outbox {
@@ -338,6 +393,195 @@ impl Delivery {
         } else {
             Ok(count)
         }
+    }
+
+    async fn generate_pending(&self) -> Result<usize, &'static str> {
+        // Keep only one lease in flight in this worker. This avoids claiming
+        // jobs whose lease would age while they wait behind a slow generator.
+        let jobs = self.claim_generation_jobs(1).await?;
+        let mut completed = 0;
+        for (event, lease) in jobs {
+            let (heartbeat, stop_heartbeat) = self.start_lease_heartbeat(event.event_id, lease);
+            let result = tokio::time::timeout(
+                self.generation_deadline,
+                self.generator.generate(GenerationInput {
+                    event: event.clone(),
+                }),
+            )
+            .await;
+            // Gracefully stop and join the heartbeat before clearing the lease.
+            // This prevents an in-flight extension from racing the retry update.
+            let _ = stop_heartbeat.send(true);
+            let _ = heartbeat.await;
+            match result {
+                Ok(Ok(output)) if valid_generated_question(&output) => {
+                    if self.complete_generation(&event, &lease, output).await? {
+                        completed += 1;
+                    }
+                }
+                Ok(Ok(_)) => {
+                    self.fail_generation(
+                        event.event_id,
+                        lease,
+                        GenerationFailure {
+                            code: "invalid_generator_output",
+                            retryable: false,
+                        },
+                    )
+                    .await?
+                }
+                Ok(Err(failure)) => self.fail_generation(event.event_id, lease, failure).await?,
+                Err(_) => {
+                    self.fail_generation(
+                        event.event_id,
+                        lease,
+                        GenerationFailure {
+                            code: "generation_timeout",
+                            retryable: true,
+                        },
+                    )
+                    .await?
+                }
+            }
+        }
+        Ok(completed)
+    }
+
+    async fn claim_generation_jobs(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(TranscriptEvent, Uuid)>, &'static str> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| "generation claim transaction failed")?;
+        sqlx::query("UPDATE generation_jobs SET status='failed',lease_token=NULL,lease_until=NULL,last_error_code='retry_exhausted',updated_at=now() WHERE status='processing' AND lease_until <= now() AND attempts >= max_attempts")
+            .execute(&mut *tx).await.map_err(|_| "generation exhaustion update failed")?;
+        let rows = sqlx::query("SELECT j.event_id FROM generation_jobs j JOIN transcript_events e USING(event_id) WHERE j.attempts < j.max_attempts AND ((j.status='pending' AND j.next_attempt_at <= now()) OR (j.status='processing' AND j.lease_until <= now())) ORDER BY e.created_at,j.event_id FOR UPDATE OF j SKIP LOCKED LIMIT $1")
+            .bind(limit).fetch_all(&mut *tx).await.map_err(|_| "generation claim query failed")?;
+        let mut claimed = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: Uuid = row.get("event_id");
+            let lease = Uuid::new_v4();
+            let updated = sqlx::query("UPDATE generation_jobs SET status='processing',attempts=attempts+1,lease_token=$2,lease_until=now()+interval '60 seconds',updated_at=now() WHERE event_id=$1 RETURNING event_id")
+                .bind(id).bind(lease).fetch_optional(&mut *tx).await.map_err(|_| "generation lease update failed")?;
+            if updated.is_none() {
+                continue;
+            }
+            let event_row = sqlx::query("SELECT schema_version,event_id,conversation_id,room_id,session_id,source_conversation_id,source_id,source_sequence,ingest_ordinal,received_at,text FROM transcript_events WHERE event_id=$1")
+                .bind(id).fetch_one(&mut *tx).await.map_err(|_| "generation input load failed")?;
+            claimed.push((
+                TranscriptEvent {
+                    schema_version: event_row.get::<i16, _>("schema_version") as u16,
+                    event_id: event_row.get("event_id"),
+                    binding: Binding {
+                        conversation_id: event_row.get("conversation_id"),
+                        source_conversation_id: event_row.get("source_conversation_id"),
+                        room_id: event_row.get("room_id"),
+                        session_id: event_row.get("session_id"),
+                    },
+                    ingest_ordinal: event_row.get::<i64, _>("ingest_ordinal") as u64,
+                    received_at: event_row.get("received_at"),
+                    source_id: event_row.get("source_id"),
+                    source_sequence: event_row
+                        .get::<Option<String>, _>("source_sequence")
+                        .and_then(|v| v.parse().ok()),
+                    text: event_row.get("text"),
+                },
+                lease,
+            ));
+        }
+        tx.commit()
+            .await
+            .map_err(|_| "generation claim commit failed")?;
+        Ok(claimed)
+    }
+
+    fn start_lease_heartbeat(
+        &self,
+        event_id: Uuid,
+        lease: Uuid,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::watch::Sender<bool>,
+    ) {
+        let pool = self.pool.clone();
+        let (stop, mut stopped) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(15));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    changed = stopped.changed() => {
+                        if changed.is_err() || *stopped.borrow() { return; }
+                    }
+                    _ = interval.tick() => {}
+                }
+                if *stopped.borrow() {
+                    return;
+                }
+                let result = sqlx::query("UPDATE generation_jobs SET lease_until=now()+interval '60 seconds',updated_at=now() WHERE event_id=$1 AND status='processing' AND lease_token=$2")
+                    .bind(event_id).bind(lease).execute(&pool).await;
+                if !matches!(result, Ok(ref result) if result.rows_affected() == 1) {
+                    return;
+                }
+            }
+        });
+        (task, stop)
+    }
+
+    async fn complete_generation(
+        &self,
+        event: &TranscriptEvent,
+        lease: &Uuid,
+        output: GeneratedQuestion,
+    ) -> Result<bool, &'static str> {
+        let candidate = candidate_from(event, output);
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| "generation completion transaction failed")?;
+        let lease_owner = sqlx::query("SELECT event_id FROM generation_jobs WHERE event_id=$1 AND status='processing' AND lease_token=$2 FOR UPDATE")
+            .bind(event.event_id).bind(lease).fetch_optional(&mut *tx).await.map_err(|_| "generation completion fence failed")?;
+        if lease_owner.is_none() {
+            tx.rollback()
+                .await
+                .map_err(|_| "stale generation rollback failed")?;
+            return Ok(false);
+        }
+        sqlx::query("INSERT INTO question_candidates(candidate_id,event_id,room_id,session_id,text,generator_version,evidence) VALUES($1,$2,$3,$4,$5,$6,$7)")
+            .bind(candidate.candidate_id).bind(candidate.event_id).bind(candidate.room_id).bind(candidate.session_id).bind(&candidate.text).bind(&candidate.generator_version).bind(sqlx::types::Json(&candidate.evidence))
+            .execute(&mut *tx).await.map_err(|_| "candidate save failed")?;
+        sqlx::query("INSERT INTO candidate_outbox(candidate_id) VALUES($1)")
+            .bind(candidate.candidate_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| "candidate outbox save failed")?;
+        let completed = sqlx::query("UPDATE generation_jobs SET status='complete',lease_token=NULL,lease_until=NULL,last_error_code=NULL,updated_at=now() WHERE event_id=$1 AND status='processing' AND lease_token=$2")
+            .bind(event.event_id).bind(lease).execute(&mut *tx).await.map_err(|_| "generation completion fence failed")?;
+        if completed.rows_affected() != 1 {
+            tx.rollback()
+                .await
+                .map_err(|_| "stale generation rollback failed")?;
+            return Ok(false);
+        }
+        tx.commit()
+            .await
+            .map_err(|_| "generation completion commit failed")?;
+        Ok(true)
+    }
+
+    async fn fail_generation(
+        &self,
+        event_id: Uuid,
+        lease: Uuid,
+        failure: GenerationFailure,
+    ) -> Result<(), &'static str> {
+        sqlx::query("UPDATE generation_jobs SET status=CASE WHEN NOT $3 OR attempts >= max_attempts THEN 'failed' ELSE 'pending' END,lease_token=NULL,lease_until=NULL,next_attempt_at=now()+make_interval(secs => LEAST(60, power(2,LEAST(attempts-1,6))::int)),last_error_code=$4,updated_at=now() WHERE event_id=$1 AND status='processing' AND lease_token=$2")
+            .bind(event_id).bind(lease).bind(failure.retryable).bind(failure.code).execute(&self.pool).await.map_err(|_| "generation failure update failed")?;
+        Ok(())
     }
 
     async fn reject_candidate(&self, candidate: Uuid, code: &str) -> Result<(), &'static str> {
