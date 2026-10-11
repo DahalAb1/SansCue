@@ -153,7 +153,8 @@ duplicate handling, reconnect/gap evidence, and malformed observations.
 **Still unverified:** **REAL BEE DEVICE / LIVE API VERIFICATION** is an external
 gate. No live transport, device authentication, real source identity/order, or
 real recovery behavior is claimed. Synthetic fixture success does not satisfy
-live Bee acceptance.
+live Bee acceptance. Use the [device verification runbook](bee-device-verification.md)
+to record live observations; it is a prepared procedure, not a passed test.
 
 ```mermaid
 flowchart TD
@@ -223,6 +224,10 @@ flowchart TD
 **Service:** Evaluation within topics-and-questions; no new microservice.
 
 **Success:** A model is selected against recorded results; if neither meets the targets, revise and repeat.
+
+Use the [model comparison worksheet](model-evaluation-worksheet.md) to freeze
+the shared excerpts, prompts, targets, and scoring before generating outputs.
+The worksheet is a template only; no provider comparison has been run.
 
 ```mermaid
 flowchart TD

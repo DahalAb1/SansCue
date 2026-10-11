@@ -27,6 +27,9 @@ Bee, AWS, model quality, or production acceptance has passed.
 - **Live Bee/device/API, model quality, AWS, Docker/Compose, production
   performance, and backup/restore:** unverified separate gates. Synthetic input
   is not a live Bee validation, and `stub-v1` is not model-quality evidence.
+  The [Bee device runbook](bee-device-verification.md) and
+  [model comparison worksheet](model-evaluation-worksheet.md) are prepared
+  procedures only; neither has been executed.
 
 ## Earlier foundation-only verification record
 

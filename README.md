@@ -27,6 +27,8 @@ boundaries.
 - [Foundation contract and stage acceptance](docs/foundation-contract.md)
 - [Environment verification status](docs/environment-verification.md)
 - [MVP build plan](docs/mvp-plan.md)
+- [Bee device verification runbook](docs/bee-device-verification.md)
+- [Model comparison worksheet](docs/model-evaluation-worksheet.md)
 - [Submission checklist](docs/submission-requirements.md)
 - [Developer product feedback](docs/product-feedback.md)
 - [Bee streaming documentation](https://docs.bee.computer/docs/realtime)
