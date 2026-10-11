@@ -1,7 +1,7 @@
 # Environment verification status
 
 Updated October 10, 2026. The verification below was run against the source tree
-now integrated as `dev` commit `3ce885b` (the tests ran on its feature branch
+now integrated as `dev` commit `411fba0` (the checks ran on its feature branch
 before the equivalent source tree was squash-merged). It separates
 native-PostgreSQL checks from Docker-only checks. It does not claim that live
 Bee, AWS, model quality, or production acceptance has passed.
@@ -9,7 +9,7 @@ Bee, AWS, model quality, or production acceptance has passed.
 ## Current acceptance gates
 
 - **Hardware-independent synthetic flow:** passed against the source tree now
-  integrated in `dev` as `3ce885b`, using three fresh, separate native
+  integrated in `dev` as `411fba0`, using three fresh, separate native
   PostgreSQL 17.11 databases. The procedure in
   [`services/acceptance`](../services/acceptance/README.md) replayed the
   synthetic fixture twice and verified binding/outbox delivery, event and

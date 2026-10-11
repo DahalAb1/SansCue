@@ -289,7 +289,7 @@ then checks candidate idempotency, staff-only evidence, publication, audience
 rating/Q&A, counts, and audience privacy using three distinct PostgreSQL DB URLs.
 It requires neither Docker nor device/model/AWS access. This synthetic flow and
 the service PostgreSQL suites have passed against the source tree integrated as
-`dev` commit `3ce885b`; see [environment verification](environment-verification.md)
+`dev` commit `411fba0`; see [environment verification](environment-verification.md)
 for exact scope. Live Bee, model quality, Docker/Compose, AWS, performance, and
 backup/restore remain independent acceptance gates.
 

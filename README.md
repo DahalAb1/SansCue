@@ -14,7 +14,7 @@ exercises this flow with a synthetic fixture and three separate PostgreSQL
 databases.
 
 The synthetic end-to-end procedure and the relevant service PostgreSQL suites
-passed against the exact source tree now integrated in `dev` as `3ce885b`, using
+passed against the exact source tree now integrated in `dev` as `411fba0`, using
 native PostgreSQL 17.11; this is not Docker verification. See the
 [verification record](docs/environment-verification.md) for exact check scope.
 Live Bee/API, AWS, model quality, Docker/Compose runtime, and production
