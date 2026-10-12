@@ -49,4 +49,3 @@ one-event/one-job cadence remains development plumbing, not a product policy.
 - Before enabling a model, decide topic windowing/cadence and the exact
   question policy; compare two providers on the same frozen excerpts; record
   the exact model and prompt; and keep speaker/TA approval before publishing.
-

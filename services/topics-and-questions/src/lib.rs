@@ -641,3 +641,45 @@ mod delivery_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod question_output_tests {
+    use super::{Binding, GeneratedQuestion, TranscriptEvent, valid_generated_question};
+    use chrono::{TimeZone, Utc};
+    use uuid::Uuid;
+
+    fn event() -> TranscriptEvent {
+        TranscriptEvent {
+            schema_version: 1,
+            event_id: Uuid::from_u128(9),
+            binding: Binding {
+                conversation_id: Uuid::from_u128(1),
+                source_conversation_id: None,
+                room_id: Uuid::from_u128(2),
+                session_id: Uuid::from_u128(3),
+            },
+            ingest_ordinal: 4,
+            received_at: Utc.with_ymd_and_hms(2026, 10, 9, 0, 0, 0).unwrap(),
+            source_id: None,
+            source_sequence: None,
+            text: "We reduced outage time by adding a retry queue.".into(),
+        }
+    }
+
+    #[test]
+    fn generated_question_requires_exact_transcript_evidence() {
+        let event = event();
+        let mut output = GeneratedQuestion {
+            text: "How did the retry queue reduce outage time?".into(),
+            evidence_excerpt: "We reduced outage time by adding a retry queue.".into(),
+            generator_version: "provider:model@prompt-v1".into(),
+        };
+        assert!(valid_generated_question(&event, &output));
+
+        output.evidence_excerpt = "We eliminated every outage.".into();
+        assert!(!valid_generated_question(&event, &output));
+        output.evidence_excerpt = "We reduced outage time by adding a retry queue.".into();
+        output.text = "This is not phrased as a question.".into();
+        assert!(!valid_generated_question(&event, &output));
+    }
+}

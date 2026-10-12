@@ -91,6 +91,9 @@ test('question candidates are staff-only development previews with traceable evi
     },
   };
   assert.deepEqual(parseRoomState({ ...state('speaker'), question_candidates: [candidate] }, roomId)?.question_candidates, [candidate]);
+  const modelCandidate = { ...candidate, generator_version: 'provider:model@prompt-v1' };
+  assert.deepEqual(parseRoomState({ ...state('speaker'), question_candidates: [modelCandidate] }, roomId)?.question_candidates, [modelCandidate]);
+  assert.equal(parseRoomState({ ...state('speaker'), question_candidates: [{ ...candidate, generator_version: 'bad\nversion' }] }, roomId), null);
   assert.equal(parseRoomState({ ...state('audience'), question_candidates: [candidate] }, roomId), null);
   assert.equal(parseRoomState({ ...state('ta'), question_candidates: [{ ...candidate, published: true }] }, roomId), null);
   assert.equal(parseRoomState({ ...state('speaker'), question_candidates: [{ ...candidate, evidence: { ...candidate.evidence, ingest_ordinal: 0 } }] }, roomId), null);
