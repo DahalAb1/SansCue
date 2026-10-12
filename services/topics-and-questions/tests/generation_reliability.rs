@@ -98,8 +98,10 @@ impl QuestionGenerator for FailOnce {
                     retryable: true,
                 });
             }
+            let evidence_excerpt = input.event.text.clone();
             Ok(GeneratedQuestion {
                 text: format!("Question about {}?", input.event.text),
+                evidence_excerpt,
                 generator_version: "fake-v1".into(),
             })
         })
@@ -112,6 +114,7 @@ impl QuestionGenerator for InvalidOutput {
         Box::pin(async {
             Ok(GeneratedQuestion {
                 text: String::new(),
+                evidence_excerpt: String::new(),
                 generator_version: "invalid-v1".into(),
             })
         })
@@ -297,8 +300,10 @@ impl QuestionGenerator for SlowOnce {
                 self.entered.notify_one();
                 self.release.notified().await;
             }
+            let evidence_excerpt = input.event.text.clone();
             Ok(GeneratedQuestion {
                 text: format!("Question about {}?", input.event.text),
+                evidence_excerpt,
                 generator_version: "slow-fake-v1".into(),
             })
         })

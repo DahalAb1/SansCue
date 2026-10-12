@@ -46,6 +46,8 @@ pub struct GenerationInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GeneratedQuestion {
     pub text: String,
+    /// Exact contiguous quote from the source event used to ground the question.
+    pub evidence_excerpt: String,
     pub generator_version: String,
 }
 
@@ -227,34 +229,43 @@ fn stub_question(event: &TranscriptEvent) -> GeneratedQuestion {
     let clean = excerpt.trim_end_matches(['.', '?', '!']);
     GeneratedQuestion {
         text: format!("What is the key implication of: {clean}?"),
+        evidence_excerpt: excerpt,
         generator_version: "stub-v1".into(),
     }
 }
 
 fn candidate_from(e: &TranscriptEvent, output: GeneratedQuestion) -> Candidate {
-    let excerpt = e.text.trim().chars().take(240).collect::<String>();
     Candidate {
         candidate_id: e.event_id,
         event_id: e.event_id,
         room_id: e.binding.room_id,
         session_id: e.binding.session_id,
-        text: output.text,
+        text: output.text.trim().to_owned(),
         generator_version: output.generator_version,
         evidence: Evidence {
             conversation_id: e.binding.conversation_id,
             ingest_ordinal: e.ingest_ordinal,
             received_at: e.received_at,
-            excerpt,
+            excerpt: output.evidence_excerpt,
         },
         published: false,
     }
 }
 
-fn valid_generated_question(output: &GeneratedQuestion) -> bool {
-    !output.text.trim().is_empty()
-        && output.text.len() <= 1000
+fn valid_generated_question(event: &TranscriptEvent, output: &GeneratedQuestion) -> bool {
+    let question = output.text.trim();
+    let evidence = output.evidence_excerpt.trim();
+    !question.is_empty()
+        && question.len() <= 1000
+        && question.ends_with('?')
+        && !question.chars().any(char::is_control)
+        && !evidence.is_empty()
+        && evidence.len() <= 1000
+        && evidence == output.evidence_excerpt
+        && event.text.contains(evidence)
         && !output.generator_version.trim().is_empty()
         && output.generator_version.len() <= 128
+        && !output.generator_version.chars().any(char::is_control)
 }
 impl Delivery {
     pub fn new(
@@ -414,7 +425,7 @@ impl Delivery {
             let _ = stop_heartbeat.send(true);
             let _ = heartbeat.await;
             match result {
-                Ok(Ok(output)) if valid_generated_question(&output) => {
+                Ok(Ok(output)) if valid_generated_question(&event, &output) => {
                     if self.complete_generation(&event, &lease, output).await? {
                         completed += 1;
                     }

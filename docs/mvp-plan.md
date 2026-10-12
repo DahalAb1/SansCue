@@ -187,6 +187,10 @@ synthetic replay acceptance procedure is documented in
 isolated PostgreSQL databases and must be run explicitly. Model quality, live
 Bee behavior, and Docker startup are separate unverified gates.
 
+The current generation design requires an exact source excerpt to accompany
+each generated question and validates that excerpt against the originating
+transcript event. See the [design rationale](question-generation-design.md).
+
 **Current development slice:** The device-independent accepted-event outbox is
 connected to a new Topics-and-questions-owned transcript projection, idempotent
 job, and candidate outbox. For development only, `stub-v1` generates exactly

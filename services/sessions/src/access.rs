@@ -1724,7 +1724,9 @@ async fn topics_candidate(
     if !candidate.is_object()
         || candidate.as_object().is_some_and(|o| o.len() != 8)
         || candidate["published"] != false
-        || candidate["generator_version"] != "stub-v1"
+        || candidate["generator_version"]
+            .as_str()
+            .is_none_or(|v| v.trim().is_empty() || v.len() > 128 || v.chars().any(char::is_control))
         || candidate["text"]
             .as_str()
             .is_none_or(|s| s.trim().is_empty() || s.len() > 1000)

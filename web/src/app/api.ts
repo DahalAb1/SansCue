@@ -10,7 +10,7 @@ export type State = {
   join_link_enabled?: boolean;
   question_candidates?: QuestionCandidate[] | null;
 };
-export type QuestionCandidate = { candidate_id:string; event_id:string; text:string; generator_version:'stub-v1'; evidence:{conversation_id:string;ingest_ordinal:number;received_at:string;excerpt:string}; created_at:string; published:false };
+export type QuestionCandidate = { candidate_id:string; event_id:string; text:string; generator_version:string; evidence:{conversation_id:string;ingest_ordinal:number;received_at:string;excerpt:string}; created_at:string; published:false };
 export type Page<T> = { items: T[]; next_cursor: string | null };
 export type Invitation = {
   invitation_id: string;
@@ -109,7 +109,7 @@ export function parseRoomState(value: unknown, expectedId?: string): State | nul
   if (state.join_link_enabled !== undefined && typeof state.join_link_enabled !== 'boolean') return null;
   if (state.question_candidates !== undefined && state.membership.role === 'audience' && state.question_candidates !== null) return null;
   if (state.question_candidates !== undefined && state.membership.role !== 'audience' && state.question_candidates === null) return null;
-  if (state.question_candidates !== undefined && state.question_candidates !== null && (!Array.isArray(state.question_candidates) || state.question_candidates.some(c => !c || typeof c !== 'object' || typeof c.candidate_id !== 'string' || !UUID.test(c.candidate_id) || typeof c.event_id !== 'string' || !UUID.test(c.event_id) || typeof c.text !== 'string' || c.text.trim() === '' || c.generator_version !== 'stub-v1' || c.published !== false || typeof c.created_at !== 'string' || Number.isNaN(Date.parse(c.created_at)) || !c.evidence || typeof c.evidence !== 'object' || typeof c.evidence.conversation_id !== 'string' || !UUID.test(c.evidence.conversation_id) || !Number.isSafeInteger(c.evidence.ingest_ordinal) || c.evidence.ingest_ordinal < 1 || typeof c.evidence.received_at !== 'string' || Number.isNaN(Date.parse(c.evidence.received_at)) || typeof c.evidence.excerpt !== 'string' || c.evidence.excerpt.trim() === ''))) return null;
+  if (state.question_candidates !== undefined && state.question_candidates !== null && (!Array.isArray(state.question_candidates) || state.question_candidates.some(c => !c || typeof c !== 'object' || typeof c.candidate_id !== 'string' || !UUID.test(c.candidate_id) || typeof c.event_id !== 'string' || !UUID.test(c.event_id) || typeof c.text !== 'string' || c.text.trim() === '' || typeof c.generator_version !== 'string' || c.generator_version.trim() === '' || c.generator_version.length > 128 || /[\u0000-\u001f\u007f]/.test(c.generator_version) || c.published !== false || typeof c.created_at !== 'string' || Number.isNaN(Date.parse(c.created_at)) || !c.evidence || typeof c.evidence !== 'object' || typeof c.evidence.conversation_id !== 'string' || !UUID.test(c.evidence.conversation_id) || !Number.isSafeInteger(c.evidence.ingest_ordinal) || c.evidence.ingest_ordinal < 1 || typeof c.evidence.received_at !== 'string' || Number.isNaN(Date.parse(c.evidence.received_at)) || typeof c.evidence.excerpt !== 'string' || c.evidence.excerpt.trim() === ''))) return null;
   return state;
 }
 
