@@ -1,0 +1,26 @@
+{
+	admin off
+	auto_https off
+}
+
+:80 {
+	# Ordered, exclusive routing: no API response can reach SPA fallback.
+	route {
+		@sessions path /api/sessions /api/sessions/*
+		handle @sessions {
+			uri strip_prefix /api/sessions
+			reverse_proxy sessions:3000
+		}
+
+		@api path /api /api/*
+		handle @api {
+			respond "Not found" 404
+		}
+
+		handle {
+			root * /srv
+			try_files {path} /index.html
+			file_server
+		}
+	}
+}

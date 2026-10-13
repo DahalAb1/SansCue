@@ -145,7 +145,16 @@ flowchart TD
 
 **Service:** New Bee-connection microservice.
 
-**Success:** Actual Bee events reach the correct room's transcript store; connection gaps are visible.
+**Implemented development boundary:** A canonical event/replay pipeline, Bee-owned
+storage, room binding commands, and outbox delivery are implemented independently
+of physical hardware. The checked-in synthetic fixture exercises ordering,
+duplicate handling, reconnect/gap evidence, and malformed observations.
+
+**Still unverified:** **REAL BEE DEVICE / LIVE API VERIFICATION** is an external
+gate. No live transport, device authentication, real source identity/order, or
+real recovery behavior is claimed. Synthetic fixture success does not satisfy
+live Bee acceptance. Use the [device verification runbook](bee-device-verification.md)
+to record live observations; it is a prepared procedure, not a passed test.
 
 ```mermaid
 flowchart TD
@@ -170,6 +179,29 @@ flowchart TD
 **Service:** New topics-and-questions microservice; preview through sessions-and-feedback.
 
 **Success:** A short question has traceable transcript evidence; slow generation leaves room updates responsive.
+
+**Current boundary:** The deterministic `stub-v1` preview is unpublished and
+staff-only; it is not a model result or Step 8 quality acceptance. A local
+synthetic replay acceptance procedure is documented in
+[`services/acceptance`](../services/acceptance/README.md). It requires three
+isolated PostgreSQL databases and must be run explicitly. Model quality, live
+Bee behavior, and Docker startup are separate unverified gates.
+
+The current generation design requires an exact source excerpt to accompany
+each generated question and validates that excerpt against the originating
+transcript event. See the [design rationale](question-generation-design.md).
+
+**Current development slice:** The device-independent accepted-event outbox is
+connected to a new Topics-and-questions-owned transcript projection, idempotent
+job, and candidate outbox. For development only, `stub-v1` generates exactly
+one deterministic, unpublished preview per accepted event. Sessions checks the
+active conversation and bound speaker session before storing the candidate;
+only speaker/TA snapshots expose it. No model/provider is called, no candidate
+can be published or shown to the audience, and this slice is not Step 8
+acceptance. Generation jobs now use row-locked leases, heartbeats, bounded
+retries, timeout, and fenced completion; candidate, candidate outbox, and
+completed status commit atomically. See the service contract and README; live
+Bee, model quality, and Docker validation remain separate.
 
 ```mermaid
 flowchart TD
@@ -197,6 +229,10 @@ flowchart TD
 
 **Success:** A model is selected against recorded results; if neither meets the targets, revise and repeat.
 
+Use the [model comparison worksheet](model-evaluation-worksheet.md) to freeze
+the shared excerpts, prompts, targets, and scoring before generating outputs.
+The worksheet is a template only; no provider comparison has been run.
+
 ```mermaid
 flowchart TD
     Bee["Bee stream"] --> B["Bee connection"]
@@ -223,6 +259,13 @@ flowchart TD
 
 **Success:** Published questions stay stable; saved responses produce correct counts and live dashboard updates.
 
+**Current implementation:** Speaker publication copies evidence into an
+immutable question version; audience responses are idempotent and aggregate
+counts/percentages are returned only to staff. Written Q&A is separate from
+ratings and private to the audience author plus speaker/TAs. The frontend shows
+counts and one-decimal percentages (an em dash for null percentages when there
+are no respondents). This minimal flow does not establish load/performance.
+
 ```mermaid
 flowchart TD
     Bee["Bee stream"] --> B["Bee connection"]
@@ -247,6 +290,17 @@ flowchart TD
 3. Improve measured bottlenecks and retest. Choose server capacity from results; add replicas only with shared event delivery between them.
 
 **Service:** All three microservices and frontend. Each step also gets its own checks during development.
+
+**Hardware-independent acceptance procedure:**
+[`services/acceptance/synthetic-mvp.py`](../services/acceptance/README.md) starts
+the three local Rust services and Bee worker, replays the deterministic fixture,
+then checks candidate idempotency, staff-only evidence, publication, audience
+rating/Q&A, counts, and audience privacy using three distinct PostgreSQL DB URLs.
+It requires neither Docker nor device/model/AWS access. This synthetic flow and
+the service PostgreSQL suites have passed against the source tree integrated as
+`dev` commit `411fba0`; see [environment verification](environment-verification.md)
+for exact scope. Live Bee, model quality, Docker/Compose, AWS, performance, and
+backup/restore remain independent acceptance gates.
 
 **Success:** The agreed workload meets correctness, delay, and cost targets.
 

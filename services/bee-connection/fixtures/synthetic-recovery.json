@@ -1,0 +1,12 @@
+{
+  "capabilities": { "stable_ids": true, "contiguous_sequence": true },
+  "observations": [
+    { "received_at": "2026-10-08T00:00:00Z", "raw": [49], "decoded": { "Ok": { "kind": "transcript", "text": "Synthetic opening", "source_id": "sample-1", "source_sequence": 1 } } },
+    { "received_at": "2026-10-08T00:00:01Z", "raw": [], "decoded": { "Ok": { "kind": "disconnected" } } },
+    { "received_at": "2026-10-08T00:00:02Z", "raw": [], "decoded": { "Ok": { "kind": "reconnected" } } },
+    { "received_at": "2026-10-08T00:00:03Z", "raw": [51], "decoded": { "Ok": { "kind": "transcript", "text": "Synthetic later passage", "source_id": "sample-3", "source_sequence": 3 } } },
+    { "received_at": "2026-10-08T00:00:04Z", "raw": [50], "decoded": { "Ok": { "kind": "transcript", "text": "Synthetic recovered passage", "source_id": "sample-2", "source_sequence": 2 } } },
+    { "received_at": "2026-10-08T00:00:05Z", "raw": [50], "decoded": { "Ok": { "kind": "transcript", "text": "Synthetic recovered passage", "source_id": "sample-2", "source_sequence": 2 } } },
+    { "received_at": "2026-10-08T00:00:06Z", "raw": [255, 0], "decoded": { "Err": "synthetic malformed bytes" } }
+  ]
+}
