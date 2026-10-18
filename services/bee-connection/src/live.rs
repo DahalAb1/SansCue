@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domain::{Observation, Signal, Transcript};
+
 pub const MAX_LIVE_EVENT_BYTES: usize = 64 * 1024;
 pub const MAX_UTTERANCE_TEXT_BYTES: usize = 16 * 1024;
 
@@ -99,6 +101,24 @@ impl LiveUtterance {
             },
         })
         .map_err(|_| LiveEventError::InvalidJson)
+    }
+
+    pub fn into_observation(self) -> Result<Observation, LiveEventError> {
+        let raw = self.sanitized_payload()?;
+        Ok(Observation {
+            received_at: self.received_at,
+            raw,
+            decoded: Ok(Signal::Transcript(Transcript {
+                text: self.text,
+                source_conversation_id: Some(self.conversation_uuid.to_string()),
+                source_id: Some(self.sample_id.to_string()),
+                source_sequence: None,
+                source_utterance_id: Some(self.utterance_id),
+                source_spoken_at: Some(self.spoken_at),
+                source_start_millis: Some(self.start_millis),
+                source_end_millis: Some(self.end_millis),
+            })),
+        })
     }
 }
 

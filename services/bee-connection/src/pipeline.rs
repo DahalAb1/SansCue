@@ -280,6 +280,10 @@ impl Pipeline {
             received_at: observation.received_at,
             source_id: transcript.source_id.clone(),
             source_sequence: transcript.source_sequence,
+            source_utterance_id: transcript.source_utterance_id,
+            source_spoken_at: transcript.source_spoken_at,
+            source_start_millis: transcript.source_start_millis,
+            source_end_millis: transcript.source_end_millis,
             text: transcript.text.clone(),
         });
         Disposition::Accepted { event_id }

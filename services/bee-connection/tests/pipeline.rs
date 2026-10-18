@@ -27,6 +27,10 @@ fn transcript(seq: Option<u64>, id: Option<&str>, text: &str) -> Observation {
         source_conversation_id: None,
         source_id: id.map(str::to_owned),
         source_sequence: seq,
+        source_utterance_id: None,
+        source_spoken_at: None,
+        source_start_millis: None,
+        source_end_millis: None,
     }))
 }
 

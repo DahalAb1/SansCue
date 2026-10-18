@@ -1,7 +1,7 @@
 //! Device-independent sessions command consumer. It handles only canonical
 //! SansCue bind/unbind commands; transport-specific adapters remain separate.
 use crate::{
-    domain::Binding,
+    domain::{Binding, Capabilities},
     store::{CommandOutcome, Store},
 };
 use serde_json::{Value, json};
@@ -9,7 +9,11 @@ use uuid::Uuid;
 
 #[allow(async_fn_in_trait)]
 pub trait CommandStore: Clone + Send + Sync {
-    async fn ensure_command_conversation(&self, conversation: Uuid) -> Result<(), &'static str>;
+    async fn ensure_command_conversation(
+        &self,
+        conversation: Uuid,
+        capabilities: Capabilities,
+    ) -> Result<(), &'static str>;
     async fn apply_command(
         &self,
         command: Uuid,
@@ -20,8 +24,12 @@ pub trait CommandStore: Clone + Send + Sync {
 }
 
 impl CommandStore for Store {
-    async fn ensure_command_conversation(&self, conversation: Uuid) -> Result<(), &'static str> {
-        Store::ensure_command_conversation(self, conversation).await
+    async fn ensure_command_conversation(
+        &self,
+        conversation: Uuid,
+        capabilities: Capabilities,
+    ) -> Result<(), &'static str> {
+        Store::ensure_command_conversation(self, conversation, capabilities).await
     }
     async fn apply_command(
         &self,
@@ -95,7 +103,13 @@ impl<S: CommandStore> Consumer<S> {
         for command in commands {
             let (id, revision, action, binding) = parse_command(command)?;
             self.store
-                .ensure_command_conversation(binding.conversation_id)
+                .ensure_command_conversation(
+                    binding.conversation_id,
+                    Capabilities {
+                        stable_ids: binding.source_conversation_id.is_some(),
+                        contiguous_sequence: false,
+                    },
+                )
                 .await?;
             let outcome = self
                 .store
@@ -197,7 +211,11 @@ fn parse_command(command: &Value) -> Result<(Uuid, i64, &'static str, Binding), 
         session_id: parse("session_id")?,
         source_conversation_id: payload["source_conversation_id"]
             .as_str()
-            .map(str::to_owned),
+            .map(|source| {
+                Uuid::parse_str(source)
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|_| source.to_owned())
+            }),
     };
     Ok((id, revision, action, binding))
 }
