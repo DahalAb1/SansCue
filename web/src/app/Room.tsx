@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import QRCode from 'qrcode';
 import { ApiError, api, deniesRoomRead, errorMessage, isUuid, parseRoomState, paths } from './api';
-import type { State, Invitation, Membership, Page, LinkResult, QuestionCandidate } from './api';
+import type { BeeState, State, Invitation, Membership, Page, LinkResult, QuestionCandidate } from './api';
 import { followLink, selectedSection, sharePath, tabLabel } from './navigation';
 import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft } from './pageMemory';
 import { parseRoomEvent, reconnectDelay } from './live';
@@ -175,6 +175,12 @@ function QaPanel({ state, ended, revision }: { state: State; ended: boolean; rev
 
 type IssuedInvite = { id: string; expires: string; link: string | null };
 
+function beeLabel(bee: BeeState): string {
+  if (bee.status === 'bound' && !bee.source_conversation_id) return 'listening for a Bee recording';
+  if (bee.status === 'bound') return 'live';
+  return bee.status;
+}
+
 function joinStatus(state: State): string {
   if (state.room.status === 'ended') return 'This room has ended; links no longer admit new members.';
   if (state.join_link_enabled === true) return 'The audience link is enabled.';
@@ -257,23 +263,32 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
     <button type="button" disabled={busy} onClick={() => void run(load)}>Refresh access lists</button>
     <h3>Bee live transcript</h3>
     {!state.bee ? <p role="status">Bee binding status is unavailable.</p> : <>
-      <p>Status: <strong>{state.bee.status}</strong>{state.bee.has_gaps ? ' · transcript gaps detected' : ''}</p>
+      <p>Status: <strong>{beeLabel(state.bee)}</strong>{state.bee.has_gaps ? ' · transcript gaps detected' : ''}</p>
       {state.bee.status === 'unbound' ? <>
-        <label>Bee conversation UUID
-          <input
-            autoComplete="off"
-            placeholder="00000000-0000-0000-0000-000000000000"
-            value={beeConversation}
-            onInput={event => setBeeConversation(event.currentTarget.value)}
-          />
-        </label>
-        <p>Copy the <code>conversation_uuid</code> from the active Bee CLI stream. SansCue uses it to route live utterances to this room.</p>
-        <button type="button" disabled={busy || ended || !isUuid(beeConversation.trim())} onClick={() => void run(async () => {
-          await api.mutate(paths.bindBee(roomId), { source_conversation_id: beeConversation.trim() });
-          setBeeConversation('');
+        <p>Click Start listening, then start recording on your Bee or Apple Watch. SansCue connects the next new Bee conversation to this room.</p>
+        <button type="button" disabled={busy || ended} onClick={() => void run(async () => {
+          await api.mutate(paths.bindBee(roomId), { listen: true });
           await refresh();
-          setNotice('Bee conversation binding requested.');
-        })}>Bind Bee conversation</button>
+          setNotice('Listening for your next Bee recording.');
+        })}>Start listening</button>
+        <details>
+          <summary>Connect a specific Bee conversation</summary>
+          <label>Bee conversation UUID
+            <input
+              autoComplete="off"
+              placeholder="00000000-0000-0000-0000-000000000000"
+              value={beeConversation}
+              onInput={event => setBeeConversation(event.currentTarget.value)}
+            />
+          </label>
+          <p>Use this when several rooms listen at once. Copy <code>conversation_uuid</code> from <code>bee stream --json</code>.</p>
+          <button type="button" disabled={busy || ended || !isUuid(beeConversation.trim())} onClick={() => void run(async () => {
+            await api.mutate(paths.bindBee(roomId), { source_conversation_id: beeConversation.trim() });
+            setBeeConversation('');
+            await refresh();
+            setNotice('Bee conversation binding requested.');
+          })}>Bind Bee conversation</button>
+        </details>
       </> : <button type="button" disabled={busy || state.bee.status === 'unbinding'} onClick={() => {
         if (!window.confirm('Stop routing this Bee conversation to the room?')) return;
         void run(async () => {
@@ -281,7 +296,7 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
           await refresh();
           setNotice('Bee conversation unbinding requested.');
         });
-      }}>Unbind Bee conversation</button>}
+      }}>{state.bee.status === 'bound' && !state.bee.source_conversation_id ? 'Stop listening' : 'Unbind Bee conversation'}</button>}
     </>}
     <h3>Audience link</h3>
     <p>{joinStatus(state)} Existing members keep their access.</p>
