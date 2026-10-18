@@ -1,6 +1,9 @@
 use sqlx::postgres::PgPoolOptions;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use topics_and_questions::{App, CadencePolicy, Delivery, TopicWindowGenerator, router};
+use topics_and_questions::{
+    App, CadencePolicy, Delivery, QuestionGenerator, TopicWindowGenerator, claude::ClaudeGenerator,
+    router,
+};
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     match run().await {
@@ -55,10 +58,21 @@ async fn run() -> Result<(), &'static str> {
         max_window_duration: duration_setting("TOPICS_MAX_WINDOW_SECONDS", 180)?,
         silence_boundary_threshold: duration_setting("TOPICS_SILENCE_BOUNDARY_SECONDS", 5)?,
     };
-    let generator = Arc::new(TopicWindowGenerator::new(
-        cadence_policy,
-        "topic-window-stub-v1",
-    ));
+    let gate = TopicWindowGenerator::new(cadence_policy, "topic-window-stub-v1");
+    let generator: Arc<dyn QuestionGenerator> = match optional_setting("ANTHROPIC_API_KEY")? {
+        Some(key) => Arc::new(ClaudeGenerator::new(
+            gate,
+            &key,
+            optional_setting("ANTHROPIC_BASE_URL")?.as_deref(),
+            optional_setting("TOPICS_MODEL")?.as_deref(),
+        )?),
+        None => {
+            eprintln!(
+                "topics-and-questions: ANTHROPIC_API_KEY is not set; using the deterministic placeholder generator"
+            );
+            Arc::new(gate)
+        }
+    };
     let delivery = Delivery::new(pool.clone(), &sessions, &sessions_token)?
         .with_generator(generator)
         .with_cadence_policy(cadence_policy);
@@ -78,6 +92,15 @@ async fn run() -> Result<(), &'static str> {
     worker.abort();
     pool.close().await;
     result
+}
+
+fn optional_setting(name: &str) -> Result<Option<String>, &'static str> {
+    match std::env::var(name) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err("invalid Topics model setting"),
+    }
 }
 
 fn duration_setting(name: &str, default: u64) -> Result<Duration, &'static str> {
