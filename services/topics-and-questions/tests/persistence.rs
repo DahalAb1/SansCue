@@ -31,6 +31,10 @@ async fn authenticated_ingress_is_idempotent_and_rejects_identity_reuse() {
         received_at: Utc::now(),
         source_id: Some("synthetic-event".into()),
         source_sequence: Some(u64::MAX),
+        source_utterance_id: None,
+        source_spoken_at: None,
+        source_start_millis: None,
+        source_end_millis: None,
         text: "Synthetic transcript passage.".into(),
     };
     let app = router(App {

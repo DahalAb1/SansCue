@@ -43,6 +43,10 @@ fn event(text: &str) -> TranscriptEvent {
         received_at: Utc::now(),
         source_id: None,
         source_sequence: None,
+        source_utterance_id: None,
+        source_spoken_at: None,
+        source_start_millis: None,
+        source_end_millis: None,
         text: text.into(),
     }
 }

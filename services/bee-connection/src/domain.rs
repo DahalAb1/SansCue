@@ -67,6 +67,11 @@ pub enum Signal {
     RecoveryCompleted {
         through_sequence: Option<u64>,
     },
+    /// Observation of external conversation lifecycle (e.g. from Bee CLI stream or API).
+    Lifecycle {
+        external_id: Option<u64>,
+        state: String,
+    },
 }
 
 /// Raw bytes survive decoding failures, including non-UTF8 observations.

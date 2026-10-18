@@ -75,6 +75,14 @@ pub struct TranscriptEvent {
     pub received_at: DateTime<Utc>,
     pub source_id: Option<String>,
     pub source_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_utterance_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_spoken_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_start_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_end_millis: Option<u64>,
     pub text: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,8 +167,32 @@ async fn receive_event(
             return error(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable").into_response();
         }
     };
-    let result=sqlx::query("INSERT INTO transcript_events(event_id,schema_version,conversation_id,room_id,session_id,source_conversation_id,ingest_ordinal,received_at,source_id,source_sequence,text,projection_hash) VALUES($1,1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(event_id) DO NOTHING")
- .bind(event.event_id).bind(event.binding.conversation_id).bind(event.binding.room_id).bind(event.binding.session_id).bind(&event.binding.source_conversation_id).bind(event.ingest_ordinal as i64).bind(event.received_at).bind(&event.source_id).bind(event.source_sequence.map(|s|s.to_string())).bind(&event.text).bind(digest.as_slice()).execute(&mut *tx).await;
+    let result = sqlx::query(
+        "INSERT INTO transcript_events(
+            event_id, schema_version, conversation_id, room_id, session_id,
+            source_conversation_id, ingest_ordinal, received_at, source_id, source_sequence,
+            source_utterance_id, source_spoken_at, source_start_millis, source_end_millis,
+            text, projection_hash
+        ) VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT(event_id) DO NOTHING",
+    )
+    .bind(event.event_id)
+    .bind(event.binding.conversation_id)
+    .bind(event.binding.room_id)
+    .bind(event.binding.session_id)
+    .bind(&event.binding.source_conversation_id)
+    .bind(event.ingest_ordinal as i64)
+    .bind(event.received_at)
+    .bind(&event.source_id)
+    .bind(event.source_sequence.map(|s| s.to_string()))
+    .bind(event.source_utterance_id.map(|id| id as i64))
+    .bind(event.source_spoken_at)
+    .bind(event.source_start_millis.map(|m| m as i64))
+    .bind(event.source_end_millis.map(|m| m as i64))
+    .bind(&event.text)
+    .bind(digest.as_slice())
+    .execute(&mut *tx)
+    .await;
     if result.is_err() {
         return error(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable").into_response();
     }
@@ -480,7 +512,7 @@ impl Delivery {
             if updated.is_none() {
                 continue;
             }
-            let event_row = sqlx::query("SELECT schema_version,event_id,conversation_id,room_id,session_id,source_conversation_id,source_id,source_sequence,ingest_ordinal,received_at,text FROM transcript_events WHERE event_id=$1")
+            let event_row = sqlx::query("SELECT schema_version,event_id,conversation_id,room_id,session_id,source_conversation_id,source_id,source_sequence,source_utterance_id,source_spoken_at,source_start_millis,source_end_millis,ingest_ordinal,received_at,text FROM transcript_events WHERE event_id=$1")
                 .bind(id).fetch_one(&mut *tx).await.map_err(|_| "generation input load failed")?;
             claimed.push((
                 TranscriptEvent {
@@ -498,6 +530,16 @@ impl Delivery {
                     source_sequence: event_row
                         .get::<Option<String>, _>("source_sequence")
                         .and_then(|v| v.parse().ok()),
+                    source_utterance_id: event_row
+                        .get::<Option<i64>, _>("source_utterance_id")
+                        .map(|v| v as u64),
+                    source_spoken_at: event_row.get("source_spoken_at"),
+                    source_start_millis: event_row
+                        .get::<Option<i64>, _>("source_start_millis")
+                        .map(|v| v as u64),
+                    source_end_millis: event_row
+                        .get::<Option<i64>, _>("source_end_millis")
+                        .map(|v| v as u64),
                     text: event_row.get("text"),
                 },
                 lease,
@@ -662,6 +704,10 @@ mod question_output_tests {
             received_at: Utc.with_ymd_and_hms(2026, 10, 9, 0, 0, 0).unwrap(),
             source_id: None,
             source_sequence: None,
+            source_utterance_id: None,
+            source_spoken_at: None,
+            source_start_millis: None,
+            source_end_millis: None,
             text: "We reduced outage time by adding a retry queue.".into(),
         }
     }

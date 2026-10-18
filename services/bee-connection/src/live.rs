@@ -181,3 +181,115 @@ fn seconds_to_millis(seconds: f64) -> Result<u64, LiveEventError> {
     }
     Ok((seconds * 1_000.0).round() as u64)
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveConversationCreated {
+    pub id: u64,
+    pub uuid: Uuid,
+    pub state: String,
+    pub received_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveConversationUpdated {
+    pub id: u64,
+    pub state: String,
+    pub received_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveLifecycleEvent {
+    Created(LiveConversationCreated),
+    Updated(LiveConversationUpdated),
+}
+
+impl LiveLifecycleEvent {
+    pub fn sanitized_payload(&self) -> Result<Vec<u8>, LiveEventError> {
+        match self {
+            Self::Created(c) => serde_json::to_vec(&serde_json::json!({
+                "type": "new-conversation",
+                "conversation": {
+                    "id": c.id,
+                    "uuid": c.uuid,
+                    "state": c.state,
+                }
+            }))
+            .map_err(|_| LiveEventError::InvalidJson),
+            Self::Updated(u) => serde_json::to_vec(&serde_json::json!({
+                "type": "update-conversation",
+                "conversation": {
+                    "id": u.id,
+                    "state": u.state,
+                }
+            }))
+            .map_err(|_| LiveEventError::InvalidJson),
+        }
+    }
+
+    pub fn into_observation(self) -> Result<Observation, LiveEventError> {
+        let raw = self.sanitized_payload()?;
+        let (received_at, external_id, state) = match self {
+            Self::Created(c) => (c.received_at, Some(c.id), c.state),
+            Self::Updated(u) => (u.received_at, Some(u.id), u.state),
+        };
+        Ok(Observation {
+            received_at,
+            raw,
+            decoded: Ok(Signal::Lifecycle { external_id, state }),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct BeeCliLifecycleEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    conversation: Option<BeeCliConversationPayload>,
+}
+
+#[derive(Deserialize)]
+struct BeeCliConversationPayload {
+    id: Option<u64>,
+    uuid: Option<String>,
+    state: Option<String>,
+}
+
+pub fn parse_lifecycle_event(
+    bytes: &[u8],
+    received_at: DateTime<Utc>,
+) -> Result<LiveLifecycleEvent, LiveEventError> {
+    if bytes.is_empty() || bytes.len() > MAX_LIVE_EVENT_BYTES {
+        return Err(LiveEventError::EventTooLarge);
+    }
+    let event: BeeCliLifecycleEvent =
+        serde_json::from_slice(bytes).map_err(|_| LiveEventError::InvalidJson)?;
+    let Some(conv) = event.conversation else {
+        return Err(LiveEventError::UnsupportedEvent);
+    };
+    let id = conv
+        .id
+        .filter(|&id| id > 0 && id <= i64::MAX as u64)
+        .ok_or(LiveEventError::InvalidUtteranceId)?;
+    let state = conv.state.unwrap_or_else(|| "processing".to_owned());
+    match event.event_type.as_str() {
+        "new-conversation" => {
+            let uuid_str = conv.uuid.ok_or(LiveEventError::InvalidConversation)?;
+            let uuid = Uuid::parse_str(&uuid_str)
+                .ok()
+                .filter(|u| !u.is_nil())
+                .ok_or(LiveEventError::InvalidConversation)?;
+            Ok(LiveLifecycleEvent::Created(LiveConversationCreated {
+                id,
+                uuid,
+                state,
+                received_at,
+            }))
+        }
+        "update-conversation" => Ok(LiveLifecycleEvent::Updated(LiveConversationUpdated {
+            id,
+            state,
+            received_at,
+        })),
+        _ => Err(LiveEventError::UnsupportedEvent),
+    }
+}

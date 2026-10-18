@@ -171,3 +171,56 @@ fn rejects_unsupported_malformed_and_unbounded_events_with_stable_codes() {
         LiveEventError::InvalidText
     );
 }
+
+#[test]
+fn parses_conversation_lifecycle_events_and_sanitizes_payload() {
+    use bee_connection::live::{
+        LiveConversationCreated, LiveConversationUpdated, LiveLifecycleEvent, parse_lifecycle_event,
+    };
+
+    let new_conv = json!({
+        "type": "new-conversation",
+        "conversation": {
+            "id": 123,
+            "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "state": "processing",
+            "title": "Private user title to discard"
+        }
+    });
+
+    let parsed =
+        parse_lifecycle_event(&serde_json::to_vec(&new_conv).unwrap(), received_at()).unwrap();
+    match parsed {
+        LiveLifecycleEvent::Created(LiveConversationCreated {
+            id, uuid, state, ..
+        }) => {
+            assert_eq!(id, 123);
+            assert_eq!(
+                uuid,
+                Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap()
+            );
+            assert_eq!(state, "processing");
+        }
+        _ => panic!("expected Created lifecycle event"),
+    }
+
+    let update_conv = json!({
+        "type": "update-conversation",
+        "conversation": {
+            "id": 123,
+            "state": "processed",
+            "title": "Another private title",
+            "short_summary": "Private summary"
+        }
+    });
+
+    let parsed_update =
+        parse_lifecycle_event(&serde_json::to_vec(&update_conv).unwrap(), received_at()).unwrap();
+    match parsed_update {
+        LiveLifecycleEvent::Updated(LiveConversationUpdated { id, state, .. }) => {
+            assert_eq!(id, 123);
+            assert_eq!(state, "processed");
+        }
+        _ => panic!("expected Updated lifecycle event"),
+    }
+}

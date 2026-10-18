@@ -17,6 +17,7 @@ struct MockStore {
     source: Uuid,
     conversation: Uuid,
     seen: Arc<Mutex<HashMap<String, Uuid>>>,
+    numeric_mappings: Arc<Mutex<HashMap<u64, Uuid>>>,
     observations: Arc<Mutex<Vec<Observation>>>,
 }
 
@@ -26,6 +27,7 @@ impl MockStore {
             source,
             conversation,
             seen: Arc::default(),
+            numeric_mappings: Arc::default(),
             observations: Arc::default(),
         }
     }
@@ -37,6 +39,28 @@ impl LiveStore for MockStore {
         source_conversation_id: Uuid,
     ) -> Result<Option<Uuid>, &'static str> {
         Ok((source_conversation_id == self.source).then_some(self.conversation))
+    }
+
+    async fn conversation_for_numeric_source(
+        &self,
+        numeric_id: u64,
+    ) -> Result<Option<Uuid>, &'static str> {
+        let mappings = self.numeric_mappings.lock().unwrap();
+        Ok(mappings
+            .get(&numeric_id)
+            .and_then(|source_uuid| (*source_uuid == self.source).then_some(self.conversation)))
+    }
+
+    async fn record_numeric_source_mapping(
+        &self,
+        numeric_id: u64,
+        source_conversation_id: Uuid,
+    ) -> Result<(), &'static str> {
+        self.numeric_mappings
+            .lock()
+            .unwrap()
+            .insert(numeric_id, source_conversation_id);
+        Ok(())
     }
 
     async fn ingest_live(
@@ -52,6 +76,10 @@ impl LiveStore for MockStore {
                 .source_id
                 .clone()
                 .ok_or("mock source identity missing")?,
+            Ok(Signal::Lifecycle { .. }) => {
+                self.observations.lock().unwrap().push(observation);
+                return Ok(Disposition::Control);
+            }
             _ => return Err("mock transcript missing"),
         };
         self.observations.lock().unwrap().push(observation);
