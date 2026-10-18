@@ -1,8 +1,9 @@
 use crate::{
+    consumer::Consumer,
     domain::{Observation, Signal},
     live::{LiveEventError, MAX_LIVE_EVENT_BYTES, parse_new_utterance},
     pipeline::Disposition,
-    store::Store,
+    store::{Adoption, Store},
 };
 use chrono::{DateTime, Utc};
 use std::{
@@ -24,6 +25,10 @@ const REJECTION_LOG_INTERVAL: Duration = Duration::from_secs(10);
 #[allow(async_fn_in_trait)]
 pub trait LiveStore: Clone + Send + Sync {
     async fn active_conversations(&self) -> Result<Vec<Uuid>, &'static str>;
+    async fn adopt_listening_source(
+        &self,
+        source_conversation_id: Uuid,
+    ) -> Result<Option<Adoption>, &'static str>;
     async fn conversation_for_source(
         &self,
         source_conversation_id: Uuid,
@@ -47,6 +52,12 @@ pub trait LiveStore: Clone + Send + Sync {
 impl LiveStore for Store {
     async fn active_conversations(&self) -> Result<Vec<Uuid>, &'static str> {
         Store::active_conversations(self).await
+    }
+    async fn adopt_listening_source(
+        &self,
+        source_conversation_id: Uuid,
+    ) -> Result<Option<Adoption>, &'static str> {
+        Store::adopt_listening_source(self, source_conversation_id).await
     }
     async fn conversation_for_source(
         &self,
@@ -83,6 +94,7 @@ impl LiveStore for Store {
 pub struct LiveCliWorker<S = Store> {
     executable: OsString,
     store: S,
+    status: Option<Consumer>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -109,7 +121,41 @@ impl<S: LiveStore> LiveCliWorker<S> {
         if executable.is_empty() {
             return Err("Bee CLI path must not be empty");
         }
-        Ok(Self { executable, store })
+        Ok(Self {
+            executable,
+            store,
+            status: None,
+        })
+    }
+
+    /// Reports adopted conversations to sessions so a listening room shows it is live.
+    pub fn with_status_reporter(mut self, status: Consumer) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Resolves the room conversation for a live source, letting a listening room claim it.
+    async fn route_source(&self, source: Uuid) -> Result<Option<Uuid>, &'static str> {
+        if let Some(conversation) = self.store.conversation_for_source(source).await? {
+            return Ok(Some(conversation));
+        }
+        let Some(adoption) = self.store.adopt_listening_source(source).await? else {
+            return Ok(None);
+        };
+        if let Some(status) = &self.status {
+            let summary = serde_json::json!({
+                "binding_id": adoption.conversation_id,
+                "status": "bound",
+                "has_gaps": false,
+                "connectivity_revision": adoption.revision,
+                "source_conversation_id": source,
+            });
+            // The adoption is durable; a missed status update only delays the room's label.
+            if let Err(error) = status.publish_status(adoption.room_id, &summary).await {
+                eprintln!("Bee listening room status update failed ({error})");
+            }
+        }
+        Ok(Some(adoption.conversation_id))
     }
 
     pub async fn run(self) -> Result<(), &'static str> {
@@ -210,10 +256,7 @@ impl<S: LiveStore> LiveCliWorker<S> {
         }
         match parse_new_utterance(line, received_at) {
             Ok(event) => {
-                let Some(conversation_id) = self
-                    .store
-                    .conversation_for_source(event.conversation_uuid)
-                    .await?
+                let Some(conversation_id) = self.route_source(event.conversation_uuid).await?
                 else {
                     return Ok(LiveLineOutcome::Unbound);
                 };
@@ -236,7 +279,7 @@ impl<S: LiveStore> LiveCliWorker<S> {
                             self.store
                                 .record_numeric_source_mapping(c.id, c.uuid)
                                 .await?;
-                            self.store.conversation_for_source(c.uuid).await?
+                            self.route_source(c.uuid).await?
                         }
                         crate::live::LiveLifecycleEvent::Updated(u) => {
                             self.store.conversation_for_numeric_source(u.id).await?

@@ -3,6 +3,7 @@ use bee_connection::{
     live::MAX_LIVE_EVENT_BYTES,
     live_worker::{LiveCliWorker, LiveLineOutcome, LiveReadSummary, LiveStore},
     pipeline::Disposition,
+    store::Adoption,
 };
 use serde_json::{Value, json};
 use std::{
@@ -19,6 +20,8 @@ struct MockStore {
     seen: Arc<Mutex<HashMap<String, Uuid>>>,
     numeric_mappings: Arc<Mutex<HashMap<u64, Uuid>>>,
     observations: Arc<Mutex<Vec<Observation>>>,
+    listening: Arc<Mutex<bool>>,
+    adopted: Arc<Mutex<Option<Uuid>>>,
 }
 
 impl MockStore {
@@ -29,7 +32,15 @@ impl MockStore {
             seen: Arc::default(),
             numeric_mappings: Arc::default(),
             observations: Arc::default(),
+            listening: Arc::default(),
+            adopted: Arc::default(),
         }
+    }
+
+    fn listening(source: Uuid, conversation: Uuid) -> Self {
+        let store = Self::new(source, conversation);
+        *store.listening.lock().unwrap() = true;
+        store
     }
 }
 
@@ -41,7 +52,25 @@ impl LiveStore for MockStore {
         &self,
         source_conversation_id: Uuid,
     ) -> Result<Option<Uuid>, &'static str> {
-        Ok((source_conversation_id == self.source).then_some(self.conversation))
+        let adopted = *self.adopted.lock().unwrap() == Some(source_conversation_id);
+        Ok((source_conversation_id == self.source || adopted).then_some(self.conversation))
+    }
+
+    async fn adopt_listening_source(
+        &self,
+        source_conversation_id: Uuid,
+    ) -> Result<Option<Adoption>, &'static str> {
+        let mut listening = self.listening.lock().unwrap();
+        if !*listening {
+            return Ok(None);
+        }
+        *listening = false;
+        *self.adopted.lock().unwrap() = Some(source_conversation_id);
+        Ok(Some(Adoption {
+            room_id: Uuid::new_v4(),
+            conversation_id: self.conversation,
+            revision: 1,
+        }))
     }
 
     async fn conversation_for_numeric_source(
@@ -156,6 +185,36 @@ async fn consumes_bounded_lines_and_routes_only_the_bound_conversation() {
     assert_eq!(transcript.source_start_millis, Some(1_250));
     assert_eq!(transcript.source_end_millis, Some(3_750));
     assert!(transcript.source_spoken_at.is_some());
+}
+
+#[tokio::test]
+async fn listening_room_adopts_only_the_first_unbound_conversation() {
+    let valid = event();
+    let first = Uuid::parse_str(valid["conversation_uuid"].as_str().unwrap()).unwrap();
+    let store = MockStore::listening(Uuid::new_v4(), Uuid::new_v4());
+    let worker = LiveCliWorker::new("bee", store.clone()).unwrap();
+
+    let mut later = valid.clone();
+    later["utterance"]["sample_id"] = json!("44444444-4444-4444-8444-444444444444");
+    let mut other = valid.clone();
+    other["conversation_uuid"] = json!("33333333-3333-4333-8333-333333333333");
+    let mut input = Vec::new();
+    for line in [&valid, &later, &other] {
+        input.extend_from_slice(&serde_json::to_vec(line).unwrap());
+        input.push(b'\n');
+    }
+
+    assert_eq!(
+        consume(&worker, input).await,
+        LiveReadSummary {
+            accepted: 2,
+            duplicates: 0,
+            unbound: 1,
+            rejected: 0,
+            ignored: 0,
+        }
+    );
+    assert_eq!(*store.adopted.lock().unwrap(), Some(first));
 }
 
 #[test]

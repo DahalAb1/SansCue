@@ -2191,3 +2191,95 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
     assert_eq!(active_count, 1);
     finish(pool, admin, schema).await;
 }
+
+#[tokio::test]
+async fn listening_bee_binding_records_the_adopted_conversation() {
+    let (pool, admin, schema) = db().await;
+    let security = Security {
+        bee_credential: Some("synthetic-bee".into()),
+        ..security()
+    };
+    let app = configured_router(pool.clone(), security.clone());
+    let private = internal_router(Access {
+        pool: pool.clone(),
+        security,
+    });
+    let browser = boot(&app).await;
+    login(&app, &browser).await;
+    let (_, created) = call(&app, &browser, "POST", "/rooms", json!({"title":"Listen"})).await;
+    let room = created["state"]["room"]["id"].as_str().unwrap();
+    let (status, rejected) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"listen":false}),
+    )
+    .await;
+    assert_eq!(status, 400, "{rejected}");
+    let (status, bound) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"listen":true}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let conversation = bound["conversation_id"].as_str().unwrap().to_owned();
+    let revision = bound["revision"].as_i64().unwrap();
+    let (_, list) = private_json(&private, "GET", "/internal/v1/bee/commands", json!(null)).await;
+    let command = &list["commands"][0];
+    assert_eq!(command["payload"]["source_conversation_id"], Value::Null);
+
+    // The worker reports the binding, then later the conversation it adopted.
+    let listening = json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":revision,"source_conversation_id":null});
+    let status_path = format!("/internal/v1/bee/rooms/{room}/status");
+    assert_eq!(
+        private_json(&private, "POST", &status_path, listening)
+            .await
+            .0,
+        200
+    );
+    let ack = format!(
+        "/internal/v1/bee/commands/{}/ack",
+        command["command_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        private_json(&private, "POST", &ack, json!(null)).await.0,
+        200
+    );
+    let source = Uuid::new_v4();
+    let adopted = json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":revision,"source_conversation_id":source});
+    assert_eq!(
+        private_json(&private, "POST", &status_path, adopted)
+            .await
+            .0,
+        200
+    );
+
+    let state = call(
+        &app,
+        &browser,
+        "GET",
+        &format!("/rooms/{room}/state"),
+        json!({}),
+    )
+    .await
+    .1;
+    assert_eq!(state["bee"]["status"], "bound");
+    assert_eq!(state["bee"]["source_conversation_id"], source.to_string());
+    let (_, other) = call(&app, &browser, "POST", "/rooms", json!({"title":"Other"})).await;
+    let other = other["state"]["room"]["id"].as_str().unwrap();
+    let (status, duplicate) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{other}/bee/bind"),
+        json!({"source_conversation_id":source}),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(duplicate["code"], "bee_source_already_bound");
+    finish(pool, admin, schema).await;
+}
