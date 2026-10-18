@@ -161,6 +161,11 @@ async fn terminal_stale_candidate_does_not_block_later_outbox_rows() {
             ingest_ordinal: index as u64 + 1,
             received_at,
             excerpt: format!("Synthetic passage {index}"),
+            source_id: None,
+            source_start_millis: None,
+            source_end_millis: None,
+            window_start_time: None,
+            window_end_time: None,
         };
         sqlx::query("INSERT INTO transcript_events(event_id,schema_version,conversation_id,room_id,session_id,source_conversation_id,ingest_ordinal,received_at,source_id,source_sequence,text,projection_hash) VALUES($1,1,$2,$3,$4,NULL,$5,$6,NULL,NULL,$7,$8)")
             .bind(event_id).bind(conversation_id).bind(room_id).bind(session_id).bind(index as i64 + 1).bind(received_at).bind(&evidence.excerpt).bind(vec![0_u8;32])

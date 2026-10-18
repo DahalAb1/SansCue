@@ -28,19 +28,89 @@ pub struct Delivery {
     client: reqwest::Client,
     generator: Arc<dyn QuestionGenerator>,
     generation_deadline: Duration,
+    cadence_policy: CadencePolicy,
 }
 
 pub type GenerationFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<GeneratedQuestion, GenerationFailure>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<GenerationOutcome, GenerationFailure>> + Send + 'a>>;
 
-/// Provider-neutral generator seam. The current deployment installs only StubV1Generator.
+/// Provider-neutral generator seam.
 pub trait QuestionGenerator: Send + Sync {
     fn generate<'a>(&'a self, input: GenerationInput) -> GenerationFuture<'a>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopicWindow {
+    pub room_id: Uuid,
+    pub conversation_id: Uuid,
+    pub anchor: TranscriptEvent,
+    pub window_events: Vec<TranscriptEvent>,
+    pub combined_text: String,
+    pub start_time: Option<DateTime<Utc>>,
+    pub end_time: Option<DateTime<Utc>>,
+    pub total_words: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CadencePolicy {
+    pub min_interval_between_questions: Duration,
+    pub min_words_per_window: usize,
+    pub max_window_duration: Duration,
+    pub silence_boundary_threshold: Duration,
+}
+
+impl Default for CadencePolicy {
+    fn default() -> Self {
+        Self {
+            min_interval_between_questions: Duration::ZERO,
+            min_words_per_window: 1,
+            max_window_duration: Duration::from_secs(180),
+            silence_boundary_threshold: Duration::from_secs(5),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AbstentionReason {
+    InsufficientContext,
+    CooldownActive { remaining_seconds: u64 },
+    SilenceOrPause,
+    RepetitiveTopic,
+    AlreadyAnswered,
+    LowValueFiller,
+    WeaklyGrounded,
+}
+
+impl AbstentionReason {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InsufficientContext => "insufficient_context",
+            Self::CooldownActive { .. } => "cooldown_active",
+            Self::SilenceOrPause => "silence_or_pause",
+            Self::RepetitiveTopic => "repetitive_topic",
+            Self::AlreadyAnswered => "already_answered",
+            Self::LowValueFiller => "low_value_filler",
+            Self::WeaklyGrounded => "weakly_grounded",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GenerationOutcome {
+    Candidate(GeneratedQuestion),
+    Abstained { reason: AbstentionReason },
+}
+
+impl From<GeneratedQuestion> for GenerationOutcome {
+    fn from(q: GeneratedQuestion) -> Self {
+        Self::Candidate(q)
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct GenerationInput {
     pub event: TranscriptEvent,
+    pub window: Option<TopicWindow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,7 +133,125 @@ pub struct StubV1Generator;
 
 impl QuestionGenerator for StubV1Generator {
     fn generate<'a>(&'a self, input: GenerationInput) -> GenerationFuture<'a> {
-        Box::pin(async move { Ok(stub_question(&input.event)) })
+        Box::pin(async move { Ok(stub_question(&input.event).into()) })
+    }
+}
+
+#[derive(Clone)]
+pub struct TopicWindowGenerator {
+    pub policy: CadencePolicy,
+    pub version: String,
+}
+
+impl TopicWindowGenerator {
+    pub fn new(policy: CadencePolicy, version: impl Into<String>) -> Self {
+        Self {
+            policy,
+            version: version.into(),
+        }
+    }
+}
+
+impl QuestionGenerator for TopicWindowGenerator {
+    fn generate<'a>(&'a self, input: GenerationInput) -> GenerationFuture<'a> {
+        Box::pin(async move {
+            let window = match &input.window {
+                Some(w) => w,
+                None => {
+                    return Ok(GenerationOutcome::Abstained {
+                        reason: AbstentionReason::InsufficientContext,
+                    });
+                }
+            };
+
+            let anchor_text = input.event.text.trim();
+            if anchor_text.is_empty() {
+                return Ok(GenerationOutcome::Abstained {
+                    reason: AbstentionReason::WeaklyGrounded,
+                });
+            }
+
+            if anchor_text == "..."
+                || anchor_text.eq_ignore_ascii_case("[pause]")
+                || anchor_text.eq_ignore_ascii_case("[silence]")
+                || anchor_text.chars().all(|c| c == '.' || c == ' ')
+            {
+                return Ok(GenerationOutcome::Abstained {
+                    reason: AbstentionReason::SilenceOrPause,
+                });
+            }
+
+            let lower = window.combined_text.to_lowercase();
+            let is_filler = lower.split_whitespace().all(|w| {
+                matches!(
+                    w.trim_matches(['.', ',', '!', '?', ';', ':', '-', '"', '\'']),
+                    "um" | "uh"
+                        | "yeah"
+                        | "yep"
+                        | "yes"
+                        | "sure"
+                        | "okay"
+                        | "ok"
+                        | "thanks"
+                        | "thank"
+                        | "moving"
+                        | "on"
+                        | "hello"
+                        | "hi"
+                        | "bye"
+                        | "right"
+                        | "so"
+                )
+            });
+            if is_filler {
+                return Ok(GenerationOutcome::Abstained {
+                    reason: AbstentionReason::LowValueFiller,
+                });
+            }
+
+            if window.total_words < self.policy.min_words_per_window {
+                return Ok(GenerationOutcome::Abstained {
+                    reason: AbstentionReason::InsufficientContext,
+                });
+            }
+
+            let is_repetition = window
+                .window_events
+                .iter()
+                .filter(|e| e.event_id != input.event.event_id)
+                .any(|e| e.text.trim().eq_ignore_ascii_case(anchor_text));
+            if is_repetition {
+                return Ok(GenerationOutcome::Abstained {
+                    reason: AbstentionReason::RepetitiveTopic,
+                });
+            }
+
+            let lower_anchor = anchor_text.to_lowercase();
+            if lower_anchor.starts_with("as i said")
+                || lower_anchor.starts_with("as mentioned")
+                || lower_anchor.contains("already answered")
+                || lower_anchor.contains("already covered")
+                || lower_anchor.contains("like i said earlier")
+            {
+                return Ok(GenerationOutcome::Abstained {
+                    reason: AbstentionReason::AlreadyAnswered,
+                });
+            }
+
+            let excerpt = if anchor_text.len() <= 240 {
+                anchor_text.to_string()
+            } else {
+                anchor_text.chars().take(240).collect::<String>()
+            };
+            let clean = excerpt.trim_end_matches(['.', '?', '!']);
+            let question = GeneratedQuestion {
+                text: format!("What is the key implication of: {clean}?"),
+                evidence_excerpt: excerpt,
+                generator_version: self.version.clone(),
+            };
+
+            Ok(GenerationOutcome::Candidate(question))
+        })
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,6 +297,16 @@ pub struct Evidence {
     pub ingest_ordinal: u64,
     pub received_at: DateTime<Utc>,
     pub excerpt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_start_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_end_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_start_time: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_end_time: Option<DateTime<Utc>>,
 }
 #[derive(Clone, Debug, Serialize)]
 struct ErrorBody {
@@ -253,7 +451,7 @@ pub fn validate(e: &TranscriptEvent) -> Result<(), &'static str> {
 }
 /// Deliberately transparent deterministic fallback, not a model or production question generator.
 pub fn generate(e: &TranscriptEvent) -> Candidate {
-    candidate_from(e, stub_question(e))
+    candidate_from(e, stub_question(e), None)
 }
 
 fn stub_question(event: &TranscriptEvent) -> GeneratedQuestion {
@@ -266,7 +464,19 @@ fn stub_question(event: &TranscriptEvent) -> GeneratedQuestion {
     }
 }
 
-fn candidate_from(e: &TranscriptEvent, output: GeneratedQuestion) -> Candidate {
+fn candidate_from(
+    e: &TranscriptEvent,
+    output: GeneratedQuestion,
+    window: Option<&TopicWindow>,
+) -> Candidate {
+    let window_start_time = window
+        .and_then(|w| w.start_time)
+        .or(e.source_spoken_at)
+        .or(Some(e.received_at));
+    let window_end_time = window
+        .and_then(|w| w.end_time)
+        .or(e.source_spoken_at)
+        .or(Some(e.received_at));
     Candidate {
         candidate_id: e.event_id,
         event_id: e.event_id,
@@ -279,14 +489,25 @@ fn candidate_from(e: &TranscriptEvent, output: GeneratedQuestion) -> Candidate {
             ingest_ordinal: e.ingest_ordinal,
             received_at: e.received_at,
             excerpt: output.evidence_excerpt,
+            source_id: e.source_id.clone(),
+            source_start_millis: e.source_start_millis,
+            source_end_millis: e.source_end_millis,
+            window_start_time,
+            window_end_time,
         },
         published: false,
     }
 }
 
-fn valid_generated_question(event: &TranscriptEvent, output: &GeneratedQuestion) -> bool {
+fn valid_generated_question(
+    event: &TranscriptEvent,
+    output: &GeneratedQuestion,
+    window: Option<&TopicWindow>,
+) -> bool {
     let question = output.text.trim();
     let evidence = output.evidence_excerpt.trim();
+    let text_grounded =
+        event.text.contains(evidence) || window.is_some_and(|w| w.combined_text.contains(evidence));
     !question.is_empty()
         && question.len() <= 1000
         && question.ends_with('?')
@@ -294,7 +515,7 @@ fn valid_generated_question(event: &TranscriptEvent, output: &GeneratedQuestion)
         && !evidence.is_empty()
         && evidence.len() <= 1000
         && evidence == output.evidence_excerpt
-        && event.text.contains(evidence)
+        && text_grounded
         && !output.generator_version.trim().is_empty()
         && output.generator_version.len() <= 128
         && !output.generator_version.chars().any(char::is_control)
@@ -326,12 +547,22 @@ impl Delivery {
             client,
             generator: Arc::new(StubV1Generator),
             generation_deadline: DEFAULT_GENERATION_DEADLINE,
+            cadence_policy: CadencePolicy::default(),
         })
     }
 
     pub fn with_generator(mut self, generator: Arc<dyn QuestionGenerator>) -> Self {
         self.generator = generator;
         self
+    }
+
+    pub fn with_cadence_policy(mut self, policy: CadencePolicy) -> Self {
+        self.cadence_policy = policy;
+        self
+    }
+
+    pub fn cadence_policy(&self) -> &CadencePolicy {
+        &self.cadence_policy
     }
 
     pub fn with_generation_deadline(mut self, deadline: Duration) -> Result<Self, &'static str> {
@@ -444,11 +675,28 @@ impl Delivery {
         let jobs = self.claim_generation_jobs(1).await?;
         let mut completed = 0;
         for (event, lease) in jobs {
+            // Check cooldown before invoking generator
+            if let Some(remaining_seconds) = self.check_cooldown(&event).await? {
+                if self
+                    .complete_abstention(
+                        event.event_id,
+                        &lease,
+                        AbstentionReason::CooldownActive { remaining_seconds }.code(),
+                    )
+                    .await?
+                {
+                    completed += 1;
+                }
+                continue;
+            }
+
+            let window = self.load_topic_window(&event).await.ok();
             let (heartbeat, stop_heartbeat) = self.start_lease_heartbeat(event.event_id, lease);
             let result = tokio::time::timeout(
                 self.generation_deadline,
                 self.generator.generate(GenerationInput {
                     event: event.clone(),
+                    window: window.clone(),
                 }),
             )
             .await;
@@ -457,21 +705,33 @@ impl Delivery {
             let _ = stop_heartbeat.send(true);
             let _ = heartbeat.await;
             match result {
-                Ok(Ok(output)) if valid_generated_question(&event, &output) => {
-                    if self.complete_generation(&event, &lease, output).await? {
-                        completed += 1;
+                Ok(Ok(GenerationOutcome::Candidate(output))) => {
+                    if valid_generated_question(&event, &output, window.as_ref()) {
+                        if self
+                            .complete_generation(&event, &lease, output, window.as_ref())
+                            .await?
+                        {
+                            completed += 1;
+                        }
+                    } else {
+                        self.fail_generation(
+                            event.event_id,
+                            lease,
+                            GenerationFailure {
+                                code: "invalid_generator_output",
+                                retryable: false,
+                            },
+                        )
+                        .await?
                     }
                 }
-                Ok(Ok(_)) => {
-                    self.fail_generation(
-                        event.event_id,
-                        lease,
-                        GenerationFailure {
-                            code: "invalid_generator_output",
-                            retryable: false,
-                        },
-                    )
-                    .await?
+                Ok(Ok(GenerationOutcome::Abstained { reason })) => {
+                    if self
+                        .complete_abstention(event.event_id, &lease, reason.code())
+                        .await?
+                    {
+                        completed += 1;
+                    }
                 }
                 Ok(Err(failure)) => self.fail_generation(event.event_id, lease, failure).await?,
                 Err(_) => {
@@ -584,13 +844,225 @@ impl Delivery {
         (task, stop)
     }
 
+    pub async fn check_cooldown(
+        &self,
+        anchor: &TranscriptEvent,
+    ) -> Result<Option<u64>, &'static str> {
+        if self.cadence_policy.min_interval_between_questions.is_zero() {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "SELECT created_at, evidence FROM question_candidates
+             WHERE room_id=$1
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(anchor.binding.room_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| "cooldown check query failed")?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let created_at: DateTime<Utc> = row.get("created_at");
+        let evidence: sqlx::types::Json<Evidence> = row.get("evidence");
+        let candidate_time = evidence
+            .0
+            .window_end_time
+            .or(evidence.0.window_start_time)
+            .unwrap_or(created_at);
+
+        let anchor_time = anchor.source_spoken_at.unwrap_or(anchor.received_at);
+        let min_interval = self.cadence_policy.min_interval_between_questions;
+
+        let elapsed = if anchor_time >= candidate_time {
+            match (anchor_time - candidate_time).to_std() {
+                Ok(d) => d,
+                Err(_) => Duration::ZERO,
+            }
+        } else {
+            Duration::ZERO
+        };
+
+        if elapsed < min_interval {
+            let remaining = (min_interval - elapsed).as_secs();
+            Ok(Some(remaining.max(1)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn load_topic_window(
+        &self,
+        anchor: &TranscriptEvent,
+    ) -> Result<TopicWindow, &'static str> {
+        let rows = sqlx::query(
+            "SELECT schema_version, event_id, conversation_id, room_id, session_id,
+                    source_conversation_id, source_id, source_sequence,
+                    source_utterance_id, source_spoken_at, source_start_millis, source_end_millis,
+                    ingest_ordinal, received_at, text
+             FROM transcript_events
+             WHERE room_id = $1 AND conversation_id = $2 AND ingest_ordinal <= $3
+             ORDER BY ingest_ordinal DESC
+             LIMIT 50",
+        )
+        .bind(anchor.binding.room_id)
+        .bind(anchor.binding.conversation_id)
+        .bind(anchor.ingest_ordinal as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| "load topic window events failed")?;
+
+        let mut events: Vec<TranscriptEvent> = rows
+            .into_iter()
+            .map(|r| TranscriptEvent {
+                schema_version: r.get::<i16, _>("schema_version") as u16,
+                event_id: r.get("event_id"),
+                binding: Binding {
+                    conversation_id: r.get("conversation_id"),
+                    source_conversation_id: r.get("source_conversation_id"),
+                    room_id: r.get("room_id"),
+                    session_id: r.get("session_id"),
+                },
+                ingest_ordinal: r.get::<i64, _>("ingest_ordinal") as u64,
+                received_at: r.get("received_at"),
+                source_id: r.get("source_id"),
+                source_sequence: r
+                    .get::<Option<String>, _>("source_sequence")
+                    .and_then(|v| v.parse().ok()),
+                source_utterance_id: r
+                    .get::<Option<i64>, _>("source_utterance_id")
+                    .map(|v| v as u64),
+                source_spoken_at: r.get("source_spoken_at"),
+                source_start_millis: r
+                    .get::<Option<i64>, _>("source_start_millis")
+                    .map(|v| v as u64),
+                source_end_millis: r
+                    .get::<Option<i64>, _>("source_end_millis")
+                    .map(|v| v as u64),
+                text: r.get("text"),
+            })
+            .collect();
+
+        events.sort_by(|a, b| match (a.source_spoken_at, b.source_spoken_at) {
+            (Some(sa), Some(sb)) if sa != sb => sa.cmp(&sb),
+            _ => match (a.source_start_millis, b.source_start_millis) {
+                (Some(ma), Some(mb)) if ma != mb => ma.cmp(&mb),
+                _ => match (a.source_end_millis, b.source_end_millis) {
+                    (Some(ea), Some(eb)) if ea != eb => ea.cmp(&eb),
+                    _ => match (a.source_sequence, b.source_sequence) {
+                        (Some(qa), Some(qb)) if qa != qb => qa.cmp(&qb),
+                        _ => a.ingest_ordinal.cmp(&b.ingest_ordinal),
+                    },
+                },
+            },
+        });
+
+        let anchor_idx = events
+            .iter()
+            .position(|e| e.event_id == anchor.event_id)
+            .unwrap_or(events.len().saturating_sub(1));
+
+        let anchor_event = &events[anchor_idx];
+        let anchor_time = anchor_event
+            .source_spoken_at
+            .unwrap_or(anchor_event.received_at);
+
+        let max_duration = chrono::Duration::from_std(self.cadence_policy.max_window_duration)
+            .unwrap_or(chrono::Duration::MAX);
+        let silence_threshold =
+            chrono::Duration::from_std(self.cadence_policy.silence_boundary_threshold)
+                .unwrap_or(chrono::Duration::MAX);
+        let silence_threshold_millis =
+            self.cadence_policy.silence_boundary_threshold.as_millis() as u64;
+
+        let mut window: Vec<TranscriptEvent> = vec![anchor_event.clone()];
+
+        for i in (0..anchor_idx).rev() {
+            let prev = &events[i];
+            let prev_time = prev.source_spoken_at.unwrap_or(prev.received_at);
+
+            if anchor_time.signed_duration_since(prev_time) > max_duration {
+                break;
+            }
+
+            let earliest = &window[0];
+            let earliest_time = earliest.source_spoken_at.unwrap_or(earliest.received_at);
+            let time_gap = earliest_time.signed_duration_since(prev_time);
+
+            let has_millis_gap = match (earliest.source_start_millis, prev.source_end_millis) {
+                (Some(start_m), Some(end_m)) => {
+                    start_m.saturating_sub(end_m) > silence_threshold_millis
+                }
+                _ => false,
+            };
+
+            if time_gap > silence_threshold || has_millis_gap {
+                break;
+            }
+
+            window.insert(0, prev.clone());
+        }
+
+        let combined_text = window
+            .iter()
+            .map(|e| e.text.trim())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let total_words = combined_text.split_whitespace().count();
+        let start_time = window
+            .first()
+            .and_then(|e| e.source_spoken_at.or(Some(e.received_at)));
+        let end_time = window
+            .last()
+            .and_then(|e| e.source_spoken_at.or(Some(e.received_at)));
+
+        Ok(TopicWindow {
+            room_id: anchor.binding.room_id,
+            conversation_id: anchor.binding.conversation_id,
+            anchor: anchor.clone(),
+            window_events: window,
+            combined_text,
+            start_time,
+            end_time,
+            total_words,
+        })
+    }
+
+    async fn complete_abstention(
+        &self,
+        event_id: Uuid,
+        lease: &Uuid,
+        reason_code: &str,
+    ) -> Result<bool, &'static str> {
+        let last_error = format!("abstained:{reason_code}");
+        let completed = sqlx::query(
+            "UPDATE generation_jobs
+             SET status='complete', lease_token=NULL, lease_until=NULL,
+                 last_error_code=$3, updated_at=now()
+             WHERE event_id=$1 AND status='processing' AND lease_token=$2",
+        )
+        .bind(event_id)
+        .bind(lease)
+        .bind(last_error)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| "generation abstention fence failed")?;
+
+        Ok(completed.rows_affected() == 1)
+    }
+
     async fn complete_generation(
         &self,
         event: &TranscriptEvent,
         lease: &Uuid,
         output: GeneratedQuestion,
+        window: Option<&TopicWindow>,
     ) -> Result<bool, &'static str> {
-        let candidate = candidate_from(event, output);
+        let candidate = candidate_from(event, output, window);
         let mut tx = self
             .pool
             .begin()
@@ -720,12 +1192,12 @@ mod question_output_tests {
             evidence_excerpt: "We reduced outage time by adding a retry queue.".into(),
             generator_version: "provider:model@prompt-v1".into(),
         };
-        assert!(valid_generated_question(&event, &output));
+        assert!(valid_generated_question(&event, &output, None));
 
         output.evidence_excerpt = "We eliminated every outage.".into();
-        assert!(!valid_generated_question(&event, &output));
+        assert!(!valid_generated_question(&event, &output, None));
         output.evidence_excerpt = "We reduced outage time by adding a retry queue.".into();
         output.text = "This is not phrased as a question.".into();
-        assert!(!valid_generated_question(&event, &output));
+        assert!(!valid_generated_question(&event, &output, None));
     }
 }

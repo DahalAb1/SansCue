@@ -1761,9 +1761,37 @@ async fn topics_candidate(
         || candidate["text"]
             .as_str()
             .is_none_or(|s| s.trim().is_empty() || s.len() > 1000)
-        || candidate["evidence"]
-            .as_object()
-            .is_none_or(|o| o.len() != 4)
+        || candidate["evidence"].as_object().is_none_or(|o| {
+            if o.len() < 4 || o.len() > 9 {
+                return true;
+            }
+            for (k, v) in o {
+                match k.as_str() {
+                    "conversation_id" | "ingest_ordinal" | "received_at" | "excerpt" => {}
+                    "source_id" => {
+                        if !v.is_null() && !v.is_string() {
+                            return true;
+                        }
+                    }
+                    "source_start_millis" | "source_end_millis" => {
+                        if !v.is_null() && !v.is_u64() {
+                            return true;
+                        }
+                    }
+                    "window_start_time" | "window_end_time" => {
+                        if !v.is_null()
+                            && !v
+                                .as_str()
+                                .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+                        {
+                            return true;
+                        }
+                    }
+                    _ => return true,
+                }
+            }
+            false
+        })
     {
         return Err(invalid());
     }
