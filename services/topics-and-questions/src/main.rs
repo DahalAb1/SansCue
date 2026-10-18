@@ -114,6 +114,7 @@ async fn run() -> Result<(), &'static str> {
         router(App {
             pool: pool.clone(),
             bee_token: bee.into(),
+            sessions_token: optional_setting("TOPICS_SESSIONS_SERVICE_TOKEN")?.map(Into::into),
         }),
     )
     .await

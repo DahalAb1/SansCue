@@ -29,6 +29,9 @@ services:
       SESSIONS_INTERNAL_HOST: "0.0.0.0"
       SESSIONS_INTERNAL_PORT: "3001"
       SESSIONS_PUBLIC_ORIGIN: "http://127.0.0.1:8080"
+      # Staff transcript reads; optional, the panel reports itself unavailable without it.
+      TOPICS_INTERNAL_URL: "http://topics-and-questions:3002"
+      TOPICS_SESSIONS_SERVICE_TOKEN: "${TOPICS_SESSIONS_SERVICE_TOKEN:-}"
       SESSIONS_ALLOW_INSECURE_LOOPBACK: "true"
       # Operator access stays disabled (fail closed) unless all three are provisioned in deploy/.env.
       SESSIONS_OPERATOR_TOKEN_SHA256: "${SESSIONS_OPERATOR_TOKEN_SHA256:-}"
@@ -60,6 +63,7 @@ services:
       SESSIONS_TOPICS_SERVICE_TOKEN: "${SESSIONS_TOPICS_SERVICE_TOKEN:?Set SESSIONS_TOPICS_SERVICE_TOKEN in deploy/.env}"
       HTTP_HOST: "0.0.0.0"
       HTTP_PORT: "3002"
+      TOPICS_SESSIONS_SERVICE_TOKEN: "${TOPICS_SESSIONS_SERVICE_TOKEN:-}"
       TOPICS_MIN_QUESTION_INTERVAL_SECONDS: "20"
       TOPICS_MIN_WINDOW_WORDS: "8"
       TOPICS_MAX_WINDOW_SECONDS: "180"

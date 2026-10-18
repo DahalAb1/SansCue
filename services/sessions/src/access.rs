@@ -161,6 +161,7 @@ pub fn router(access: Access) -> Router {
         .route("/invitations/{token}/redeem", post(mutate))
         .route("/rooms/{room}/state", get(read))
         .route("/rooms/{room}/qa", get(read).post(mutate))
+        .route("/rooms/{room}/transcript", get(read))
         .route("/rooms/{room}/questions/{question}/versions", post(mutate))
         .route("/rooms/{room}/questions/{question}/publish", post(mutate))
         .route("/rooms/{room}/questions/{question}/response", post(mutate))
@@ -1580,6 +1581,16 @@ async fn read(
         state
     } else if p[2] == "qa" {
         written_question_list(&mut tx, room_id, member.get("id"), member.get("role")).await?
+    } else if p[2] == "transcript" {
+        if member.get::<String, _>("role") == "audience" {
+            return Err(forbidden());
+        }
+        // Release the database transaction before calling Topics.
+        tx.commit().await?;
+        return Ok(reply(
+            StatusCode::OK,
+            room_transcript(&access.security, room_id).await?,
+        ));
     } else if p[2] == "memberships" || p[2] == "invitations" {
         require_speaker(&member)?;
         let (limit, after) = list_window(uri.query())?;
@@ -1589,6 +1600,44 @@ async fn read(
     };
     tx.commit().await?;
     Ok(reply(StatusCode::OK, body))
+}
+
+/// Recent transcript lines for room staff, read from Topics, which owns them.
+async fn room_transcript(security: &Security, room_id: Uuid) -> Result<Value> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let unavailable = || {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "transcript_unavailable",
+            "The live transcript is unavailable",
+        )
+    };
+    let (Some(base), Some(token)) = (&security.topics_url, &security.topics_read_credential) else {
+        return Err(unavailable());
+    };
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_default()
+    });
+    let response = client
+        .get(format!(
+            "{}/internal/v1/rooms/{room_id}/transcript",
+            base.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| unavailable())?;
+    if !response.status().is_success() {
+        return Err(unavailable());
+    }
+    let body: Value = response.json().await.map_err(|_| unavailable())?;
+    if !body["lines"].is_array() {
+        return Err(unavailable());
+    }
+    Ok(json!({"lines": body["lines"]}))
 }
 
 fn list_window(query: Option<&str>) -> Result<(i64, Option<Uuid>)> {

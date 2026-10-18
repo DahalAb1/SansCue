@@ -1,5 +1,6 @@
 use axum::{
     Json, Router,
+    extract::Path,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -21,6 +22,8 @@ const DEFAULT_GENERATION_DEADLINE: Duration = Duration::from_secs(30);
 pub struct App {
     pub pool: PgPool,
     pub bee_token: Arc<str>,
+    /// Lets sessions read room transcripts for staff; `None` disables the route.
+    pub sessions_token: Option<Arc<str>>,
 }
 #[derive(Clone)]
 pub struct Delivery {
@@ -327,6 +330,7 @@ pub fn router(app: App) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(ready))
         .route("/internal/v1/transcript-events", post(receive_event))
+        .route("/internal/v1/rooms/{room}/transcript", get(room_transcript))
         .with_state(app)
 }
 async fn ready(State(app): State<App>) -> impl IntoResponse {
@@ -347,6 +351,48 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     a.len() == b.len() && bool::from(a.ct_eq(b))
 }
+/// Lines of a room's received transcript shown to its staff, oldest first.
+const TRANSCRIPT_LINES: i64 = 200;
+
+async fn room_transcript(
+    State(app): State<App>,
+    Path(room): Path<String>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let Some(token) = app.sessions_token.as_deref() else {
+        return error(StatusCode::NOT_FOUND, "not_found").into_response();
+    };
+    if !authorized(&headers, token) {
+        return error(StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let Ok(room) = Uuid::parse_str(&room) else {
+        return error(StatusCode::NOT_FOUND, "not_found").into_response();
+    };
+    let rows = sqlx::query(
+        "SELECT text, coalesce(source_spoken_at, received_at) AS spoken_at FROM (
+             SELECT text, source_spoken_at, received_at, ingest_ordinal FROM transcript_events
+             WHERE room_id=$1 ORDER BY coalesce(source_spoken_at, received_at) DESC, ingest_ordinal DESC LIMIT $2
+         ) recent ORDER BY coalesce(source_spoken_at, received_at), ingest_ordinal",
+    )
+    .bind(room)
+    .bind(TRANSCRIPT_LINES)
+    .fetch_all(&app.pool)
+    .await;
+    match rows {
+        Ok(rows) => Json(json!({
+            "lines": rows
+                .iter()
+                .map(|row| json!({
+                    "text": row.get::<String, _>("text"),
+                    "spoken_at": row.get::<DateTime<Utc>, _>("spoken_at"),
+                }))
+                .collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "transcript_unavailable").into_response(),
+    }
+}
+
 async fn receive_event(
     State(app): State<App>,
     headers: HeaderMap,

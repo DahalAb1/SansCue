@@ -389,6 +389,7 @@ async fn slow_generation_does_not_block_ingress_and_stale_lease_is_fenced() {
     let app = router(App {
         pool: pool.clone(),
         bee_token: Arc::from("bee-token"),
+        sessions_token: None,
     });
     let make = |event: &TranscriptEvent| {
         axum::http::Request::builder()

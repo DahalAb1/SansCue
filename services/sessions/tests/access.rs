@@ -2283,3 +2283,69 @@ async fn listening_bee_binding_records_the_adopted_conversation() {
     assert_eq!(duplicate["code"], "bee_source_already_bound");
     finish(pool, admin, schema).await;
 }
+
+#[tokio::test]
+async fn live_transcript_is_staff_only_and_read_from_topics() {
+    let (pool, admin, schema) = db().await;
+    // Stand-in for the Topics transcript route.
+    let seen_token = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let record = seen_token.clone();
+    let topics = Router::new().route(
+        "/internal/v1/rooms/{room}/transcript",
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let record = record.clone();
+            async move {
+                *record.lock().unwrap() = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                axum::Json(
+                    json!({"lines":[{"text":"Hello room.","spoken_at":"2026-10-18T20:00:00Z"}]}),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let topics_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, topics).await.unwrap() });
+
+    let app = configured_router(
+        pool.clone(),
+        Security {
+            topics_url: Some(topics_url),
+            topics_read_credential: Some("synthetic-topics-read".into()),
+            ..security()
+        },
+    );
+    let browser = boot(&app).await;
+    login(&app, &browser).await;
+    let (_, created) = call(
+        &app,
+        &browser,
+        "POST",
+        "/rooms",
+        json!({"title":"Transcript"}),
+    )
+    .await;
+    let room = created["state"]["room"]["id"].as_str().unwrap();
+    let path = format!("/rooms/{room}/transcript");
+    let (status, transcript) = call(&app, &browser, "GET", &path, json!({})).await;
+    assert_eq!(status, 200);
+    assert_eq!(transcript["lines"][0]["text"], "Hello room.");
+    assert_eq!(
+        seen_token.lock().unwrap().as_deref(),
+        Some("Bearer synthetic-topics-read")
+    );
+
+    let guest = boot(&app).await;
+    let join = created["join_url"].as_str().unwrap();
+    assert_eq!(call(&app, &guest, "POST", join, json!({})).await.0, 200);
+    assert_eq!(call(&app, &guest, "GET", &path, json!({})).await.0, 403);
+
+    // Without Topics configuration the route reports itself unavailable.
+    let unconfigured = configured_router(pool.clone(), security());
+    let (status, body) = call(&unconfigured, &browser, "GET", &path, json!({})).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["code"], "transcript_unavailable");
+    finish(pool, admin, schema).await;
+}
