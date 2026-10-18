@@ -209,13 +209,11 @@ fn parse_command(command: &Value) -> Result<(Uuid, i64, &'static str, Binding), 
         conversation_id: parse("conversation_id")?,
         room_id: parse("room_id")?,
         session_id: parse("session_id")?,
-        source_conversation_id: payload["source_conversation_id"]
-            .as_str()
-            .map(|source| {
-                Uuid::parse_str(source)
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|_| source.to_owned())
-            }),
+        source_conversation_id: payload["source_conversation_id"].as_str().map(|source| {
+            Uuid::parse_str(source)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|_| source.to_owned())
+        }),
     };
     Ok((id, revision, action, binding))
 }

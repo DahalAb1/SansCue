@@ -10,10 +10,7 @@ fn received_at() -> chrono::DateTime<Utc> {
 }
 
 fn valid_event() -> Value {
-    serde_json::from_slice(include_bytes!(
-        "../fixtures/bee-cli-new-utterance.json"
-    ))
-    .unwrap()
+    serde_json::from_slice(include_bytes!("../fixtures/bee-cli-new-utterance.json")).unwrap()
 }
 
 #[test]
@@ -96,46 +93,67 @@ fn repeated_source_event_keeps_the_same_identity() {
 fn rejects_unsupported_malformed_and_unbounded_events_with_stable_codes() {
     let cases = [
         (json!({}), LiveEventError::InvalidJson),
-        ({
-            let mut value = valid_event();
-            value["type"] = json!("update-conversation");
-            value
-        }, LiveEventError::UnsupportedEvent),
-        ({
-            let mut value = valid_event();
-            value["conversation_uuid"] = json!(Uuid::nil());
-            value
-        }, LiveEventError::InvalidConversation),
-        ({
-            let mut value = valid_event();
-            value["utterance"]["id"] = json!(0);
-            value
-        }, LiveEventError::InvalidUtteranceId),
-        ({
-            let mut value = valid_event();
-            value["utterance"]["sample_id"] = json!("not-a-uuid");
-            value
-        }, LiveEventError::InvalidSampleId),
-        ({
-            let mut value = valid_event();
-            value["utterance"]["end"] = json!(0.5);
-            value
-        }, LiveEventError::InvalidTimeline),
-        ({
-            let mut value = valid_event();
-            value["utterance"]["text"] = json!("   ");
-            value
-        }, LiveEventError::InvalidText),
-        ({
-            let mut value = valid_event();
-            value["utterance"]["spoken_at"] = json!("not-a-time");
-            value
-        }, LiveEventError::InvalidSpokenAt),
+        (
+            {
+                let mut value = valid_event();
+                value["type"] = json!("update-conversation");
+                value
+            },
+            LiveEventError::UnsupportedEvent,
+        ),
+        (
+            {
+                let mut value = valid_event();
+                value["conversation_uuid"] = json!(Uuid::nil());
+                value
+            },
+            LiveEventError::InvalidConversation,
+        ),
+        (
+            {
+                let mut value = valid_event();
+                value["utterance"]["id"] = json!(0);
+                value
+            },
+            LiveEventError::InvalidUtteranceId,
+        ),
+        (
+            {
+                let mut value = valid_event();
+                value["utterance"]["sample_id"] = json!("not-a-uuid");
+                value
+            },
+            LiveEventError::InvalidSampleId,
+        ),
+        (
+            {
+                let mut value = valid_event();
+                value["utterance"]["end"] = json!(0.5);
+                value
+            },
+            LiveEventError::InvalidTimeline,
+        ),
+        (
+            {
+                let mut value = valid_event();
+                value["utterance"]["text"] = json!("   ");
+                value
+            },
+            LiveEventError::InvalidText,
+        ),
+        (
+            {
+                let mut value = valid_event();
+                value["utterance"]["spoken_at"] = json!("not-a-time");
+                value
+            },
+            LiveEventError::InvalidSpokenAt,
+        ),
     ];
 
     for (value, expected) in cases {
-        let error = parse_new_utterance(&serde_json::to_vec(&value).unwrap(), received_at())
-            .unwrap_err();
+        let error =
+            parse_new_utterance(&serde_json::to_vec(&value).unwrap(), received_at()).unwrap_err();
         assert_eq!(error, expected);
         assert!(error.code().starts_with("live_event_"));
     }

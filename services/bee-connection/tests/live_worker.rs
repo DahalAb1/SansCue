@@ -68,10 +68,7 @@ impl LiveStore for MockStore {
 }
 
 fn event() -> Value {
-    serde_json::from_slice(include_bytes!(
-        "../fixtures/bee-cli-new-utterance.json"
-    ))
-    .unwrap()
+    serde_json::from_slice(include_bytes!("../fixtures/bee-cli-new-utterance.json")).unwrap()
 }
 
 async fn consume(worker: &LiveCliWorker<MockStore>, input: Vec<u8>) -> LiveReadSummary {
