@@ -206,11 +206,16 @@ fn parses_conversation_lifecycle_events_and_sanitizes_payload() {
         "type": "new-conversation",
         "conversation": {
             "id": 123,
-            "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "conversation_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             "state": "processing",
             "title": "Private user title to discard"
         }
     });
+
+    assert_eq!(
+        parse_new_utterance(&serde_json::to_vec(&new_conv).unwrap(), received_at()).unwrap_err(),
+        LiveEventError::UnsupportedEvent
+    );
 
     let parsed =
         parse_lifecycle_event(&serde_json::to_vec(&new_conv).unwrap(), received_at()).unwrap();

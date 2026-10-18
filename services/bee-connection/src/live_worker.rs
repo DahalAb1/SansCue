@@ -198,6 +198,16 @@ impl<S: LiveStore> LiveCliWorker<S> {
         if line.iter().all(u8::is_ascii_whitespace) {
             return Ok(LiveLineOutcome::Ignored);
         }
+        // Bee CLI can emit stream timing metadata that is not a product event.
+        if let Ok(serde_json::Value::Object(fields)) =
+            serde_json::from_slice::<serde_json::Value>(line)
+            && fields.len() == 1
+            && fields
+                .get("timestamp")
+                .is_some_and(serde_json::Value::is_number)
+        {
+            return Ok(LiveLineOutcome::Ignored);
+        }
         match parse_new_utterance(line, received_at) {
             Ok(event) => {
                 let Some(conversation_id) = self
@@ -219,40 +229,37 @@ impl<S: LiveStore> LiveCliWorker<S> {
                     Disposition::Control => Ok(LiveLineOutcome::Ignored),
                 }
             }
-            Err(LiveEventError::UnsupportedEvent) => {
-                match crate::live::parse_lifecycle_event(line, received_at) {
-                    Ok(lifecycle) => {
-                        let conversation_id = match &lifecycle {
-                            crate::live::LiveLifecycleEvent::Created(c) => {
-                                self.store
-                                    .record_numeric_source_mapping(c.id, c.uuid)
-                                    .await?;
-                                self.store.conversation_for_source(c.uuid).await?
-                            }
-                            crate::live::LiveLifecycleEvent::Updated(u) => {
-                                self.store.conversation_for_numeric_source(u.id).await?
-                            }
-                        };
-                        let Some(conversation_id) = conversation_id else {
-                            return Ok(LiveLineOutcome::Unbound);
-                        };
-                        let observation = lifecycle
-                            .into_observation()
-                            .map_err(|_| "Bee live event normalization failed")?;
-                        match self.store.ingest_live(conversation_id, observation).await? {
-                            Disposition::Accepted { .. } | Disposition::Control => {
-                                Ok(LiveLineOutcome::Accepted)
-                            }
-                            Disposition::Duplicate { .. } => Ok(LiveLineOutcome::Duplicate),
-                            Disposition::Quarantined { .. } => {
-                                Ok(LiveLineOutcome::Rejected("live_event_quarantined"))
-                            }
+            Err(utterance_error) => match crate::live::parse_lifecycle_event(line, received_at) {
+                Ok(lifecycle) => {
+                    let conversation_id = match &lifecycle {
+                        crate::live::LiveLifecycleEvent::Created(c) => {
+                            self.store
+                                .record_numeric_source_mapping(c.id, c.uuid)
+                                .await?;
+                            self.store.conversation_for_source(c.uuid).await?
+                        }
+                        crate::live::LiveLifecycleEvent::Updated(u) => {
+                            self.store.conversation_for_numeric_source(u.id).await?
+                        }
+                    };
+                    let Some(conversation_id) = conversation_id else {
+                        return Ok(LiveLineOutcome::Unbound);
+                    };
+                    let observation = lifecycle
+                        .into_observation()
+                        .map_err(|_| "Bee live event normalization failed")?;
+                    match self.store.ingest_live(conversation_id, observation).await? {
+                        Disposition::Accepted { .. } | Disposition::Control => {
+                            Ok(LiveLineOutcome::Accepted)
+                        }
+                        Disposition::Duplicate { .. } => Ok(LiveLineOutcome::Duplicate),
+                        Disposition::Quarantined { .. } => {
+                            Ok(LiveLineOutcome::Rejected("live_event_quarantined"))
                         }
                     }
-                    Err(error) => Ok(LiveLineOutcome::Rejected(error.code())),
                 }
-            }
-            Err(error) => Ok(LiveLineOutcome::Rejected(error.code())),
+                Err(_) => Ok(LiveLineOutcome::Rejected(utterance_error.code())),
+            },
         }
     }
 
