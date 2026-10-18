@@ -197,7 +197,7 @@ impl Store {
         source_conversation_id: Uuid,
     ) -> Result<Option<Uuid>, &'static str> {
         let conversation: Option<Option<Uuid>> = sqlx::query_scalar(
-            "SELECT conversation_id FROM bee_room_revision WHERE source_conversation_id=$1",
+            "SELECT conversation_id FROM bee_room_revision WHERE lower(source_conversation_id)=lower($1)",
         )
         .bind(source_conversation_id.to_string())
         .fetch_optional(&self.pool)

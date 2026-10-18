@@ -1347,17 +1347,18 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
     )
     .await;
     let room = created["state"]["room"]["id"].as_str().unwrap();
-    let conversation = Uuid::new_v4();
+    let source_conversation = Uuid::new_v4();
     let (status, bound) = call(
         &app,
         &browser,
         "POST",
         &format!("/rooms/{room}/bee/bind"),
-        json!({"conversation_id":conversation,"source_conversation_id":null}),
+        json!({"source_conversation_id":source_conversation}),
     )
     .await;
     assert_eq!(status, 200);
     assert_eq!(bound["status"], "binding");
+    let conversation = Uuid::parse_str(bound["conversation_id"].as_str().unwrap()).unwrap();
     let state = call(
         &app,
         &browser,
@@ -1368,6 +1369,25 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
     .await
     .1;
     assert_eq!(state["bee"]["status"], "binding");
+    let (_, other_room) = call(
+        &app,
+        &browser,
+        "POST",
+        "/rooms",
+        json!({"title":"Other Bee room"}),
+    )
+    .await;
+    let other_room = other_room["state"]["room"]["id"].as_str().unwrap();
+    let (duplicate_source_status, duplicate_source) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{other_room}/bee/bind"),
+        json!({"source_conversation_id":source_conversation}),
+    )
+    .await;
+    assert_eq!(duplicate_source_status, 409);
+    assert_eq!(duplicate_source["code"], "bee_source_already_bound");
     let mut request = Request::builder()
         .uri("/internal/v1/bee/commands")
         .header("authorization", "Bearer synthetic-bee")
@@ -1385,6 +1405,10 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
                 .unwrap()
         )
         .is_ok()
+    );
+    assert_eq!(
+        list["commands"][0]["payload"]["source_conversation_id"],
+        source_conversation.to_string()
     );
     let command = list["commands"][0]["command_id"].as_str().unwrap();
     let revision = bound["revision"].as_i64().unwrap();
@@ -1589,7 +1613,7 @@ async fn superseded_binding_status_has_machine_readable_stale_outcome() {
         json!({}),
     )
     .await;
-    let stale=private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":conversation,"status":"bound","connectivity_revision":bind["revision"]})).await;
+    let stale=private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":bind["revision"]})).await;
     assert_eq!(stale.0, 409);
     assert_eq!(stale.1["code"], "bee_binding_stale");
     assert_eq!(
@@ -1597,7 +1621,7 @@ async fn superseded_binding_status_has_machine_readable_stale_outcome() {
             &private,
             "POST",
             &format!("/internal/v1/bee/rooms/{room}/status"),
-            json!({"binding_id":null,"status":"unbound","connectivity_revision":unbind["revision"]})
+            json!({"binding_id":null,"status":"unbound","has_gaps":false,"connectivity_revision":unbind["revision"]})
         )
         .await
         .0,
