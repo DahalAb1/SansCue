@@ -1,7 +1,8 @@
 use sqlx::postgres::PgPoolOptions;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use topics_and_questions::{
-    App, CadencePolicy, Delivery, QuestionGenerator, TopicWindowGenerator, claude::ClaudeGenerator,
+    App, CadencePolicy, Delivery, QuestionGenerator, TopicWindowGenerator,
+    claude::{BedrockAuth, ClaudeGenerator},
     router,
 };
 #[tokio::main]
@@ -59,16 +60,44 @@ async fn run() -> Result<(), &'static str> {
         silence_boundary_threshold: duration_setting("TOPICS_SILENCE_BOUNDARY_SECONDS", 5)?,
     };
     let gate = TopicWindowGenerator::new(cadence_policy, "topic-window-stub-v1");
-    let generator: Arc<dyn QuestionGenerator> = match optional_setting("ANTHROPIC_API_KEY")? {
-        Some(key) => Arc::new(ClaudeGenerator::new(
+    let bedrock_auth = match (
+        optional_setting("AWS_BEARER_TOKEN_BEDROCK")?,
+        optional_setting("TOPICS_BEDROCK_CREDENTIALS_FILE")?,
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "set either AWS_BEARER_TOKEN_BEDROCK or TOPICS_BEDROCK_CREDENTIALS_FILE, not both",
+            );
+        }
+        (Some(key), None) => Some(BedrockAuth::ApiKey(key)),
+        (None, Some(file)) => Some(BedrockAuth::CredentialsFile(file.into())),
+        (None, None) => None,
+    };
+    let generator: Arc<dyn QuestionGenerator> = match (
+        bedrock_auth,
+        optional_setting("ANTHROPIC_API_KEY")?,
+    ) {
+        (Some(_), Some(_)) => {
+            return Err("configure either Bedrock or ANTHROPIC_API_KEY, not both");
+        }
+        (Some(auth), None) => Arc::new(ClaudeGenerator::bedrock(
+            gate,
+            auth,
+            optional_setting("AWS_REGION")?
+                .as_deref()
+                .unwrap_or("us-east-1"),
+            optional_setting("TOPICS_MODEL")?.as_deref(),
+            None,
+        )?),
+        (None, Some(key)) => Arc::new(ClaudeGenerator::anthropic(
             gate,
             &key,
             optional_setting("ANTHROPIC_BASE_URL")?.as_deref(),
             optional_setting("TOPICS_MODEL")?.as_deref(),
         )?),
-        None => {
+        (None, None) => {
             eprintln!(
-                "topics-and-questions: ANTHROPIC_API_KEY is not set; using the deterministic placeholder generator"
+                "topics-and-questions: no model credential is set; using the deterministic placeholder generator"
             );
             Arc::new(gate)
         }

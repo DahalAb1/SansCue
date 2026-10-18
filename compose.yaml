@@ -64,9 +64,16 @@ services:
       TOPICS_MIN_WINDOW_WORDS: "8"
       TOPICS_MAX_WINDOW_SECONDS: "180"
       TOPICS_SILENCE_BOUNDARY_SECONDS: "5"
-      # Optional: enables Claude question generation; blank keeps the placeholder.
+      # Optional Claude question generation; all blank keeps the placeholder.
+      # Configure one of: Anthropic API key, Bedrock API key, or Bedrock credentials file.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      AWS_BEARER_TOKEN_BEDROCK: "${AWS_BEARER_TOKEN_BEDROCK:-}"
+      TOPICS_BEDROCK_CREDENTIALS_FILE: "${TOPICS_BEDROCK_CREDENTIALS_FILE:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
       TOPICS_MODEL: "${TOPICS_MODEL:-}"
+    volumes:
+      # Written by deploy/refresh-bedrock-credentials.sh; read-only here.
+      - ./local-data/bedrock:/run/bedrock:ro
     depends_on:
       topics-db:
         condition: service_healthy

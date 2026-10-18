@@ -4,11 +4,15 @@ use crate::{
     AbstentionReason, GeneratedQuestion, GenerationFailure, GenerationFuture, GenerationInput,
     GenerationOutcome, QuestionGenerator, TopicWindow, TopicWindowGenerator,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime},
+};
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
+pub const DEFAULT_BEDROCK_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// Speech older than this is skipped so a slow model never questions stale content.
 const MAX_ANCHOR_AGE: Duration = Duration::from_secs(45);
@@ -29,33 +33,108 @@ Set abstain to true, with empty question and evidence_quote, when the speech is 
 question to the room, too fragmentary to understand, or contains no teachable idea. Abstaining is better than a vague \
 question.";
 
+/// Bedrock's InvokeModel path for Haiku 4.5 does not take a JSON schema, so the
+/// shape is requested in the prompt and validated after parsing.
+const JSON_INSTRUCTION: &str = "\n\nRespond with only a JSON object with exactly these keys: \
+abstain (boolean), question (string), evidence_quote (string). No other text.";
+
+#[derive(Clone)]
+enum Backend {
+    /// Anthropic Messages API, authenticated with an API key.
+    Anthropic { api_key: String, fallbacks: bool },
+    /// Amazon Bedrock InvokeModel.
+    Bedrock { region: String, auth: BedrockAuth },
+}
+
+/// How Bedrock requests authenticate. Some AWS organizations deny API keys,
+/// so short-lived IAM credentials are supported as well.
+#[derive(Clone, Debug)]
+pub enum BedrockAuth {
+    /// A Bedrock API key, sent as a bearer token.
+    ApiKey(String),
+    /// JSON printed by `aws configure export-credentials --format process`,
+    /// re-read on every request so a host helper can refresh it.
+    CredentialsFile(PathBuf),
+}
+
 #[derive(Clone)]
 pub struct ClaudeGenerator {
     gate: TopicWindowGenerator,
     client: reqwest::Client,
     endpoint: String,
-    api_key: String,
+    backend: Backend,
     model: String,
     version: String,
-    /// Server-side refusal fallbacks exist only on Anthropic's first-party API.
-    fallbacks: bool,
 }
 
 impl ClaudeGenerator {
-    pub fn new(
+    /// Claude through the Anthropic API.
+    pub fn anthropic(
         gate: TopicWindowGenerator,
         api_key: &str,
         base_url: Option<&str>,
         model: Option<&str>,
     ) -> Result<Self, &'static str> {
-        let base = base_url.unwrap_or(DEFAULT_BASE_URL).trim_end_matches('/');
-        let url = reqwest::Url::parse(base).map_err(|_| "invalid Anthropic base URL")?;
-        if url.scheme() != "https" && url.host_str() != Some("127.0.0.1") {
-            return Err("Anthropic base URL must use HTTPS");
+        let base = trusted_base(base_url.unwrap_or(DEFAULT_BASE_URL))?;
+        let backend = Backend::Anthropic {
+            api_key: credential(api_key)?,
+            // Server-side refusal fallbacks exist only on Anthropic's first-party API.
+            fallbacks: base == DEFAULT_BASE_URL,
+        };
+        Self::build(
+            gate,
+            format!("{base}/v1/messages"),
+            backend,
+            model.unwrap_or(DEFAULT_MODEL),
+        )
+    }
+
+    /// Claude through Amazon Bedrock. `base_url` overrides the regional
+    /// `bedrock-runtime` endpoint, for tests.
+    pub fn bedrock(
+        gate: TopicWindowGenerator,
+        auth: BedrockAuth,
+        region: &str,
+        model: Option<&str>,
+        base_url: Option<&str>,
+    ) -> Result<Self, &'static str> {
+        let region = region.trim();
+        if region.is_empty()
+            || !region
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return Err("invalid AWS region");
         }
-        let model = model.unwrap_or(DEFAULT_MODEL).trim();
-        if api_key.trim().is_empty() || model.is_empty() || model.len() > 100 {
-            return Err("invalid Anthropic model configuration");
+        let regional = format!("https://bedrock-runtime.{region}.amazonaws.com");
+        let base = trusted_base(base_url.unwrap_or(&regional))?;
+        let model = model.unwrap_or(DEFAULT_BEDROCK_MODEL).trim();
+        let path_model = model.replace(':', "%3A");
+        let auth = match auth {
+            BedrockAuth::ApiKey(key) => BedrockAuth::ApiKey(credential(&key)?),
+            file => file,
+        };
+        let backend = Backend::Bedrock {
+            region: region.to_owned(),
+            auth,
+        };
+        Self::build(
+            gate,
+            format!("{base}/model/{path_model}/invoke"),
+            backend,
+            model,
+        )
+    }
+
+    fn build(
+        gate: TopicWindowGenerator,
+        endpoint: String,
+        backend: Backend,
+        model: &str,
+    ) -> Result<Self, &'static str> {
+        let model = model.trim();
+        if model.is_empty() || model.len() > 100 || model.contains('/') {
+            return Err("invalid model configuration");
         }
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -64,11 +143,10 @@ impl ClaudeGenerator {
         Ok(Self {
             gate,
             client,
-            endpoint: format!("{base}/v1/messages"),
-            api_key: api_key.trim().to_owned(),
+            endpoint,
+            backend,
             version: format!("{model}/topic-check-v1"),
             model: model.to_owned(),
-            fallbacks: base == DEFAULT_BASE_URL,
         })
     }
 
@@ -82,49 +160,82 @@ impl ClaudeGenerator {
             .map(|(index, text)| format!("[{}] {text}", index + 1))
             .collect::<Vec<_>>()
             .join("\n");
-        let mut request = json!({
-            "model": self.model,
-            "max_tokens": 4000,
-            "system": SYSTEM_PROMPT,
-            "messages": [{
-                "role": "user",
-                "content": format!("<transcript>\n{lines}\n</transcript>"),
-            }],
-            "output_config": {
-                // Low effort keeps the check-in timely while the speaker is still on the topic.
-                "effort": "low",
-                "format": {
-                    "type": "json_schema",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "abstain": {"type": "boolean"},
-                            "question": {"type": "string"},
-                            "evidence_quote": {"type": "string"},
+        let messages = json!([{
+            "role": "user",
+            "content": format!("<transcript>\n{lines}\n</transcript>"),
+        }]);
+        match &self.backend {
+            Backend::Anthropic { fallbacks, .. } => {
+                let mut request = json!({
+                    "model": self.model,
+                    "max_tokens": 4000,
+                    "system": SYSTEM_PROMPT,
+                    "messages": messages,
+                    "output_config": {
+                        // Low effort keeps the check-in timely while the speaker is still on the topic.
+                        "effort": "low",
+                        "format": {
+                            "type": "json_schema",
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "abstain": {"type": "boolean"},
+                                    "question": {"type": "string"},
+                                    "evidence_quote": {"type": "string"},
+                                },
+                                "required": ["abstain", "question", "evidence_quote"],
+                                "additionalProperties": false,
+                            },
                         },
-                        "required": ["abstain", "question", "evidence_quote"],
-                        "additionalProperties": false,
                     },
-                },
-            },
-        });
-        if self.fallbacks {
-            request["fallbacks"] = json!("default");
+                });
+                if *fallbacks {
+                    request["fallbacks"] = json!("default");
+                }
+                request
+            }
+            Backend::Bedrock { .. } => json!({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1000,
+                "system": format!("{SYSTEM_PROMPT}{JSON_INSTRUCTION}"),
+                "messages": messages,
+            }),
         }
-        request
     }
 
     async fn ask(&self, window: &TopicWindow) -> Result<GenerationOutcome, GenerationFailure> {
+        let body = serde_json::to_vec(&self.request(window))
+            .map_err(|_| failure("model_request_invalid", false))?;
         let mut request = self
             .client
             .post(&self.endpoint)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01");
-        if self.fallbacks {
-            request = request.header("anthropic-beta", "server-side-fallback-2026-07-01");
-        }
+            .header("content-type", "application/json");
+        request = match &self.backend {
+            Backend::Anthropic { api_key, fallbacks } => {
+                request = request
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01");
+                if *fallbacks {
+                    request = request.header("anthropic-beta", "server-side-fallback-2026-07-01");
+                }
+                request
+            }
+            Backend::Bedrock {
+                auth: BedrockAuth::ApiKey(key),
+                ..
+            } => request.bearer_auth(key),
+            Backend::Bedrock {
+                region,
+                auth: BedrockAuth::CredentialsFile(file),
+            } => {
+                for (name, value) in sign_bedrock(region, file, &self.endpoint, &body)? {
+                    request = request.header(name, value);
+                }
+                request
+            }
+        };
         let response = request
-            .json(&self.request(window))
+            .body(body)
             .send()
             .await
             .map_err(|_| failure("model_unavailable", true))?;
@@ -156,6 +267,76 @@ impl ClaudeGenerator {
             generator_version: self.version.clone(),
         }))
     }
+}
+
+fn trusted_base(base: &str) -> Result<String, &'static str> {
+    let base = base.trim().trim_end_matches('/');
+    let url = reqwest::Url::parse(base).map_err(|_| "invalid model base URL")?;
+    if url.scheme() != "https" && url.host_str() != Some("127.0.0.1") {
+        return Err("model base URL must use HTTPS");
+    }
+    Ok(base.to_owned())
+}
+
+/// Returns the SigV4 headers for one Bedrock request.
+fn sign_bedrock(
+    region: &str,
+    credentials_file: &Path,
+    url: &str,
+    body: &[u8],
+) -> Result<Vec<(String, String)>, GenerationFailure> {
+    use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
+    // Missing or stale credentials are retryable: the host helper refreshes them.
+    let unavailable = || failure("model_credentials_unavailable", true);
+    let raw = std::fs::read(credentials_file).map_err(|_| unavailable())?;
+    let file: Value = serde_json::from_slice(&raw).map_err(|_| unavailable())?;
+    let field = |name: &str| file[name].as_str().filter(|value| !value.is_empty());
+    let (Some(access_key), Some(secret_key)) = (field("AccessKeyId"), field("SecretAccessKey"))
+    else {
+        return Err(unavailable());
+    };
+    if field("Expiration")
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .is_some_and(|expires| expires <= Utc::now())
+    {
+        return Err(unavailable());
+    }
+    let identity = aws_credential_types::Credentials::new(
+        access_key,
+        secret_key,
+        field("SessionToken").map(str::to_owned),
+        None,
+        "sanscue-credentials-file",
+    )
+    .into();
+    let params = aws_sigv4::sign::v4::SigningParams::builder()
+        .identity(&identity)
+        .region(region)
+        .name("bedrock")
+        .time(SystemTime::now())
+        .settings(SigningSettings::default())
+        .build()
+        .map_err(|_| failure("model_signing_failed", false))?
+        .into();
+    let headers = [("content-type", "application/json")];
+    let signable =
+        SignableRequest::new("POST", url, headers.into_iter(), SignableBody::Bytes(body))
+            .map_err(|_| failure("model_signing_failed", false))?;
+    let (instructions, _) = sign(signable, &params)
+        .map_err(|_| failure("model_signing_failed", false))?
+        .into_parts();
+    Ok(instructions
+        .headers()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect())
+}
+
+fn credential(value: &str) -> Result<String, &'static str> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err("invalid model credential");
+    }
+    Ok(value.to_owned())
 }
 
 impl QuestionGenerator for ClaudeGenerator {
@@ -201,8 +382,13 @@ fn parse_answer(body: &Value) -> Result<Answer, GenerationFailure> {
         .filter(|block| block["type"] == "text")
         .filter_map(|block| block["text"].as_str())
         .collect::<String>();
+    // Without a schema the model can wrap the object in a code fence.
+    let object = match (text.find('{'), text.rfind('}')) {
+        (Some(start), Some(end)) if start < end => &text[start..=end],
+        _ => return Err(failure("model_response_invalid", false)),
+    };
     let answer: Value =
-        serde_json::from_str(&text).map_err(|_| failure("model_response_invalid", false))?;
+        serde_json::from_str(object).map_err(|_| failure("model_response_invalid", false))?;
     let field = |name: &str| answer[name].as_str().map(str::to_owned);
     match (
         answer["abstain"].as_bool(),
@@ -314,6 +500,11 @@ mod tests {
                 evidence_quote: "each step".into(),
             }
         );
+        let fenced = json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "```json\n{\"abstain\":true,\"question\":\"\",\"evidence_quote\":\"\"}\n```"}],
+        });
+        assert!(parse_answer(&fenced).unwrap().abstain);
         let refused = json!({"stop_reason": "refusal", "content": []});
         assert_eq!(parse_answer(&refused).unwrap_err().code, "model_refused");
         let malformed =
@@ -323,7 +514,7 @@ mod tests {
 
     #[test]
     fn request_uses_structured_output_and_numbered_lines() {
-        let generator = ClaudeGenerator::new(
+        let generator = ClaudeGenerator::anthropic(
             TopicWindowGenerator::new(Default::default(), "gate"),
             "test-key",
             None,
@@ -338,10 +529,47 @@ mod tests {
             "<transcript>\n[1] first idea\n[2] second idea\n</transcript>"
         );
         assert!(
-            ClaudeGenerator::new(
+            ClaudeGenerator::anthropic(
                 TopicWindowGenerator::new(Default::default(), "gate"),
                 "key",
                 Some("http://example.com"),
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn bedrock_request_targets_invoke_model_without_a_schema() {
+        let generator = ClaudeGenerator::bedrock(
+            TopicWindowGenerator::new(Default::default(), "gate"),
+            BedrockAuth::ApiKey("bedrock-key".into()),
+            "us-east-1",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            generator.endpoint,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-haiku-4-5-20251001-v1%3A0/invoke"
+        );
+        let request = generator.request(&window(&["an idea"]));
+        assert_eq!(request["anthropic_version"], "bedrock-2023-05-31");
+        assert!(request.get("model").is_none());
+        assert!(request.get("output_config").is_none());
+        assert!(request.get("fallbacks").is_none());
+        assert!(
+            request["system"]
+                .as_str()
+                .unwrap()
+                .ends_with("No other text.")
+        );
+        assert!(
+            ClaudeGenerator::bedrock(
+                TopicWindowGenerator::new(Default::default(), "gate"),
+                BedrockAuth::ApiKey("bedrock-key".into()),
+                "us-east-1/../x",
+                None,
                 None,
             )
             .is_err()
