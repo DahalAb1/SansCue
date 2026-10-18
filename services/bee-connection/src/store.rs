@@ -64,12 +64,16 @@ impl Store {
 
     /// Ensure a command-target conversation exists without changing any
     /// previously persisted transport capability assertion.
-    pub async fn ensure_command_conversation(&self, id: Uuid) -> Result<(), &'static str> {
+    pub async fn ensure_command_conversation(
+        &self,
+        id: Uuid,
+        capabilities: Capabilities,
+    ) -> Result<(), &'static str> {
         if id.is_nil() {
             return Err("invalid conversation ID");
         }
         sqlx::query("INSERT INTO bee_conversations (conversation_id,state) VALUES ($1,$2) ON CONFLICT DO NOTHING")
-            .bind(id).bind(Json(Pipeline::new(id, Capabilities::default())))
+            .bind(id).bind(Json(Pipeline::new(id, capabilities)))
             .execute(&self.pool).await.map_err(|_| "Bee conversation creation failed")?;
         Ok(())
     }
@@ -178,10 +182,28 @@ impl Store {
             .map_err(|_| "Bee state write failed")?;
         sqlx::query("INSERT INTO bee_command_inbox(command_id,room_id,conversation_id,revision,command_type,result) VALUES($1,$2,$3,$4,$5,'{}')")
             .bind(command_id).bind(binding.room_id).bind(binding.conversation_id).bind(revision).bind(action).execute(&mut *tx).await.map_err(|_| "Bee command receipt write failed")?;
-        sqlx::query("UPDATE bee_room_revision SET revision=$2,conversation_id=$3,updated_at=now() WHERE room_id=$1")
-            .bind(binding.room_id).bind(revision).bind(if action == "bind" {Some(binding.conversation_id)} else {None}).execute(&mut *tx).await.map_err(|_| "Bee room revision update failed")?;
+        sqlx::query("UPDATE bee_room_revision SET revision=$2,conversation_id=$3,source_conversation_id=$4,updated_at=now() WHERE room_id=$1")
+            .bind(binding.room_id)
+            .bind(revision)
+            .bind(if action == "bind" {Some(binding.conversation_id)} else {None})
+            .bind(if action == "bind" {binding.source_conversation_id.as_deref()} else {None})
+            .execute(&mut *tx).await.map_err(|_| "Bee room revision update failed")?;
         tx.commit().await.map_err(|_| "Bee commit failed")?;
         Ok(CommandOutcome::Applied)
+    }
+
+    pub async fn conversation_for_source(
+        &self,
+        source_conversation_id: Uuid,
+    ) -> Result<Option<Uuid>, &'static str> {
+        let conversation: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT conversation_id FROM bee_room_revision WHERE source_conversation_id=$1",
+        )
+        .bind(source_conversation_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| "Bee source binding lookup failed")?;
+        Ok(conversation.flatten())
     }
 
     pub async fn ingest(

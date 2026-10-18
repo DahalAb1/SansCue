@@ -1,11 +1,12 @@
 # Bee connection: canonical ingest and command worker
 
 Independent Rust executable/library, with a Bee-owned PostgreSQL database. It
-never reads sessions tables or shares business models. Its device-independent
-worker polls the authenticated sessions command outbox and applies binding
-commands via the Bee store. It also forwards newly accepted canonical events
-from the Bee-owned transactional outbox to Topics. See the [v1 contract](contracts/README.md). **REAL BEE DEVICE /
-LIVE API VERIFICATION** remains required; no actual-device acceptance is claimed.
+never reads sessions tables or shares business models. Its worker polls the
+authenticated sessions command outbox, applies binding commands through the Bee
+store, and forwards accepted canonical events from the Bee-owned transactional
+outbox to Topics. An opt-in adapter can also supervise an authenticated Bee CLI
+`new-utterance` stream on the same host. See the [v1 contract](contracts/README.md).
+Watch-to-CLI delivery is observed; full Watch-to-room acceptance remains open.
 
 ## Synthetic replay
 
@@ -52,10 +53,22 @@ publishing old status, so a stale head command cannot starve later work. It
 also polls Bee's event outbox and acknowledges an event only after Topics
 confirms receipt. Explicit invalid/conflicting event callbacks are marked
 terminal with their machine-readable rejection code; transient errors remain
-retryable, and one terminal row does not block later rows. The worker starts no
-Bee/device transport. Its candidate path requires an authoritative room binding
-made through Sessions; the local replay CLI's standalone binding is only a
-Bee-store harness.
+retryable, and one terminal row does not block later rows. Its candidate path
+requires an authoritative room binding made through Sessions; the local replay
+CLI's standalone binding is only a Bee-store harness.
+
+To enable live input on a trusted host, set `BEE_CLI_PATH` to the authenticated
+Bee CLI executable before starting `--worker`. When absent, the worker retains
+its device-independent behavior. The adapter always invokes the fixed command
+`stream --types new-utterance --json`; it does not accept shell arguments or
+handle Bee credentials. It reads bounded newline-delimited events, suppresses
+CLI diagnostic contents, and restarts an exited stream with capped backoff.
+
+Live events are accepted only when their external conversation UUID matches one
+active sessions-authoritative binding. The adapter allowlists transcript text,
+sample identity, utterance identity, source speech time, and start/end offsets;
+it discards unknown fields rather than retaining unrelated Bee account or
+location data. Numeric utterance IDs are not treated as contiguous sequence.
 
 ## Storage and gap semantics
 
@@ -77,7 +90,7 @@ reconnect or recovery behavior.
 
 ~~~sh
 cargo fmt --all -- --check
-cargo test -p bee-connection --lib --test contract --test pipeline
+cargo test -p bee-connection --lib --test contract --test pipeline --test live_adapter --test live_worker
 cargo test -p bee-connection --test persistence
 cargo test -p sessions-service --no-run
 ~~~

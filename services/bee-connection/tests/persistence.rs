@@ -65,6 +65,10 @@ async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine
             source_conversation_id: None,
             source_id: Some("synthetic-1".into()),
             source_sequence: Some(1),
+            source_utterance_id: None,
+            source_spoken_at: None,
+            source_start_millis: None,
+            source_end_millis: None,
         })),
     };
     let (first, second) = tokio::join!(
@@ -139,6 +143,10 @@ async fn persistence_restart_concurrent_deduplication_binding_and_raw_quarantine
                     source_conversation_id: None,
                     source_id: Some("synthetic-2".into()),
                     source_sequence: Some(2),
+                    source_utterance_id: None,
+                    source_spoken_at: None,
+                    source_start_millis: None,
+                    source_end_millis: None,
                 })),
             },
         )
@@ -162,14 +170,21 @@ async fn room_revision_fence_rejects_delayed_bind_after_unbind() {
     let conversation = Uuid::new_v4();
     let room = Uuid::new_v4();
     let session = Uuid::new_v4();
+    let source = Uuid::new_v4();
     let binding = Binding {
         conversation_id: conversation,
-        source_conversation_id: Some("synthetic-conversation".into()),
+        source_conversation_id: Some(source.to_string()),
         room_id: room,
         session_id: session,
     };
     store
-        .ensure_command_conversation(conversation)
+        .ensure_command_conversation(
+            conversation,
+            Capabilities {
+                stable_ids: true,
+                contiguous_sequence: false,
+            },
+        )
         .await
         .unwrap();
     let unbind = Uuid::new_v4();
@@ -194,6 +209,10 @@ async fn room_revision_fence_rejects_delayed_bind_after_unbind() {
     assert_eq!(next, CommandOutcome::Applied);
     assert!(store.load(conversation).await.unwrap().binding().is_some());
     assert_eq!(
+        store.conversation_for_source(source).await.unwrap(),
+        Some(conversation)
+    );
+    assert_eq!(
         store
             .apply_command(unbind, 2, "unbind", binding)
             .await
@@ -201,6 +220,15 @@ async fn room_revision_fence_rejects_delayed_bind_after_unbind() {
         CommandOutcome::Stale
     );
     assert!(store.load(conversation).await.unwrap().binding().is_some());
+    let current = store.load(conversation).await.unwrap().binding().unwrap().clone();
+    assert_eq!(
+        store
+            .apply_command(Uuid::new_v4(), 4, "unbind", current)
+            .await
+            .unwrap(),
+        CommandOutcome::Applied
+    );
+    assert_eq!(store.conversation_for_source(source).await.unwrap(), None);
     finish(store, admin, &schema).await;
 }
 
@@ -266,6 +294,10 @@ async fn terminal_topics_rejection_does_not_block_later_bee_outbox_row() {
                         source_conversation_id: None,
                         source_id: None,
                         source_sequence: None,
+                        source_utterance_id: None,
+                        source_spoken_at: None,
+                        source_start_millis: None,
+                        source_end_millis: None,
                     })),
                 },
             )

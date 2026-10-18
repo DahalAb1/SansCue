@@ -19,6 +19,10 @@ fn canonical_event_round_trips_without_invented_source_identity() {
         received_at: "2026-10-08T00:00:00Z".parse().unwrap(),
         source_id: None,
         source_sequence: None,
+        source_utterance_id: None,
+        source_spoken_at: None,
+        source_start_millis: None,
+        source_end_millis: None,
         text: "Example".into(),
     };
     let bytes = serde_json::to_vec(&event).unwrap();
