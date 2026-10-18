@@ -26,6 +26,15 @@ pub trait LiveStore: Clone + Send + Sync {
         &self,
         source_conversation_id: Uuid,
     ) -> Result<Option<Uuid>, &'static str>;
+    async fn conversation_for_numeric_source(
+        &self,
+        numeric_id: u64,
+    ) -> Result<Option<Uuid>, &'static str>;
+    async fn record_numeric_source_mapping(
+        &self,
+        numeric_id: u64,
+        source_conversation_id: Uuid,
+    ) -> Result<(), &'static str>;
     async fn ingest_live(
         &self,
         conversation_id: Uuid,
@@ -39,6 +48,21 @@ impl LiveStore for Store {
         source_conversation_id: Uuid,
     ) -> Result<Option<Uuid>, &'static str> {
         Store::conversation_for_source(self, source_conversation_id).await
+    }
+
+    async fn conversation_for_numeric_source(
+        &self,
+        numeric_id: u64,
+    ) -> Result<Option<Uuid>, &'static str> {
+        Store::conversation_for_numeric_source(self, numeric_id).await
+    }
+
+    async fn record_numeric_source_mapping(
+        &self,
+        numeric_id: u64,
+        source_conversation_id: Uuid,
+    ) -> Result<(), &'static str> {
+        Store::record_numeric_source_mapping(self, numeric_id, source_conversation_id).await
     }
 
     async fn ingest_live(
@@ -142,33 +166,71 @@ impl<S: LiveStore> LiveCliWorker<S> {
         if line.iter().all(u8::is_ascii_whitespace) {
             return Ok(LiveLineOutcome::Ignored);
         }
-        let event = match parse_new_utterance(line, received_at) {
-            Ok(event) => event,
-            Err(error) => return Ok(LiveLineOutcome::Rejected(error.code())),
-        };
-        let Some(conversation_id) = self
-            .store
-            .conversation_for_source(event.conversation_uuid)
-            .await?
-        else {
-            return Ok(LiveLineOutcome::Unbound);
-        };
-        let observation = event
-            .into_observation()
-            .map_err(|_| "Bee live event normalization failed")?;
-        match self.store.ingest_live(conversation_id, observation).await? {
-            Disposition::Accepted { .. } => Ok(LiveLineOutcome::Accepted),
-            Disposition::Duplicate { .. } => Ok(LiveLineOutcome::Duplicate),
-            Disposition::Quarantined { .. } => {
-                Ok(LiveLineOutcome::Rejected("live_event_quarantined"))
+        match parse_new_utterance(line, received_at) {
+            Ok(event) => {
+                let Some(conversation_id) = self
+                    .store
+                    .conversation_for_source(event.conversation_uuid)
+                    .await?
+                else {
+                    return Ok(LiveLineOutcome::Unbound);
+                };
+                let observation = event
+                    .into_observation()
+                    .map_err(|_| "Bee live event normalization failed")?;
+                match self.store.ingest_live(conversation_id, observation).await? {
+                    Disposition::Accepted { .. } => Ok(LiveLineOutcome::Accepted),
+                    Disposition::Duplicate { .. } => Ok(LiveLineOutcome::Duplicate),
+                    Disposition::Quarantined { .. } => {
+                        Ok(LiveLineOutcome::Rejected("live_event_quarantined"))
+                    }
+                    Disposition::Control => Ok(LiveLineOutcome::Ignored),
+                }
             }
-            Disposition::Control => Ok(LiveLineOutcome::Ignored),
+            Err(LiveEventError::UnsupportedEvent) => {
+                match crate::live::parse_lifecycle_event(line, received_at) {
+                    Ok(lifecycle) => {
+                        let conversation_id = match &lifecycle {
+                            crate::live::LiveLifecycleEvent::Created(c) => {
+                                let _ =
+                                    self.store.record_numeric_source_mapping(c.id, c.uuid).await;
+                                self.store.conversation_for_source(c.uuid).await?
+                            }
+                            crate::live::LiveLifecycleEvent::Updated(u) => {
+                                self.store.conversation_for_numeric_source(u.id).await?
+                            }
+                        };
+                        let Some(conversation_id) = conversation_id else {
+                            return Ok(LiveLineOutcome::Unbound);
+                        };
+                        let observation = lifecycle
+                            .into_observation()
+                            .map_err(|_| "Bee live event normalization failed")?;
+                        match self.store.ingest_live(conversation_id, observation).await? {
+                            Disposition::Accepted { .. } | Disposition::Control => {
+                                Ok(LiveLineOutcome::Accepted)
+                            }
+                            Disposition::Duplicate { .. } => Ok(LiveLineOutcome::Duplicate),
+                            Disposition::Quarantined { .. } => {
+                                Ok(LiveLineOutcome::Rejected("live_event_quarantined"))
+                            }
+                        }
+                    }
+                    Err(error) => Ok(LiveLineOutcome::Rejected(error.code())),
+                }
+            }
+            Err(error) => Ok(LiveLineOutcome::Rejected(error.code())),
         }
     }
 
     async fn run_once(&self) -> Result<LiveReadSummary, &'static str> {
         let mut child = Command::new(&self.executable)
-            .args(["stream", "--types", "new-utterance", "--json"])
+            .args([
+                "stream",
+                "--types",
+                "new-utterance,new-conversation,update-conversation",
+                "--json",
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

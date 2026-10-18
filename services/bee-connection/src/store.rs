@@ -206,6 +206,47 @@ impl Store {
         Ok(conversation.flatten())
     }
 
+    pub async fn record_numeric_source_mapping(
+        &self,
+        numeric_id: u64,
+        source_conversation_id: Uuid,
+    ) -> Result<(), &'static str> {
+        if numeric_id == 0 || numeric_id > i64::MAX as u64 || source_conversation_id.is_nil() {
+            return Err("invalid numeric mapping parameters");
+        }
+        sqlx::query(
+            "INSERT INTO bee_numeric_conversation_mapping (source_numeric_id, source_conversation_uuid) \
+             VALUES ($1, $2) \
+             ON CONFLICT (source_numeric_id) DO UPDATE SET source_conversation_uuid = EXCLUDED.source_conversation_uuid",
+        )
+        .bind(numeric_id as i64)
+        .bind(source_conversation_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| "Bee numeric mapping persistence failed")?;
+        Ok(())
+    }
+
+    pub async fn conversation_for_numeric_source(
+        &self,
+        numeric_id: u64,
+    ) -> Result<Option<Uuid>, &'static str> {
+        if numeric_id == 0 || numeric_id > i64::MAX as u64 {
+            return Ok(None);
+        }
+        let conversation: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT r.conversation_id \
+             FROM bee_numeric_conversation_mapping m \
+             JOIN bee_room_revision r ON lower(r.source_conversation_id) = lower(m.source_conversation_uuid::text) \
+             WHERE m.source_numeric_id = $1",
+        )
+        .bind(numeric_id as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| "Bee numeric source lookup failed")?;
+        Ok(conversation.flatten())
+    }
+
     pub async fn ingest(
         &self,
         id: Uuid,

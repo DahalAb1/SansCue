@@ -64,6 +64,10 @@ pub struct Pipeline {
     seen_sequences: BTreeSet<u64>,
     high_sequence: Option<u64>,
     active_disconnect: Option<usize>,
+    #[serde(default)]
+    external_id: Option<u64>,
+    #[serde(default)]
+    lifecycle_state: Option<String>,
 }
 
 impl Pipeline {
@@ -84,6 +88,8 @@ impl Pipeline {
             seen_sequences: BTreeSet::new(),
             high_sequence: None,
             active_disconnect: None,
+            external_id: None,
+            lifecycle_state: None,
         }
     }
 
@@ -124,6 +130,47 @@ impl Pipeline {
     pub fn events(&self) -> &[ConversationEvent] {
         &self.events
     }
+
+    /// Projects accepted conversation events into source speech timeline order.
+    ///
+    /// Reorders context by `spoken_at`, `start_millis`, and `end_millis`
+    /// while strictly preserving original ingest arrival order in `events()`.
+    /// Tolerates late arrival, overlapping speech segments, and duplicate suppression.
+    pub fn speech_projection(&self) -> Vec<&ConversationEvent> {
+        let mut ordered: Vec<&ConversationEvent> = self.events.iter().collect();
+        ordered.sort_by(|a, b| match (a.source_spoken_at, b.source_spoken_at) {
+            (Some(sa), Some(sb)) if sa != sb => sa.cmp(&sb),
+            _ => match (a.source_start_millis, b.source_start_millis) {
+                (Some(ma), Some(mb)) if ma != mb => ma.cmp(&mb),
+                _ => match (a.source_end_millis, b.source_end_millis) {
+                    (Some(ea), Some(eb)) if ea != eb => ea.cmp(&eb),
+                    _ => match (a.source_sequence, b.source_sequence) {
+                        (Some(qa), Some(qb)) if qa != qb => qa.cmp(&qb),
+                        _ => a.ingest_ordinal.cmp(&b.ingest_ordinal),
+                    },
+                },
+            },
+        });
+        ordered
+    }
+
+    pub fn speech_projection_text(&self) -> String {
+        self.speech_projection()
+            .into_iter()
+            .map(|e| e.text.trim())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    pub fn external_id(&self) -> Option<u64> {
+        self.external_id
+    }
+
+    pub fn lifecycle_state(&self) -> Option<&str> {
+        self.lifecycle_state.as_deref()
+    }
+
     pub fn observations(&self) -> &[StoredObservation] {
         &self.observations
     }
@@ -188,6 +235,13 @@ impl Pipeline {
                 self.recovery.last_attempt_ordinal = Some(ordinal);
                 self.recovery.last_completed_ordinal = Some(ordinal);
                 self.recovery.complete_through_sequence = *through_sequence;
+                Disposition::Control
+            }
+            Ok(Signal::Lifecycle { external_id, state }) => {
+                if let Some(id) = external_id {
+                    self.external_id = Some(*id);
+                }
+                self.lifecycle_state = Some(state.clone());
                 Disposition::Control
             }
         };
