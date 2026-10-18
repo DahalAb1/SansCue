@@ -74,3 +74,5 @@ form { max-width: 660px; }
 .access-list p { margin: 5px 0; }
 .access-list button { flex-shrink: 0; }
 @media (max-width: 640px) { .panel { padding: 20px; } .access-list li { display: block; } .access-list button { margin-top: 10px; } .room-tabs a { padding: 10px 12px; } }
+.transcript { max-height: 16rem; overflow-y: auto; padding-left: 1.5rem; }
+.transcript time { font-variant-numeric: tabular-nums; opacity: 0.7; }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import QRCode from 'qrcode';
-import { ApiError, api, deniesRoomRead, errorMessage, isUuid, parseRoomState, paths } from './api';
-import type { BeeState, State, Invitation, Membership, Page, LinkResult, QuestionCandidate } from './api';
+import { ApiError, api, deniesRoomRead, errorMessage, generatorLabel, isUuid, parseRoomState, parseTranscript, paths } from './api';
+import type { BeeState, State, Invitation, Membership, Page, LinkResult, QuestionCandidate, TranscriptLine } from './api';
 import { followLink, selectedSection, sharePath, tabLabel } from './navigation';
 import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft } from './pageMemory';
 import { parseRoomEvent, reconnectDelay } from './live';
@@ -34,6 +34,40 @@ export function ShareLink({ value, kind }: { value: string; kind: 'join' | 'invi
     <label>{label}<input readOnly value={url} onFocus={event => event.currentTarget.select()} /></label>
     <a href={safe} target="_blank" rel="noreferrer noopener">Open {kind === 'join' ? 'audience link' : 'TA invitation'}</a>
     <p>Copy this link now. It is kept only in this page’s memory.{kind === 'invite' && ' Share only with your intended TA; this invitation is single-use.'}</p>
+  </section>;
+}
+
+function TranscriptPanel({ roomId }: { roomId: string }) {
+  const [lines, setLines] = useState<TranscriptLine[] | null>(null);
+  const [error, setError] = useState('');
+  const box = useRef<HTMLOListElement>(null);
+  useEffect(() => {
+    let current = true;
+    const load = () => api.read<unknown>(paths.transcript(roomId))
+      .then(result => {
+        if (!current) return;
+        const parsed = parseTranscript(result);
+        if (parsed) { setLines(parsed); setError(''); }
+        else setError('The transcript response was not understood.');
+      })
+      .catch(reason => { if (current) setError(errorMessage(reason)); });
+    void load();
+    // Polling keeps the panel independent of the room event stream.
+    const timer = window.setInterval(() => void load(), 3000);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [roomId]);
+  useEffect(() => {
+    if (box.current) box.current.scrollTop = box.current.scrollHeight;
+  }, [lines?.length]);
+  return <section aria-labelledby="transcript-title">
+    <h3 id="transcript-title">Live transcript</h3>
+    <p>What Bee heard, newest last. Only the speaker and TAs see this.</p>
+    {error && <p role="status">{error}</p>}
+    {lines === null && !error && <p role="status">Loading the transcript…</p>}
+    {lines?.length === 0 && <p role="status">Nothing yet. Speech appears here a few seconds after Bee hears it.</p>}
+    {lines && lines.length > 0 && <ol class="transcript" ref={box} aria-live="polite">
+      {lines.map((line, index) => <li key={index}><time dateTime={line.spoken_at}>{new Date(line.spoken_at).toLocaleTimeString()}</time> {line.text}</li>)}
+    </ol>}
   </section>;
 }
 
@@ -87,10 +121,11 @@ function QuestionsPanel({ state, refresh, ended }: { state: State; refresh: () =
         <button disabled={busy || draft.trim() === state.active_question.text} onClick={() => void addVersion()}>Publish new version</button>
       </>}
     </> : <p>No question is published.</p>}
-    <h3>Evidence-backed candidates</h3>
-    <p><strong>Development preview — deterministic stub-v1, not AI-generated.</strong> Candidates are visible only to the speaker and TAs. Evidence is retained as an immutable copy when published.</p>
-    {candidates.length === 0 ? <p role="status">No development candidates yet.</p> : <ul class="access-list">{candidates.map(candidate => <li key={candidate.candidate_id}>
-      <div><strong>{candidate.text}</strong><p>Unpublished · {candidate.generator_version} · evidence ordinal {candidate.evidence.ingest_ordinal}</p><blockquote>{candidate.evidence.excerpt}</blockquote><small>Transcript event {candidate.event_id}</small></div>
+    <TranscriptPanel roomId={state.room.id} />
+    <h3>Question drafts</h3>
+    <p>Drafted from the live transcript. Only the speaker and TAs see drafts; the audience sees a question only after you publish it. The quoted evidence is kept with the published question.</p>
+    {candidates.length === 0 ? <p role="status">No drafts yet. They appear while you speak; pauses, small talk and the cooldown between questions can delay them.</p> : <ul class="access-list">{candidates.map(candidate => <li key={candidate.candidate_id}>
+      <div><strong>{candidate.text}</strong><p>Unpublished · {generatorLabel(candidate.generator_version)}</p><blockquote>{candidate.evidence.excerpt}</blockquote></div>
       {state.membership.role === 'speaker' && !ended && <button disabled={busy} onClick={() => void publish(candidate)}>Publish</button>}
     </li>)}</ul>}
   </>;

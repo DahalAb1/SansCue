@@ -11,7 +11,7 @@ const memory = await server.ssrLoadModule('/src/app/pageMemory.ts');
 const live = await server.ssrLoadModule('/src/app/live.ts');
 await server.close();
 
-const { SessionsApi, ApiError, errorMessage, paths, parseRoomState, preferState, deniesRoomRead } = apiModule;
+const { SessionsApi, ApiError, errorMessage, paths, parseRoomState, preferState, deniesRoomRead, parseTranscript, generatorLabel } = apiModule;
 const { parseRoute, tabsFor, selectedSection, sharePath } = navigation;
 const { keepJoin, memoryJoin, keepInvite, memoryInvite, keepDraft, memoryDraft, draftKey, keepPublishedQuestionDraft, memoryPublishedQuestionDraft, clearPublishedQuestionDraft } = memory;
 const { parseRoomEvent, reconnectDelay } = live;
@@ -379,4 +379,15 @@ test('client source does not persist secrets or log them', () => {
   const sources = files('src').filter(path => path.endsWith('.ts') || path.endsWith('.tsx'));
   assert.ok(sources.length >= 6);
   for (const path of sources) assert.doesNotMatch(readFileSync(path, 'utf8'), banned, path);
+});
+
+test('transcript lines and generator labels are parsed defensively', () => {
+  assert.equal(paths.transcript(roomId), '/rooms/' + roomId + '/transcript');
+  assert.deepEqual(parseTranscript({ lines: [{ text: 'Hello.', spoken_at: '2026-10-18T20:00:00Z' }] }), [{ text: 'Hello.', spoken_at: '2026-10-18T20:00:00Z' }]);
+  assert.equal(parseTranscript({ lines: [{ text: 7, spoken_at: 'x' }] }), null);
+  assert.equal(parseTranscript({}), null);
+  assert.equal(generatorLabel('topic-window-stub-v1'), 'Placeholder generator, not AI');
+  assert.equal(generatorLabel('us.anthropic.claude-haiku-4-5-20251001-v1:0/topic-check-v1'), 'Drafted by Claude Haiku 4.5');
+  assert.equal(generatorLabel('claude-opus-5-5/topic-check-v1'), 'Drafted by Claude Opus 5.5');
+  assert.match(errorMessage(new ApiError(503, 'transcript_unavailable')), /retries automatically/);
 });
