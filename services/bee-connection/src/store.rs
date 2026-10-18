@@ -206,6 +206,16 @@ impl Store {
         Ok(conversation.flatten())
     }
 
+    pub async fn active_conversations(&self) -> Result<Vec<Uuid>, &'static str> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT conversation_id FROM bee_room_revision \
+             WHERE conversation_id IS NOT NULL ORDER BY conversation_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| "Bee active conversation lookup failed")
+    }
+
     pub async fn record_numeric_source_mapping(
         &self,
         numeric_id: u64,

@@ -181,7 +181,7 @@ impl QuestionGenerator for TopicWindowGenerator {
                 });
             }
 
-            let lower = window.combined_text.to_lowercase();
+            let lower = anchor_text.to_lowercase();
             let is_filler = lower.split_whitespace().all(|w| {
                 matches!(
                     w.trim_matches(['.', ',', '!', '?', ';', ':', '-', '"', '\'']),
@@ -443,6 +443,17 @@ pub fn validate(e: &TranscriptEvent) -> Result<(), &'static str> {
         || e.source_id
             .as_ref()
             .is_some_and(|s| s.trim().is_empty() || s.len() > 512)
+        || e.source_utterance_id
+            .is_some_and(|value| value > i64::MAX as u64)
+        || e.source_start_millis
+            .is_some_and(|value| value > i64::MAX as u64)
+        || e.source_end_millis
+            .is_some_and(|value| value > i64::MAX as u64)
+        || matches!(
+            (e.source_start_millis, e.source_end_millis),
+            (Some(start), Some(end)) if end <= start
+        )
+        || e.source_start_millis.is_some() != e.source_end_millis.is_some()
     {
         Err("invalid event")
     } else {
@@ -469,6 +480,18 @@ fn candidate_from(
     output: GeneratedQuestion,
     window: Option<&TopicWindow>,
 ) -> Candidate {
+    let evidence_source = if e.text.contains(&output.evidence_excerpt) {
+        e
+    } else {
+        window
+            .and_then(|window| {
+                window
+                    .window_events
+                    .iter()
+                    .find(|event| event.text.contains(&output.evidence_excerpt))
+            })
+            .unwrap_or(e)
+    };
     let window_start_time = window
         .and_then(|w| w.start_time)
         .or(e.source_spoken_at)
@@ -485,13 +508,13 @@ fn candidate_from(
         text: output.text.trim().to_owned(),
         generator_version: output.generator_version,
         evidence: Evidence {
-            conversation_id: e.binding.conversation_id,
-            ingest_ordinal: e.ingest_ordinal,
-            received_at: e.received_at,
+            conversation_id: evidence_source.binding.conversation_id,
+            ingest_ordinal: evidence_source.ingest_ordinal,
+            received_at: evidence_source.received_at,
             excerpt: output.evidence_excerpt,
-            source_id: e.source_id.clone(),
-            source_start_millis: e.source_start_millis,
-            source_end_millis: e.source_end_millis,
+            source_id: evidence_source.source_id.clone(),
+            source_start_millis: evidence_source.source_start_millis,
+            source_end_millis: evidence_source.source_end_millis,
             window_start_time,
             window_end_time,
         },
@@ -506,8 +529,13 @@ fn valid_generated_question(
 ) -> bool {
     let question = output.text.trim();
     let evidence = output.evidence_excerpt.trim();
-    let text_grounded =
-        event.text.contains(evidence) || window.is_some_and(|w| w.combined_text.contains(evidence));
+    let text_grounded = event.text.contains(evidence)
+        || window.is_some_and(|window| {
+            window
+                .window_events
+                .iter()
+                .any(|source| source.text.contains(evidence))
+        });
     !question.is_empty()
         && question.len() <= 1000
         && question.ends_with('?')
@@ -690,7 +718,21 @@ impl Delivery {
                 continue;
             }
 
-            let window = self.load_topic_window(&event).await.ok();
+            let window = match self.load_topic_window(&event).await {
+                Ok(window) => Some(window),
+                Err(_) => {
+                    self.fail_generation(
+                        event.event_id,
+                        lease,
+                        GenerationFailure {
+                            code: "topic_window_unavailable",
+                            retryable: true,
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+            };
             let (heartbeat, stop_heartbeat) = self.start_lease_heartbeat(event.event_id, lease);
             let result = tokio::time::timeout(
                 self.generation_deadline,
@@ -1158,7 +1200,11 @@ mod delivery_tests {
 
 #[cfg(test)]
 mod question_output_tests {
-    use super::{Binding, GeneratedQuestion, TranscriptEvent, valid_generated_question};
+    use super::{
+        AbstentionReason, Binding, CadencePolicy, GeneratedQuestion, GenerationInput,
+        GenerationOutcome, QuestionGenerator, TopicWindow, TopicWindowGenerator, TranscriptEvent,
+        valid_generated_question,
+    };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
 
@@ -1199,5 +1245,63 @@ mod question_output_tests {
         output.evidence_excerpt = "We reduced outage time by adding a retry queue.".into();
         output.text = "This is not phrased as a question.".into();
         assert!(!valid_generated_question(&event, &output, None));
+    }
+
+    #[test]
+    fn evidence_cannot_cross_an_utterance_boundary() {
+        let mut first = event();
+        first.text = "first source ending".into();
+        let mut second = first.clone();
+        second.event_id = Uuid::from_u128(10);
+        second.ingest_ordinal = 5;
+        second.text = "second source beginning".into();
+        let window = TopicWindow {
+            room_id: first.binding.room_id,
+            conversation_id: first.binding.conversation_id,
+            anchor: second.clone(),
+            window_events: vec![first, second.clone()],
+            combined_text: "first source ending second source beginning".into(),
+            start_time: Some(second.received_at),
+            end_time: Some(second.received_at),
+            total_words: 6,
+        };
+        let output = GeneratedQuestion {
+            text: "What connects these sources?".into(),
+            evidence_excerpt: "ending second".into(),
+            generator_version: "test-v1".into(),
+        };
+        assert!(!valid_generated_question(&second, &output, Some(&window)));
+    }
+
+    #[tokio::test]
+    async fn filler_anchor_abstains_even_after_substantive_context() {
+        let substantive = event();
+        let mut filler = substantive.clone();
+        filler.event_id = Uuid::from_u128(10);
+        filler.ingest_ordinal = 5;
+        filler.text = "um yeah right".into();
+        let window = TopicWindow {
+            room_id: filler.binding.room_id,
+            conversation_id: filler.binding.conversation_id,
+            anchor: filler.clone(),
+            window_events: vec![substantive.clone(), filler.clone()],
+            combined_text: format!("{} {}", substantive.text, filler.text),
+            start_time: Some(substantive.received_at),
+            end_time: Some(filler.received_at),
+            total_words: 12,
+        };
+        let outcome = TopicWindowGenerator::new(CadencePolicy::default(), "test-v1")
+            .generate(GenerationInput {
+                event: filler,
+                window: Some(window),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            GenerationOutcome::Abstained {
+                reason: AbstentionReason::LowValueFiller
+            }
+        );
     }
 }

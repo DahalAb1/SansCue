@@ -40,6 +40,8 @@ services:
     depends_on:
       sessions-db:
         condition: service_healthy
+    ports:
+      - "127.0.0.1:3401:3001"
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://127.0.0.1:3000/readyz"]
       interval: 5s
@@ -58,11 +60,17 @@ services:
       SESSIONS_TOPICS_SERVICE_TOKEN: "${SESSIONS_TOPICS_SERVICE_TOKEN:?Set SESSIONS_TOPICS_SERVICE_TOKEN in deploy/.env}"
       HTTP_HOST: "0.0.0.0"
       HTTP_PORT: "3002"
+      TOPICS_MIN_QUESTION_INTERVAL_SECONDS: "20"
+      TOPICS_MIN_WINDOW_WORDS: "8"
+      TOPICS_MAX_WINDOW_SECONDS: "180"
+      TOPICS_SILENCE_BOUNDARY_SECONDS: "5"
     depends_on:
       topics-db:
         condition: service_healthy
       sessions:
         condition: service_healthy
+    ports:
+      - "127.0.0.1:3402:3002"
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "3", "http://127.0.0.1:3002/readyz"]
       interval: 5s
@@ -111,6 +119,8 @@ services:
       POSTGRES_PASSWORD: "${BEE_POSTGRES_PASSWORD:?Set BEE_POSTGRES_PASSWORD in deploy/.env}"
     volumes:
       - bee-db-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:55433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s

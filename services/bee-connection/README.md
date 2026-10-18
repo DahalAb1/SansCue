@@ -60,15 +60,21 @@ CLI's standalone binding is only a Bee-store harness.
 To enable live input on a trusted host, set `BEE_CLI_PATH` to the authenticated
 Bee CLI executable before starting `--worker`. When absent, the worker retains
 its device-independent behavior. The adapter always invokes the fixed command
-`stream --types new-utterance --json`; it does not accept shell arguments or
-handle Bee credentials. It reads bounded newline-delimited events, suppresses
-CLI diagnostic contents, and restarts an exited stream with capped backoff.
+`stream --types new-utterance,new-conversation,update-conversation --json`; it
+does not accept shell arguments or handle Bee credentials. It reads bounded
+newline-delimited events, suppresses CLI diagnostic contents, and restarts an
+exited stream with capped backoff. A restart records a suspected disconnect and
+reconnect for every active binding; reconnect alone never claims completeness.
 
 Live events are accepted only when their external conversation UUID matches one
-active sessions-authoritative binding. The adapter allowlists transcript text,
-sample identity, utterance identity, source speech time, and start/end offsets;
-it discards unknown fields rather than retaining unrelated Bee account or
-location data. Numeric utterance IDs are not treated as contiguous sequence.
+active sessions-authoritative binding. The adapter accepts both the richer Bee
+CLI 0.8.0 shape observed during the transport probe and the current documented
+structural JSON shape, which has no top-level event type. It allowlists
+transcript text and, only when supplied, sample identity, utterance identity,
+source speech time, and start/end offsets. It discards unknown fields rather
+than retaining unrelated Bee account or location data. Missing source identity
+stays missing; SansCue does not invent a deduplication key. Numeric utterance
+IDs are not treated as contiguous sequence.
 
 ## Storage and gap semantics
 
