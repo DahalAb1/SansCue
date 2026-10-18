@@ -121,35 +121,39 @@ impl<S: CommandStore> Consumer<S> {
                 continue;
             }
             let summary = if action == "bind" {
-                json!({"binding_id":binding.conversation_id,"status":"bound","has_gaps":false,"connectivity_revision":revision})
+                json!({"binding_id":binding.conversation_id,"status":"bound","has_gaps":false,"connectivity_revision":revision,"source_conversation_id":binding.source_conversation_id})
             } else {
                 json!({"binding_id":null,"status":"unbound","has_gaps":false,"connectivity_revision":revision})
             };
-            let status = self
-                .client
-                .post(format!(
-                    "{}/internal/v1/bee/rooms/{}/status",
-                    self.base, binding.room_id
-                ))
-                .bearer_auth(&self.token)
-                .json(&summary)
-                .send()
-                .await
-                .map_err(|_| "sessions status delivery failed")?;
-            if !status.status().is_success() {
-                let code = status.status().as_u16();
-                let body = status.json::<Value>().await.unwrap_or(Value::Null);
-                if is_superseded_status(code, &body) {
-                    self.acknowledge(id).await?;
-                    completed += 1;
-                    continue;
-                }
-                return Err("sessions status delivery rejected");
-            }
+            self.publish_status(binding.room_id, &summary).await?;
             self.acknowledge(id).await?;
             completed += 1;
         }
         Ok(completed)
+    }
+
+    /// Reports a room's Bee binding summary. A status superseded by a newer
+    /// binding revision is not an error: sessions already holds newer state.
+    pub async fn publish_status(&self, room_id: Uuid, summary: &Value) -> Result<(), &'static str> {
+        let status = self
+            .client
+            .post(format!(
+                "{}/internal/v1/bee/rooms/{}/status",
+                self.base, room_id
+            ))
+            .bearer_auth(&self.token)
+            .json(summary)
+            .send()
+            .await
+            .map_err(|_| "sessions status delivery failed")?;
+        if !status.status().is_success() {
+            let code = status.status().as_u16();
+            let body = status.json::<Value>().await.unwrap_or(Value::Null);
+            if !is_superseded_status(code, &body) {
+                return Err("sessions status delivery rejected");
+            }
+        }
+        Ok(())
     }
 
     async fn acknowledge(&self, command: Uuid) -> Result<(), &'static str> {

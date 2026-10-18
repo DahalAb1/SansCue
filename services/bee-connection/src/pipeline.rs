@@ -120,6 +120,20 @@ impl Pipeline {
         self.binding.as_ref()
     }
 
+    /// Attaches a live Bee conversation to a binding that was created while listening.
+    pub fn adopt_source(&mut self, source_conversation_id: String) -> Result<(), &'static str> {
+        let Some(binding) = self.binding.as_mut() else {
+            return Err("conversation unbound");
+        };
+        if binding.source_conversation_id.is_some() || source_conversation_id.trim().is_empty() {
+            return Err("conversation source already set");
+        }
+        binding.source_conversation_id = Some(source_conversation_id);
+        // Bee CLI utterances carry sample identities once a source is known.
+        self.capabilities.stable_ids = true;
+        Ok(())
+    }
+
     pub fn unbind(&mut self, conversation_id: Uuid) -> Result<(), &'static str> {
         if conversation_id != self.conversation_id {
             return Err("conversation mismatch");

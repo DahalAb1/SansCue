@@ -515,6 +515,10 @@ fn check_shape(path: &str, body: &Value) -> Result<()> {
         };
     }
     if path.ends_with("/bee/bind") {
+        // `{"listen": true}` waits for the next live Bee conversation instead of naming one.
+        if object.len() == 1 && body.get("listen") == Some(&Value::Bool(true)) {
+            return Ok(());
+        }
         let allowed = ["conversation_id", "source_conversation_id"];
         let supplied_internal = body.get("conversation_id").is_some_and(Value::is_string);
         let supplied_source = body
@@ -976,7 +980,8 @@ async fn bind_bee(
                 .ok_or_else(invalid)
         })
         .transpose()?;
-    if body.get("conversation_id").is_none() && source.is_none() {
+    let listen = body.get("listen") == Some(&Value::Bool(true));
+    if body.get("conversation_id").is_none() && source.is_none() && !listen {
         return Err(invalid());
     }
     if let Some(old) =
@@ -2071,6 +2076,16 @@ async fn bee_status(
             StatusCode::OK,
             json!({"accepted":true,"duplicate":true}),
         ));
+    }
+    if valid_bind
+        && let Some(source) = status["source_conversation_id"]
+            .as_str()
+            .and_then(|source| Uuid::parse_str(source).ok())
+            .filter(|source| !source.is_nil())
+    {
+        // A listening binding learns its Bee conversation when the worker adopts one.
+        sqlx::query("UPDATE bee_room_bindings SET source_conversation_id=$2,updated_at=now() WHERE room_id=$1 AND source_conversation_id IS NULL AND NOT EXISTS (SELECT 1 FROM bee_room_bindings other WHERE other.room_id<>$1 AND other.status<>'unbound' AND lower(other.source_conversation_id)=lower($2))")
+            .bind(room).bind(source.to_string()).execute(&mut *tx).await?;
     }
     sqlx::query("INSERT INTO bee_room_status(room_id,status) VALUES($1,$2) ON CONFLICT(room_id) DO UPDATE SET status=EXCLUDED.status,updated_at=now()").bind(room).bind(status).execute(&mut *tx).await?;
     change(&mut tx, room, false).await?;

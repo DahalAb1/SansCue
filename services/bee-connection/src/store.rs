@@ -24,6 +24,14 @@ pub enum CommandOutcome {
     Stale,
 }
 
+/// A listening room binding that just claimed a live Bee conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Adoption {
+    pub room_id: Uuid,
+    pub conversation_id: Uuid,
+    pub revision: i64,
+}
+
 impl Store {
     pub async fn connect(url: &str) -> Result<Self, &'static str> {
         let options = PgConnectOptions::from_str(url).map_err(|_| "invalid Bee database URL")?;
@@ -204,6 +212,64 @@ impl Store {
         .await
         .map_err(|_| "Bee source binding lookup failed")?;
         Ok(conversation.flatten())
+    }
+
+    /// Binds an unseen live source to the single listening room, if exactly one exists.
+    /// With zero or several listening rooms the source stays unbound; routing never guesses.
+    pub async fn adopt_listening_source(
+        &self,
+        source_conversation_id: Uuid,
+    ) -> Result<Option<Adoption>, &'static str> {
+        if source_conversation_id.is_nil() {
+            return Ok(None);
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| "Bee transaction start failed")?;
+        let listening = sqlx::query(
+            "SELECT room_id,revision,conversation_id FROM bee_room_revision \
+             WHERE conversation_id IS NOT NULL AND source_conversation_id IS NULL FOR UPDATE",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| "Bee listening binding lookup failed")?;
+        let [room] = listening.as_slice() else {
+            return Ok(None);
+        };
+        let adoption = Adoption {
+            room_id: room.get("room_id"),
+            conversation_id: room
+                .get::<Option<Uuid>, _>("conversation_id")
+                .ok_or("Bee listening binding invalid")?,
+            revision: room.get("revision"),
+        };
+        let state: Json<Pipeline> = sqlx::query_scalar(
+            "SELECT state FROM bee_conversations WHERE conversation_id=$1 FOR UPDATE",
+        )
+        .bind(adoption.conversation_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| "Bee conversation lock failed")?;
+        let mut pipeline = state.0;
+        pipeline.adopt_source(source_conversation_id.to_string())?;
+        sqlx::query("UPDATE bee_conversations SET state=$2 WHERE conversation_id=$1")
+            .bind(adoption.conversation_id)
+            .bind(Json(pipeline))
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| "Bee state write failed")?;
+        sqlx::query(
+            "UPDATE bee_room_revision SET source_conversation_id=$2,updated_at=now() WHERE room_id=$1",
+        )
+        .bind(adoption.room_id)
+        .bind(source_conversation_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Bee source adoption failed")?;
+        tx.commit().await.map_err(|_| "Bee commit failed")?;
+        Ok(Some(adoption))
     }
 
     pub async fn active_conversations(&self) -> Result<Vec<Uuid>, &'static str> {

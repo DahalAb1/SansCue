@@ -36,10 +36,12 @@ async fn run() -> Result<(), &'static str> {
             &topics_token,
             store.clone(),
         )?;
+        let status_reporter = consumer.clone();
         let live = async {
             match bee_connection::live_worker::configured_cli_path() {
                 Some(path) => {
                     bee_connection::live_worker::LiveCliWorker::new(path, store.clone())?
+                        .with_status_reporter(status_reporter.clone())
                         .run()
                         .await
                 }
