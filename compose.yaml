@@ -64,6 +64,9 @@ services:
       TOPICS_MIN_WINDOW_WORDS: "8"
       TOPICS_MAX_WINDOW_SECONDS: "180"
       TOPICS_SILENCE_BOUNDARY_SECONDS: "5"
+      # Optional: enables Claude question generation; blank keeps the placeholder.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      TOPICS_MODEL: "${TOPICS_MODEL:-}"
     depends_on:
       topics-db:
         condition: service_healthy

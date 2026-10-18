@@ -13,6 +13,8 @@ use sqlx::{PgPool, Row};
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use uuid::Uuid;
 
+pub mod claude;
+
 const DEFAULT_GENERATION_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -79,6 +81,8 @@ pub enum AbstentionReason {
     AlreadyAnswered,
     LowValueFiller,
     WeaklyGrounded,
+    ModelAbstained,
+    StaleTranscript,
 }
 
 impl AbstentionReason {
@@ -91,6 +95,8 @@ impl AbstentionReason {
             Self::AlreadyAnswered => "already_answered",
             Self::LowValueFiller => "low_value_filler",
             Self::WeaklyGrounded => "weakly_grounded",
+            Self::ModelAbstained => "model_abstained",
+            Self::StaleTranscript => "stale_transcript",
         }
     }
 }
