@@ -66,8 +66,8 @@ test('frontend routes accept opaque path-segment tokens and role sections', () =
   assert.equal(parseRoute('/join/').kind, 'missing');
   assert.equal(parseRoute('/join/%2e%2e').kind, 'missing');
   assert.deepEqual(tabsFor('audience'), ['response', 'qa']);
-  assert.deepEqual(tabsFor('ta'), ['dashboard', 'questions', 'qa']);
-  assert.deepEqual(tabsFor('speaker'), ['dashboard', 'questions', 'qa', 'access']);
+  assert.deepEqual(tabsFor('ta'), ['dashboard', 'questions', 'transcript', 'qa']);
+  assert.deepEqual(tabsFor('speaker'), ['dashboard', 'questions', 'transcript', 'qa', 'access']);
   assert.equal(selectedSection('audience', 'access').selected, 'response');
   assert.equal(selectedSection('audience', 'access').redirected, true);
   assert.equal(selectedSection('ta', 'access').selected, 'dashboard');

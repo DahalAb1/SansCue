@@ -59,8 +59,7 @@ function TranscriptPanel({ roomId }: { roomId: string }) {
   useEffect(() => {
     if (box.current) box.current.scrollTop = box.current.scrollHeight;
   }, [lines?.length]);
-  return <section aria-labelledby="transcript-title">
-    <h3 id="transcript-title">Live transcript</h3>
+  return <section aria-label="Live transcript">
     <p>What Bee heard, newest last. Only the speaker and TAs see this.</p>
     {error && <p role="status">{error}</p>}
     {lines === null && !error && <p role="status">Loading the transcript…</p>}
@@ -121,7 +120,6 @@ function QuestionsPanel({ state, refresh, ended }: { state: State; refresh: () =
         <button disabled={busy || draft.trim() === state.active_question.text} onClick={() => void addVersion()}>Publish new version</button>
       </>}
     </> : <p>No question is published.</p>}
-    <TranscriptPanel roomId={state.room.id} />
     <h3>Question drafts</h3>
     <p>Drafted from the live transcript. Only the speaker and TAs see drafts; the audience sees a question only after you publish it. The quoted evidence is kept with the published question.</p>
     {candidates.length === 0 ? <p role="status">No drafts yet. They appear while you speak; pauses, small talk and the cooldown between questions can delay them.</p> : <ul class="access-list">{candidates.map(candidate => <li key={candidate.candidate_id}>
@@ -589,6 +587,7 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
             : selected === 'response' ? <FeedbackPanel state={state} ended={ended} refresh={refresh} />
             : selected === 'dashboard' ? <DashboardPanel state={state} />
             : selected === 'questions' && state.membership.role !== 'audience' ? <QuestionsPanel state={state} refresh={refresh} ended={ended} />
+            : selected === 'transcript' && state.membership.role !== 'audience' ? <TranscriptPanel roomId={state.room.id} />
             : <p>{selected === 'questions' ? 'Candidate preview is not available to audience members.' : 'No active question is available.'}</p>}
         </>}
     </div>
