@@ -1,4 +1,10 @@
 export type Role = 'speaker' | 'ta' | 'audience';
+export type BeeState = {
+  binding_id: string | null;
+  status: 'unbound' | 'binding' | 'bound' | 'unbinding';
+  has_gaps: boolean;
+  connectivity_revision: number;
+};
 export type State = {
   room: { id: string; title: string; status: 'open' | 'ended' };
   membership: { id: string; role: Role };
@@ -9,6 +15,7 @@ export type State = {
   dashboard?: { respondents: number; counts: { clear: number; partly_clear: number; need_help: number }; percentages: { clear: number | null; partly_clear: number | null; need_help: number | null } } | null;
   join_link_enabled?: boolean;
   question_candidates?: QuestionCandidate[] | null;
+  bee?: BeeState | null;
 };
 export type QuestionCandidate = { candidate_id:string; event_id:string; text:string; generator_version:string; evidence:{conversation_id:string;ingest_ordinal:number;received_at:string;excerpt:string}; created_at:string; published:false };
 export type Page<T> = { items: T[]; next_cursor: string | null };
@@ -31,6 +38,12 @@ export type LinkResult = { join_url?: string | null; invite_url?: string | null;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+export function isUuid(value: unknown): value is string {
+  return typeof value === 'string'
+    && UUID.test(value)
+    && value.toLowerCase() !== '00000000-0000-0000-0000-000000000000';
+}
+
 export function segment(value: string): string {
   return encodeURIComponent(value);
 }
@@ -50,6 +63,8 @@ export const paths = {
   rotateJoin: (id: string) => '/rooms/' + segment(id) + '/join-link/rotate',
   revokeJoin: (id: string) => '/rooms/' + segment(id) + '/join-link/revoke',
   end: (id: string) => '/rooms/' + segment(id) + '/end',
+  bindBee: (id: string) => '/rooms/' + segment(id) + '/bee/bind',
+  unbindBee: (id: string) => '/rooms/' + segment(id) + '/bee/unbind',
   qa: (id: string) => '/rooms/' + segment(id) + '/qa',
   publishQuestion: (id: string, candidateId: string) => '/rooms/' + segment(id) + '/questions/' + segment(candidateId) + '/publish',
   questionVersion: (id: string, questionId: string) => '/rooms/' + segment(id) + '/questions/' + segment(questionId) + '/versions',
@@ -75,6 +90,8 @@ export function errorMessage(error: unknown): string {
   if (error.code === 'invite_used') return 'This invitation has already been used or cannot change your current role. Ask the speaker for access.';
   if (error.code === 'request_in_progress') return 'This request is still in progress. Retry to recover its result.';
   if (error.code === 'idempotency_conflict') return 'That retry did not match the original request. Submit it again as a new action.';
+  if (error.code === 'bee_already_bound') return 'Unbind the current Bee conversation before binding another one.';
+  if (error.code === 'bee_source_already_bound') return 'That Bee conversation is already bound to another room.';
   if (error.status === 403) return 'Access denied. Your access or security session may have changed. Reconnect or contact the speaker.';
   if (error.status === 429) return 'Too many attempts. Wait before trying again.';
   if (error.status === 409) return 'The room or request has changed. Refresh its state before continuing.';
@@ -110,6 +127,14 @@ export function parseRoomState(value: unknown, expectedId?: string): State | nul
   if (state.question_candidates !== undefined && state.membership.role === 'audience' && state.question_candidates !== null) return null;
   if (state.question_candidates !== undefined && state.membership.role !== 'audience' && state.question_candidates === null) return null;
   if (state.question_candidates !== undefined && state.question_candidates !== null && (!Array.isArray(state.question_candidates) || state.question_candidates.some(c => !c || typeof c !== 'object' || typeof c.candidate_id !== 'string' || !UUID.test(c.candidate_id) || typeof c.event_id !== 'string' || !UUID.test(c.event_id) || typeof c.text !== 'string' || c.text.trim() === '' || typeof c.generator_version !== 'string' || c.generator_version.trim() === '' || c.generator_version.length > 128 || /[\u0000-\u001f\u007f]/.test(c.generator_version) || c.published !== false || typeof c.created_at !== 'string' || Number.isNaN(Date.parse(c.created_at)) || !c.evidence || typeof c.evidence !== 'object' || typeof c.evidence.conversation_id !== 'string' || !UUID.test(c.evidence.conversation_id) || !Number.isSafeInteger(c.evidence.ingest_ordinal) || c.evidence.ingest_ordinal < 1 || typeof c.evidence.received_at !== 'string' || Number.isNaN(Date.parse(c.evidence.received_at)) || typeof c.evidence.excerpt !== 'string' || c.evidence.excerpt.trim() === ''))) return null;
+  if (state.membership.role === 'audience' && state.bee !== undefined && state.bee !== null) return null;
+  if (state.membership.role !== 'audience') {
+    if (!state.bee || typeof state.bee !== 'object') return null;
+    if (state.bee.binding_id !== null && !isUuid(state.bee.binding_id)) return null;
+    if (!['unbound', 'binding', 'bound', 'unbinding'].includes(state.bee.status)) return null;
+    if (typeof state.bee.has_gaps !== 'boolean') return null;
+    if (!Number.isSafeInteger(state.bee.connectivity_revision) || state.bee.connectivity_revision < 0) return null;
+  }
   return state;
 }
 

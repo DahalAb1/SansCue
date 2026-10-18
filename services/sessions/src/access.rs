@@ -516,9 +516,15 @@ fn check_shape(path: &str, body: &Value) -> Result<()> {
     }
     if path.ends_with("/bee/bind") {
         let allowed = ["conversation_id", "source_conversation_id"];
-        if !object.contains_key("conversation_id")
-            || object.keys().any(|k| !allowed.contains(&k.as_str()))
-            || !body["conversation_id"].is_string()
+        let supplied_internal = body.get("conversation_id").is_some_and(Value::is_string);
+        let supplied_source = body
+            .get("source_conversation_id")
+            .is_some_and(Value::is_string);
+        if object.keys().any(|k| !allowed.contains(&k.as_str()))
+            || (!supplied_internal && !supplied_source)
+            || body
+                .get("conversation_id")
+                .is_some_and(|value| !value.is_string())
             || body
                 .get("source_conversation_id")
                 .is_some_and(|v| !v.is_null() && !v.is_string())
@@ -951,16 +957,26 @@ async fn bind_bee(
     room_id: Uuid,
     body: &Value,
 ) -> Result<Value> {
-    let conversation = Uuid::parse_str(body["conversation_id"].as_str().ok_or_else(invalid)?)
-        .map_err(|_| invalid())?;
+    let conversation = match body.get("conversation_id").and_then(Value::as_str) {
+        Some(value) => Uuid::parse_str(value).map_err(|_| invalid())?,
+        None => Uuid::new_v4(),
+    };
     if conversation.is_nil() {
         return Err(invalid());
     }
     let source = body["source_conversation_id"]
         .as_str()
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-    if source.is_some_and(|s| s.len() > 256) {
+        .filter(|s| !s.is_empty())
+        .map(|source| {
+            Uuid::parse_str(source)
+                .ok()
+                .filter(|id| !id.is_nil())
+                .map(|id| id.to_string())
+                .ok_or_else(invalid)
+        })
+        .transpose()?;
+    if body.get("conversation_id").is_none() && source.is_none() {
         return Err(invalid());
     }
     if let Some(old) =
@@ -975,6 +991,19 @@ async fn bind_bee(
             "Unbind the current conversation before changing it",
         ));
     }
+    if let Some(source) = source.as_deref()
+        && sqlx::query_scalar::<_, Uuid>("SELECT room_id FROM bee_room_bindings WHERE lower(source_conversation_id)=lower($1) AND status<>'unbound' AND room_id<>$2")
+            .bind(source)
+            .bind(room_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_some()
+    {
+        return Err(conflict(
+            "bee_source_already_bound",
+            "Bee conversation is already bound to another room",
+        ));
+    }
     let rev: i64 = sqlx::query_scalar("SELECT sequence+1 FROM rooms WHERE id=$1")
         .bind(room_id)
         .fetch_one(&mut **tx)
@@ -982,12 +1011,12 @@ async fn bind_bee(
     let command_id = Uuid::new_v4();
     let speaker_session: Uuid = sqlx::query_scalar("SELECT session_id FROM memberships WHERE room_id=$1 AND role='speaker' AND status='active'")
         .bind(room_id).fetch_one(&mut **tx).await?;
-    let payload = json!({"conversation_id":conversation,"source_conversation_id":source,"room_id":room_id,"session_id":speaker_session,"revision":rev});
+    let payload = json!({"conversation_id":conversation,"source_conversation_id":source.clone(),"room_id":room_id,"session_id":speaker_session,"revision":rev});
     sqlx::query("INSERT INTO bee_room_bindings(room_id,conversation_id,source_conversation_id,status,revision,session_id) VALUES($1,$2,$3,'binding',$4,$5) ON CONFLICT(room_id) DO UPDATE SET conversation_id=EXCLUDED.conversation_id,source_conversation_id=EXCLUDED.source_conversation_id,status='binding',revision=EXCLUDED.revision,session_id=EXCLUDED.session_id,updated_at=now()")
-        .bind(room_id).bind(conversation).bind(source).bind(rev).bind(speaker_session).execute(&mut **tx).await?;
+        .bind(room_id).bind(conversation).bind(source.as_deref()).bind(rev).bind(speaker_session).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO bee_command_outbox(command_id,room_id,conversation_id,command_type,revision,payload) VALUES($1,$2,$3,'bind',$4,$5)").bind(command_id).bind(room_id).bind(conversation).bind(rev).bind(payload).execute(&mut **tx).await?;
     change(tx, room_id, false).await?;
-    Ok(json!({"status":"binding","command_id":command_id,"revision":rev}))
+    Ok(json!({"status":"binding","command_id":command_id,"conversation_id":conversation,"revision":rev}))
 }
 
 async fn active_question(
@@ -1965,7 +1994,10 @@ async fn bee_status(
 ) -> Result<Response> {
     require_bee(&headers, &access)?;
     let room = Uuid::parse_str(&room).map_err(|_| missing())?;
-    if !status.is_object() || status.as_object().is_some_and(|o| o.len() > 16) {
+    if !status.is_object()
+        || status.as_object().is_some_and(|o| o.len() > 16)
+        || status["has_gaps"].as_bool().is_none()
+    {
         return Err(invalid());
     }
     let conversation = Uuid::parse_str(status["binding_id"].as_str().unwrap_or("")).ok();

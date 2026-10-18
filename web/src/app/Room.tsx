@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import QRCode from 'qrcode';
-import { ApiError, api, deniesRoomRead, errorMessage, parseRoomState, paths } from './api';
+import { ApiError, api, deniesRoomRead, errorMessage, isUuid, parseRoomState, paths } from './api';
 import type { State, Invitation, Membership, Page, LinkResult, QuestionCandidate } from './api';
 import { followLink, selectedSection, sharePath, tabLabel } from './navigation';
 import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft } from './pageMemory';
@@ -189,6 +189,7 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
   const [members, setMembers] = useState<Page<Membership>>();
   const [joinLink, setJoinLink] = useState<string | null>(memoryJoin(roomId));
   const [issued, setIssued] = useState<IssuedInvite | undefined>(memoryInvite(roomId));
+  const [beeConversation, setBeeConversation] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -254,6 +255,34 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
     {listError && <p role="alert" class="error">{listError}</p>}
     {notice && <p role="status">{notice}</p>}
     <button type="button" disabled={busy} onClick={() => void run(load)}>Refresh access lists</button>
+    <h3>Bee live transcript</h3>
+    {!state.bee ? <p role="status">Bee binding status is unavailable.</p> : <>
+      <p>Status: <strong>{state.bee.status}</strong>{state.bee.has_gaps ? ' · transcript gaps detected' : ''}</p>
+      {state.bee.status === 'unbound' ? <>
+        <label>Bee conversation UUID
+          <input
+            autoComplete="off"
+            placeholder="00000000-0000-0000-0000-000000000000"
+            value={beeConversation}
+            onInput={event => setBeeConversation(event.currentTarget.value)}
+          />
+        </label>
+        <p>Copy the <code>conversation_uuid</code> from the active Bee CLI stream. SansCue uses it to route live utterances to this room.</p>
+        <button type="button" disabled={busy || ended || !isUuid(beeConversation.trim())} onClick={() => void run(async () => {
+          await api.mutate(paths.bindBee(roomId), { source_conversation_id: beeConversation.trim() });
+          setBeeConversation('');
+          await refresh();
+          setNotice('Bee conversation binding requested.');
+        })}>Bind Bee conversation</button>
+      </> : <button type="button" disabled={busy || state.bee.status === 'unbinding'} onClick={() => {
+        if (!window.confirm('Stop routing this Bee conversation to the room?')) return;
+        void run(async () => {
+          await api.mutate(paths.unbindBee(roomId));
+          await refresh();
+          setNotice('Bee conversation unbinding requested.');
+        });
+      }}>Unbind Bee conversation</button>}
+    </>}
     <h3>Audience link</h3>
     <p>{joinStatus(state)} Existing members keep their access.</p>
     {!ended && joinLink && state.join_link_enabled === true && <ShareLink value={joinLink} kind="join" />}
