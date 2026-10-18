@@ -66,7 +66,10 @@ def service_environments(base, credential, bee_token, topics_token, epoch, key):
                         "TOPICS_DATABASE_URL": base["TOPICS_DATABASE_URL"],
                         "TOPICS_BEE_SERVICE_TOKEN": topics_token,
                         "SESSIONS_INTERNAL_URL": INTERNAL,
-                        "SESSIONS_TOPICS_SERVICE_TOKEN": topics_token}
+                        "SESSIONS_TOPICS_SERVICE_TOKEN": topics_token,
+                        # The fixture's passages are two or three words long.
+                        "TOPICS_MIN_WINDOW_WORDS": "1"}
+    topics_env.pop("ANTHROPIC_API_KEY", None)
     worker_env = base | {"BEE_DATABASE_URL": base["BEE_DATABASE_URL"],
                          "SESSIONS_INTERNAL_URL": INTERNAL,
                          "SESSIONS_BEE_SERVICE_TOKEN": bee_token,
@@ -248,10 +251,11 @@ def main():
         def candidate_state():
             state = request(speaker, "GET", f"/rooms/{room}/state")
             candidates = state.get("question_candidates") or []
-            return (state, candidates[0]) if len(candidates) == 3 else None
+            # Cadence limits may suppress later passages; at least one must arrive.
+            return (state, candidates[0]) if candidates else None
 
         speaker_state, candidate = wait_until(candidate_state, "candidate delivery")
-        assert candidate["generator_version"] == "stub-v1"
+        assert candidate["generator_version"] == "topic-window-stub-v1"
         assert candidate["published"] is False
         assert candidate["evidence"]["excerpt"] in candidate["text"]
         candidate = speaker_state["question_candidates"][0]
