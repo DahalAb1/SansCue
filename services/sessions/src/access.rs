@@ -1016,7 +1016,9 @@ async fn bind_bee(
         .bind(room_id).bind(conversation).bind(source.as_deref()).bind(rev).bind(speaker_session).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO bee_command_outbox(command_id,room_id,conversation_id,command_type,revision,payload) VALUES($1,$2,$3,'bind',$4,$5)").bind(command_id).bind(room_id).bind(conversation).bind(rev).bind(payload).execute(&mut **tx).await?;
     change(tx, room_id, false).await?;
-    Ok(json!({"status":"binding","command_id":command_id,"conversation_id":conversation,"revision":rev}))
+    Ok(
+        json!({"status":"binding","command_id":command_id,"conversation_id":conversation,"revision":rev}),
+    )
 }
 
 async fn active_question(

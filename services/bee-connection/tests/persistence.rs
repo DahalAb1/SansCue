@@ -220,7 +220,13 @@ async fn room_revision_fence_rejects_delayed_bind_after_unbind() {
         CommandOutcome::Stale
     );
     assert!(store.load(conversation).await.unwrap().binding().is_some());
-    let current = store.load(conversation).await.unwrap().binding().unwrap().clone();
+    let current = store
+        .load(conversation)
+        .await
+        .unwrap()
+        .binding()
+        .unwrap()
+        .clone();
     assert_eq!(
         store
             .apply_command(Uuid::new_v4(), 4, "unbind", current)
