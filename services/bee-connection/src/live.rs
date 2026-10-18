@@ -143,6 +143,15 @@ pub fn parse_new_utterance(
     if bytes.is_empty() || bytes.len() > MAX_LIVE_EVENT_BYTES {
         return Err(LiveEventError::EventTooLarge);
     }
+    let envelope: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| LiveEventError::InvalidJson)?;
+    if envelope
+        .get("type")
+        .and_then(|value| value.as_str())
+        .is_some_and(|kind| kind != "new-utterance")
+    {
+        return Err(LiveEventError::UnsupportedEvent);
+    }
     let event: BeeCliEvent =
         serde_json::from_slice(bytes).map_err(|_| LiveEventError::InvalidJson)?;
     if event
@@ -289,6 +298,7 @@ struct BeeCliLifecycleEvent {
 #[derive(Deserialize)]
 struct BeeCliConversationPayload {
     id: Option<u64>,
+    #[serde(alias = "conversation_uuid")]
     uuid: Option<String>,
     state: Option<String>,
 }

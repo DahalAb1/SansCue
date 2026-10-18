@@ -1,7 +1,7 @@
 use bee_connection::{
     domain::{Observation, Signal},
     live::MAX_LIVE_EVENT_BYTES,
-    live_worker::{LiveCliWorker, LiveReadSummary, LiveStore},
+    live_worker::{LiveCliWorker, LiveLineOutcome, LiveReadSummary, LiveStore},
     pipeline::Disposition,
 };
 use serde_json::{Value, json};
@@ -181,4 +181,60 @@ async fn transport_restart_records_gap_signals_for_active_conversations() {
     let observations = store.observations.lock().unwrap();
     assert!(matches!(observations[0].decoded, Ok(Signal::Disconnected)));
     assert!(matches!(observations[1].decoded, Ok(Signal::Reconnected)));
+}
+
+#[tokio::test]
+async fn ignores_timestamps_and_routes_typed_and_structural_lifecycle_events() {
+    let source = Uuid::new_v4();
+    let store = MockStore::new(source, Uuid::new_v4());
+    let worker = LiveCliWorker::new("bee", store.clone()).unwrap();
+
+    assert_eq!(
+        worker
+            .ingest_line(br#"{"timestamp":1770000000000}"#, chrono::Utc::now())
+            .await
+            .unwrap(),
+        LiveLineOutcome::Ignored
+    );
+
+    let created = json!({
+        "type": "new-conversation",
+        "conversation": {
+            "id": 51838,
+            "conversation_uuid": source,
+            "state": "processing"
+        }
+    });
+    assert_eq!(
+        worker
+            .ingest_line(&serde_json::to_vec(&created).unwrap(), chrono::Utc::now())
+            .await
+            .unwrap(),
+        LiveLineOutcome::Accepted
+    );
+
+    let updated = json!({
+        "conversation": {
+            "id": 51838,
+            "state": "processed"
+        }
+    });
+    assert_eq!(
+        worker
+            .ingest_line(&serde_json::to_vec(&updated).unwrap(), chrono::Utc::now())
+            .await
+            .unwrap(),
+        LiveLineOutcome::Accepted
+    );
+
+    let observations = store.observations.lock().unwrap();
+    assert_eq!(observations.len(), 2);
+    assert!(matches!(
+        observations[0].decoded,
+        Ok(Signal::Lifecycle { .. })
+    ));
+    assert!(matches!(
+        observations[1].decoded,
+        Ok(Signal::Lifecycle { .. })
+    ));
 }
