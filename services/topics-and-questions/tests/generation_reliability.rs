@@ -107,7 +107,8 @@ impl QuestionGenerator for FailOnce {
                 text: format!("Question about {}?", input.event.text),
                 evidence_excerpt,
                 generator_version: "fake-v1".into(),
-            })
+            }
+            .into())
         })
     }
 }
@@ -120,7 +121,8 @@ impl QuestionGenerator for InvalidOutput {
                 text: String::new(),
                 evidence_excerpt: String::new(),
                 generator_version: "invalid-v1".into(),
-            })
+            }
+            .into())
         })
     }
 }
@@ -309,7 +311,8 @@ impl QuestionGenerator for SlowOnce {
                 text: format!("Question about {}?", input.event.text),
                 evidence_excerpt,
                 generator_version: "slow-fake-v1".into(),
-            })
+            }
+            .into())
         })
     }
 }
@@ -337,6 +340,11 @@ async fn slow_generation_does_not_block_ingress_and_stale_lease_is_fenced() {
         ingest_ordinal: existing.ingest_ordinal,
         received_at: existing.received_at,
         excerpt: existing.text.clone(),
+        source_id: None,
+        source_start_millis: None,
+        source_end_millis: None,
+        window_start_time: None,
+        window_end_time: None,
     };
     sqlx::query("INSERT INTO question_candidates(candidate_id,event_id,room_id,session_id,text,generator_version,evidence) VALUES($1,$1,$2,$3,'Existing candidate?','stub-v1',$4)")
         .bind(existing.event_id).bind(existing.binding.room_id).bind(existing.binding.session_id).bind(sqlx::types::Json(&evidence)).execute(&pool).await.unwrap();
