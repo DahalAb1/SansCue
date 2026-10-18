@@ -4,6 +4,8 @@ export type BeeState = {
   status: 'unbound' | 'binding' | 'bound' | 'unbinding';
   has_gaps: boolean;
   connectivity_revision: number;
+  /** The Bee conversation feeding this room; null while a listening room waits for one. */
+  source_conversation_id?: string | null;
 };
 export type State = {
   room: { id: string; title: string; status: 'open' | 'ended' };
