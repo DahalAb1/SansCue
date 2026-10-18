@@ -34,6 +34,9 @@ impl MockStore {
 }
 
 impl LiveStore for MockStore {
+    async fn active_conversations(&self) -> Result<Vec<Uuid>, &'static str> {
+        Ok(vec![self.conversation])
+    }
     async fn conversation_for_source(
         &self,
         source_conversation_id: Uuid,
@@ -76,7 +79,7 @@ impl LiveStore for MockStore {
                 .source_id
                 .clone()
                 .ok_or("mock source identity missing")?,
-            Ok(Signal::Lifecycle { .. }) => {
+            Ok(Signal::Lifecycle { .. } | Signal::Disconnected | Signal::Reconnected) => {
                 self.observations.lock().unwrap().push(observation);
                 return Ok(Disposition::Control);
             }
@@ -159,4 +162,23 @@ async fn consumes_bounded_lines_and_routes_only_the_bound_conversation() {
 fn rejects_an_empty_cli_path() {
     let store = MockStore::new(Uuid::new_v4(), Uuid::new_v4());
     assert!(LiveCliWorker::new("", store).is_err());
+}
+
+#[tokio::test]
+async fn transport_restart_records_gap_signals_for_active_conversations() {
+    let store = MockStore::new(Uuid::new_v4(), Uuid::new_v4());
+    let worker = LiveCliWorker::new("bee", store.clone()).unwrap();
+
+    worker
+        .record_transport_signal(Signal::Disconnected)
+        .await
+        .unwrap();
+    worker
+        .record_transport_signal(Signal::Reconnected)
+        .await
+        .unwrap();
+
+    let observations = store.observations.lock().unwrap();
+    assert!(matches!(observations[0].decoded, Ok(Signal::Disconnected)));
+    assert!(matches!(observations[1].decoded, Ok(Signal::Reconnected)));
 }

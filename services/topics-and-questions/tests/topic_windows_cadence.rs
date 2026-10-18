@@ -515,6 +515,14 @@ async fn representative_session_produces_timely_grounded_candidates() {
         3,
         "Representative session must yield a small, timely set of candidates"
     );
+    let candidate_events = candidates
+        .iter()
+        .map(|candidate| candidate.get::<Uuid, _>("event_id"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candidate_events,
+        vec![events[0].event_id, events[2].event_id, events[5].event_id]
+    );
 
     let first_evidence: sqlx::types::Json<Evidence> = candidates[0].get("evidence");
     assert_eq!(first_evidence.0.source_id, Some("source-1".into()));

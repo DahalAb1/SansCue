@@ -13,8 +13,10 @@ The next model-backed stage should select a question-worthy claim or unresolved
 point from a coherent topic window, then phrase one concise, self-contained
 follow-up grounded in that anchor. It should suppress weakly grounded,
 already-answered, repetitive, or low-value suggestions and allow abstention.
-Until topic windows, cadence, and quality targets are agreed, the current
-one-event/one-job cadence remains development plumbing, not a product policy.
+The current feature branch implements provisional rolling windows, silence
+boundaries, cadence, and deterministic abstention. These defaults are
+development policy, not accepted question quality; representative targets and
+model evaluation remain open.
 
 ## Why this approach
 
@@ -42,10 +44,10 @@ one-event/one-job cadence remains development plumbing, not a product policy.
 - Candidate evidence uses that validated excerpt. Sessions and the web client
   accept bounded, non-empty generator-version labels rather than hardcoding
   `stub-v1`, so a later evaluated provider can identify its generator version.
-- `stub-v1` remains the only active generator. It is still a deterministic
-  placeholder, not an LLM or product-quality question generator. No provider
-  integration is enabled because provider access, representative consented
-  excerpts, and agreed quality/latency/cost targets are not available here.
-- Before enabling a model, decide topic windowing/cadence and the exact
-  question policy; compare two providers on the same frozen excerpts; record
-  the exact model and prompt; and keep speaker/TA approval before publishing.
+- `topic-window-stub-v1` is the active runtime generator. It is still a
+  deterministic placeholder, not an LLM or product-quality question generator.
+  No provider integration is enabled because provider access, representative
+  consented excerpts, and agreed quality/latency/cost targets are not available.
+- Before enabling a model, validate or revise the provisional window/cadence
+  policy; compare two providers on the same frozen excerpts; record the exact
+  model and prompt; and keep speaker/TA approval before publishing.

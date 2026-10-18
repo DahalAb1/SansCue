@@ -6,7 +6,7 @@ Local-only packaging of the static Preact/Vite build behind Caddy, Sessions, Bee
 
 - Docker Engine/Desktop with a running daemon and Compose v2 supporting `up --wait --wait-timeout`; host `curl` for checks.
 - Web expects `web/package.json`, `web/package-lock.json`, `npm run build`, and output `web/dist/`. Sessions, Bee-connection, and Topics-and-questions are independent Rust workspace packages; each applies only its own DB migrations.
-- Free loopback ports 8080 and 5432; host development also needs 3000 and 5173.
+- Free loopback ports 8080, 5432, 55433, 3401, and 3402; host development also needs 3000 and 5173.
 - Initial builds need image/package registry access. Official Node, Caddy, Rust, Debian, and PostgreSQL images provide the runtime; no custom orchestration.
 
 Dockerfiles use repository-root build contexts. Root `.dockerignore` defaults to deny and allows only the current manifests, build configuration, Rust/SQL source, and TypeScript/TSX/CSS source. New source or asset types require an explicit allowlist update; do not reinclude whole application directories. Sensitive directories and credential filenames are also denied after the allowlist. Terminal descendant exclusions for every allowed path prevent extension-shaped or manifest-named directories from admitting arbitrary children; keep these exclusions last when extending the allowlist. Run `python3 deploy/check-build-context.py` with Docker/BuildKit to verify the explicit required-input allowlist and ensure harmless credential/generated fixtures and descendants of source-shaped paths are excluded using isolated scratch builds (no actual credentials or application directories are copied). No database configuration enters the browser/web build. Application images explicitly install `curl` for probes. PostgreSQL 17 includes `pg_isready`, `psql`, `pg_dump`, and `pg_restore`.
@@ -55,11 +55,24 @@ python3 -B -m unittest discover -s deploy -p 'test_*.py'
 ## Stack endpoints
 
 - Browser: `http://127.0.0.1:8080`; Caddy listens on container `:80`.
-- Sessions: `sessions:3000` public app API and `sessions:3001` private service listener, bound on the container network; neither port is published.
-- Topics-and-questions: `topics-and-questions:3002`, private container network only.
-- PostgreSQL: three independent private DBs at `sessions-db:5432`, `bee-db:5432`, and `topics-db:5432`; only Sessions DB publishes `127.0.0.1:5432`.
+- Sessions: `sessions:3000` public app API and `sessions:3001` private service listener. The private listener is also published on loopback-only `127.0.0.1:3401` for the trusted host live-Bee worker.
+- Topics-and-questions: `topics-and-questions:3002`, also published on loopback-only `127.0.0.1:3402` for the trusted host live-Bee worker.
+- PostgreSQL: three independent DBs at `sessions-db:5432`, `bee-db:5432`, and `topics-db:5432`. Sessions publishes `127.0.0.1:5432`; Bee publishes loopback-only `127.0.0.1:55433` for the trusted host worker.
 
-The Bee worker handles room-binding commands and retries accepted canonical transcript events through its transactional outbox. Its deterministic replay harness remains a separate local command; Compose does not start or claim a real Bee device transport. Topics processes one `stub-v1` development preview per accepted event and retries candidate delivery to Sessions. The preview is unpublished and visible only to room speakers/TAs; it is not model-generated and never appears to audience members. Live Bee device/API verification remains separate.
+The Bee worker handles room-binding commands and retries accepted canonical transcript events through its transactional outbox. Its deterministic replay harness remains a separate local command; Compose does not start or claim a real Bee device transport. Topics uses provisional rolling windows, cadence, and abstention with the deterministic `topic-window-stub-v1` placeholder, then retries candidate delivery to Sessions. A preview is unpublished and visible only to room speakers/TAs; it is not model-generated and never appears to audience members. Live Bee device/API verification remains separate.
+
+## Live Bee host check
+
+Bee authentication remains on the trusted Mac host; do not copy its credentials into an image or `deploy/.env`. After `bee login` and `bee status` succeed, start the Compose stack, stop only its device-independent worker, build the current host binary, and run the host adapter:
+
+```sh
+docker compose --env-file deploy/.env up --build --wait --wait-timeout 120
+docker compose --env-file deploy/.env stop bee-connection
+cargo build --locked --package bee-connection
+deploy/run-live-bee-worker.sh
+```
+
+The script reads the private local Compose settings, connects only to the three loopback endpoints above, and executes the fixed authenticated Bee stream. It does not print credentials or transcript contents. Keep it running while the speaker binds the consented Bee `conversation_uuid` in the room Access tab. Speak a short consented test phrase, then verify exactly one unpublished candidate appears only for speaker/TA review. Publish it, submit one audience response, and confirm the staff count changes while another room sees nothing. Record only sanitized counts/status in the device runbook.
 
 Startup gates database health, then sessions readiness, then Caddy health. Sessions readiness uses its database pool; Caddy health probes its static root independently. Dependency gates apply at startup, not continuous supervision: a later database outage does not stop Caddy or restart sessions automatically. The 120-second wait is a health-wait bound, not an image download/build deadline or the service startup bound (documented by the sessions implementation).
 

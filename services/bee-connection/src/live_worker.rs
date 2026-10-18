@@ -1,4 +1,5 @@
 use crate::{
+    domain::{Observation, Signal},
     live::{LiveEventError, MAX_LIVE_EVENT_BYTES, parse_new_utterance},
     pipeline::Disposition,
     store::Store,
@@ -22,6 +23,7 @@ const REJECTION_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 #[allow(async_fn_in_trait)]
 pub trait LiveStore: Clone + Send + Sync {
+    async fn active_conversations(&self) -> Result<Vec<Uuid>, &'static str>;
     async fn conversation_for_source(
         &self,
         source_conversation_id: Uuid,
@@ -43,6 +45,9 @@ pub trait LiveStore: Clone + Send + Sync {
 }
 
 impl LiveStore for Store {
+    async fn active_conversations(&self) -> Result<Vec<Uuid>, &'static str> {
+        Store::active_conversations(self).await
+    }
     async fn conversation_for_source(
         &self,
         source_conversation_id: Uuid,
@@ -114,6 +119,7 @@ impl<S: LiveStore> LiveCliWorker<S> {
             if let Err(error) = self.run_once().await {
                 eprintln!("bee live stream unavailable; retrying ({error})");
             }
+            self.record_transport_signal(Signal::Disconnected).await?;
             let sleep_for = delay;
             if started.elapsed() >= HEALTHY_RUN {
                 delay = INITIAL_RESTART_DELAY;
@@ -122,6 +128,32 @@ impl<S: LiveStore> LiveCliWorker<S> {
             }
             tokio::time::sleep(sleep_for).await;
         }
+    }
+
+    pub async fn record_transport_signal(&self, signal: Signal) -> Result<(), &'static str> {
+        for conversation_id in self.store.active_conversations().await? {
+            let state = match &signal {
+                Signal::Disconnected => "disconnected",
+                Signal::Reconnected => "reconnected",
+                _ => return Err("invalid live transport signal"),
+            };
+            let raw = serde_json::to_vec(&serde_json::json!({
+                "transport": "bee-cli",
+                "state": state,
+            }))
+            .map_err(|_| "Bee transport signal serialization failed")?;
+            self.store
+                .ingest_live(
+                    conversation_id,
+                    Observation {
+                        received_at: Utc::now(),
+                        raw,
+                        decoded: Ok(signal.clone()),
+                    },
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     pub async fn consume<R: AsyncRead + Unpin>(
@@ -192,8 +224,9 @@ impl<S: LiveStore> LiveCliWorker<S> {
                     Ok(lifecycle) => {
                         let conversation_id = match &lifecycle {
                             crate::live::LiveLifecycleEvent::Created(c) => {
-                                let _ =
-                                    self.store.record_numeric_source_mapping(c.id, c.uuid).await;
+                                self.store
+                                    .record_numeric_source_mapping(c.id, c.uuid)
+                                    .await?;
                                 self.store.conversation_for_source(c.uuid).await?
                             }
                             crate::live::LiveLifecycleEvent::Updated(u) => {
@@ -239,6 +272,7 @@ impl<S: LiveStore> LiveCliWorker<S> {
             .map_err(|_| "Bee CLI stream start failed")?;
         let stdout = child.stdout.take().ok_or("Bee CLI stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("Bee CLI stderr unavailable")?;
+        self.record_transport_signal(Signal::Reconnected).await?;
         let diagnostics = tokio::spawn(drain_diagnostics(stderr));
         let summary = self.consume(stdout).await;
         if summary.is_err() {

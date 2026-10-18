@@ -10,12 +10,12 @@ pub const MAX_UTTERANCE_TEXT_BYTES: usize = 16 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveUtterance {
     pub conversation_uuid: Uuid,
-    pub utterance_id: u64,
-    pub sample_id: Uuid,
-    pub start_millis: u64,
-    pub end_millis: u64,
+    pub utterance_id: Option<u64>,
+    pub sample_id: Option<Uuid>,
+    pub start_millis: Option<u64>,
+    pub end_millis: Option<u64>,
     pub text: String,
-    pub spoken_at: DateTime<Utc>,
+    pub spoken_at: Option<DateTime<Utc>>,
     pub received_at: DateTime<Utc>,
 }
 
@@ -50,20 +50,25 @@ impl LiveEventError {
 
 #[derive(Deserialize)]
 struct BeeCliEvent {
-    #[serde(rename = "type")]
-    event_type: String,
+    #[serde(default, rename = "type")]
+    event_type: Option<String>,
     conversation_uuid: String,
     utterance: BeeCliUtterance,
 }
 
 #[derive(Deserialize)]
 struct BeeCliUtterance {
-    id: u64,
-    sample_id: String,
-    start: f64,
-    end: f64,
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    sample_id: Option<String>,
+    #[serde(default)]
+    start: Option<f64>,
+    #[serde(default)]
+    end: Option<f64>,
     text: String,
-    spoken_at: String,
+    #[serde(default)]
+    spoken_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -76,12 +81,17 @@ struct SanitizedEvent<'a> {
 
 #[derive(Serialize)]
 struct SanitizedUtterance<'a> {
-    id: u64,
-    sample_id: Uuid,
-    start_millis: u64,
-    end_millis: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sample_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_millis: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_millis: Option<u64>,
     text: &'a str,
-    spoken_at: &'a DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spoken_at: Option<&'a DateTime<Utc>>,
 }
 
 impl LiveUtterance {
@@ -97,7 +107,7 @@ impl LiveUtterance {
                 start_millis: self.start_millis,
                 end_millis: self.end_millis,
                 text: &self.text,
-                spoken_at: &self.spoken_at,
+                spoken_at: self.spoken_at.as_ref(),
             },
         })
         .map_err(|_| LiveEventError::InvalidJson)
@@ -111,12 +121,12 @@ impl LiveUtterance {
             decoded: Ok(Signal::Transcript(Transcript {
                 text: self.text,
                 source_conversation_id: Some(self.conversation_uuid.to_string()),
-                source_id: Some(self.sample_id.to_string()),
+                source_id: self.sample_id.map(|id| id.to_string()),
                 source_sequence: None,
-                source_utterance_id: Some(self.utterance_id),
-                source_spoken_at: Some(self.spoken_at),
-                source_start_millis: Some(self.start_millis),
-                source_end_millis: Some(self.end_millis),
+                source_utterance_id: self.utterance_id,
+                source_spoken_at: self.spoken_at,
+                source_start_millis: self.start_millis,
+                source_end_millis: self.end_millis,
             })),
         })
     }
@@ -135,34 +145,63 @@ pub fn parse_new_utterance(
     }
     let event: BeeCliEvent =
         serde_json::from_slice(bytes).map_err(|_| LiveEventError::InvalidJson)?;
-    if event.event_type != "new-utterance" {
+    if event
+        .event_type
+        .as_deref()
+        .is_some_and(|event_type| event_type != "new-utterance")
+    {
         return Err(LiveEventError::UnsupportedEvent);
     }
     let conversation_uuid = Uuid::parse_str(&event.conversation_uuid)
         .ok()
         .filter(|id| !id.is_nil())
         .ok_or(LiveEventError::InvalidConversation)?;
-    if event.utterance.id == 0 || event.utterance.id > i64::MAX as u64 {
+    if event
+        .utterance
+        .id
+        .is_some_and(|id| id == 0 || id > i64::MAX as u64)
+    {
         return Err(LiveEventError::InvalidUtteranceId);
     }
-    let sample_id = Uuid::parse_str(&event.utterance.sample_id)
-        .ok()
-        .filter(|id| !id.is_nil())
-        .ok_or(LiveEventError::InvalidSampleId)?;
-    let start_millis = seconds_to_millis(event.utterance.start)?;
-    let end_millis = seconds_to_millis(event.utterance.end)?;
-    if end_millis <= start_millis {
-        return Err(LiveEventError::InvalidTimeline);
-    }
+    let sample_id = event
+        .utterance
+        .sample_id
+        .as_deref()
+        .map(|sample_id| {
+            Uuid::parse_str(sample_id)
+                .ok()
+                .filter(|id| !id.is_nil())
+                .ok_or(LiveEventError::InvalidSampleId)
+        })
+        .transpose()?;
+    let (start_millis, end_millis) = match (event.utterance.start, event.utterance.end) {
+        (Some(start), Some(end)) => {
+            let start = seconds_to_millis(start)?;
+            let end = seconds_to_millis(end)?;
+            if end <= start {
+                return Err(LiveEventError::InvalidTimeline);
+            }
+            (Some(start), Some(end))
+        }
+        (None, None) => (None, None),
+        _ => return Err(LiveEventError::InvalidTimeline),
+    };
     if event.utterance.text.trim().is_empty()
         || event.utterance.text.len() > MAX_UTTERANCE_TEXT_BYTES
         || event.utterance.text.contains('\0')
     {
         return Err(LiveEventError::InvalidText);
     }
-    let spoken_at = DateTime::parse_from_rfc3339(&event.utterance.spoken_at)
-        .map_err(|_| LiveEventError::InvalidSpokenAt)?
-        .with_timezone(&Utc);
+    let spoken_at = event
+        .utterance
+        .spoken_at
+        .as_deref()
+        .map(|spoken_at| {
+            DateTime::parse_from_rfc3339(spoken_at)
+                .map(|value| value.with_timezone(&Utc))
+                .map_err(|_| LiveEventError::InvalidSpokenAt)
+        })
+        .transpose()?;
     Ok(LiveUtterance {
         conversation_uuid,
         utterance_id: event.utterance.id,
@@ -242,8 +281,8 @@ impl LiveLifecycleEvent {
 
 #[derive(Deserialize)]
 struct BeeCliLifecycleEvent {
-    #[serde(rename = "type")]
-    event_type: String,
+    #[serde(default, rename = "type")]
+    event_type: Option<String>,
     conversation: Option<BeeCliConversationPayload>,
 }
 
@@ -271,7 +310,14 @@ pub fn parse_lifecycle_event(
         .filter(|&id| id > 0 && id <= i64::MAX as u64)
         .ok_or(LiveEventError::InvalidUtteranceId)?;
     let state = conv.state.unwrap_or_else(|| "processing".to_owned());
-    match event.event_type.as_str() {
+    let event_type = event.event_type.as_deref().unwrap_or_else(|| {
+        if conv.uuid.is_some() {
+            "new-conversation"
+        } else {
+            "update-conversation"
+        }
+    });
+    match event_type {
         "new-conversation" => {
             let uuid_str = conv.uuid.ok_or(LiveEventError::InvalidConversation)?;
             let uuid = Uuid::parse_str(&uuid_str)

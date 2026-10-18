@@ -25,19 +25,43 @@ fn parses_observed_bee_cli_shape_and_separates_source_time() {
         event.conversation_uuid,
         Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap()
     );
-    assert_eq!(event.utterance_id, 42);
+    assert_eq!(event.utterance_id, Some(42));
     assert_eq!(
         event.sample_id,
-        Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap()
+        Some(Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap())
     );
-    assert_eq!(event.start_millis, 1_250);
-    assert_eq!(event.end_millis, 3_750);
+    assert_eq!(event.start_millis, Some(1_250));
+    assert_eq!(event.end_millis, Some(3_750));
     assert_eq!(event.text, "A sanitized live transcript example.");
     assert_eq!(
         event.spoken_at,
-        Utc.with_ymd_and_hms(2026, 10, 18, 1, 0, 0).unwrap()
+        Some(Utc.with_ymd_and_hms(2026, 10, 18, 1, 0, 0).unwrap())
     );
     assert_eq!(event.received_at, received_at());
+}
+
+#[test]
+fn parses_current_documented_structural_payload_without_inventing_identity() {
+    let payload = json!({
+        "conversation_uuid": "11111111-1111-4111-8111-111111111111",
+        "utterance": {
+            "text": "A documented minimal Bee utterance.",
+            "speaker": "speaker_1"
+        }
+    });
+    let event = parse_new_utterance(&serde_json::to_vec(&payload).unwrap(), received_at()).unwrap();
+    assert_eq!(event.utterance_id, None);
+    assert_eq!(event.sample_id, None);
+    assert_eq!(event.start_millis, None);
+    assert_eq!(event.end_millis, None);
+    assert_eq!(event.spoken_at, None);
+    let observation = event.into_observation().unwrap();
+    let bee_connection::domain::Signal::Transcript(transcript) = observation.decoded.unwrap()
+    else {
+        panic!("expected transcript");
+    };
+    assert_eq!(transcript.source_id, None);
+    assert_eq!(transcript.source_sequence, None);
 }
 
 #[test]

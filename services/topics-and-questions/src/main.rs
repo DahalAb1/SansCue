@@ -1,6 +1,6 @@
 use sqlx::postgres::PgPoolOptions;
-use std::{net::SocketAddr, time::Duration};
-use topics_and_questions::{App, Delivery, router};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+use topics_and_questions::{App, CadencePolicy, Delivery, TopicWindowGenerator, router};
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     match run().await {
@@ -46,7 +46,22 @@ async fn run() -> Result<(), &'static str> {
         return Err("invalid HTTP_PORT");
     };
     let addr = SocketAddr::new(host, port);
-    let delivery = Delivery::new(pool.clone(), &sessions, &sessions_token)?;
+    let cadence_policy = CadencePolicy {
+        min_interval_between_questions: duration_setting(
+            "TOPICS_MIN_QUESTION_INTERVAL_SECONDS",
+            20,
+        )?,
+        min_words_per_window: usize_setting("TOPICS_MIN_WINDOW_WORDS", 8)?,
+        max_window_duration: duration_setting("TOPICS_MAX_WINDOW_SECONDS", 180)?,
+        silence_boundary_threshold: duration_setting("TOPICS_SILENCE_BOUNDARY_SECONDS", 5)?,
+    };
+    let generator = Arc::new(TopicWindowGenerator::new(
+        cadence_policy,
+        "topic-window-stub-v1",
+    ));
+    let delivery = Delivery::new(pool.clone(), &sessions, &sessions_token)?
+        .with_generator(generator)
+        .with_cadence_policy(cadence_policy);
     let worker = tokio::spawn(delivery.run());
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -63,4 +78,32 @@ async fn run() -> Result<(), &'static str> {
     worker.abort();
     pool.close().await;
     result
+}
+
+fn duration_setting(name: &str, default: u64) -> Result<Duration, &'static str> {
+    let seconds = match std::env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|_| "invalid Topics cadence setting")?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(_) => return Err("invalid Topics cadence setting"),
+    };
+    if seconds == 0 {
+        return Err("invalid Topics cadence setting");
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn usize_setting(name: &str, default: usize) -> Result<usize, &'static str> {
+    let value = match std::env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .map_err(|_| "invalid Topics cadence setting")?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(_) => return Err("invalid Topics cadence setting"),
+    };
+    if value == 0 {
+        return Err("invalid Topics cadence setting");
+    }
+    Ok(value)
 }
