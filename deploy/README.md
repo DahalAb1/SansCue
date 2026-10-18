@@ -11,6 +11,14 @@ Local-only packaging of the static Preact/Vite build behind Caddy, Sessions, Bee
 
 Dockerfiles use repository-root build contexts. Root `.dockerignore` defaults to deny and allows only the current manifests, build configuration, Rust/SQL source, and TypeScript/TSX/CSS source. New source or asset types require an explicit allowlist update; do not reinclude whole application directories. Sensitive directories and credential filenames are also denied after the allowlist. Terminal descendant exclusions for every allowed path prevent extension-shaped or manifest-named directories from admitting arbitrary children; keep these exclusions last when extending the allowlist. Run `python3 deploy/check-build-context.py` with Docker/BuildKit to verify the explicit required-input allowlist and ensure harmless credential/generated fixtures and descendants of source-shaped paths are excluded using isolated scratch builds (no actual credentials or application directories are copied). No database configuration enters the browser/web build. Application images explicitly install `curl` for probes. PostgreSQL 17 includes `pg_isready`, `psql`, `pg_dump`, and `pg_restore`.
 
+## AI question generation
+
+Topics drafts check-in questions with Claude when `ANTHROPIC_API_KEY` is set in
+`deploy/.env`; `TOPICS_MODEL` optionally overrides the default
+`claude-opus-5-5`. Transcript windows are then sent to the Anthropic API. With
+the key blank, the deterministic placeholder generator runs and nothing leaves
+the machine. Recreate `topics-and-questions` after changing either value.
+
 ## Configure and start
 
 ```sh

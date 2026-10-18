@@ -67,7 +67,12 @@ exited stream with capped backoff. A restart records a suspected disconnect and
 reconnect for every active binding; reconnect alone never claims completeness.
 
 Live events are accepted only when their external conversation UUID matches one
-active sessions-authoritative binding. The adapter accepts both the richer Bee
+active sessions-authoritative binding. A speaker can also bind a room in
+listening mode (`{"listen": true}`), which has no external UUID yet: the first
+`new-conversation` or `new-utterance` event whose conversation is not bound to
+any room is adopted by that room, and the worker reports the adopted UUID to
+sessions. Adoption happens only while exactly one room is listening; with
+several listening rooms, events stay unbound until a speaker names a UUID. The adapter accepts both the richer Bee
 CLI 0.8.0 shape observed during the transport probe and the current documented
 structural JSON shape, which has no top-level event type. It allowlists
 transcript text and, only when supplied, sample identity, utterance identity,
