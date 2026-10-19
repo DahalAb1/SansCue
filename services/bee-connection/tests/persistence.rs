@@ -341,14 +341,14 @@ async fn terminal_topics_rejection_does_not_block_later_bee_outbox_row() {
     finish(store, admin, &schema).await;
 }
 
-async fn bind_listening_room(store: &Store) -> (Uuid, Uuid) {
+async fn bind_room(store: &Store, source: Option<Uuid>) -> (Uuid, Uuid) {
     let conversation = Uuid::new_v4();
     let room = Uuid::new_v4();
     store
         .ensure_command_conversation(
             conversation,
             Capabilities {
-                stable_ids: false,
+                stable_ids: source.is_some(),
                 contiguous_sequence: false,
             },
         )
@@ -356,7 +356,7 @@ async fn bind_listening_room(store: &Store) -> (Uuid, Uuid) {
         .unwrap();
     let binding = Binding {
         conversation_id: conversation,
-        source_conversation_id: None,
+        source_conversation_id: source.map(|id| id.to_string()),
         room_id: room,
         session_id: Uuid::new_v4(),
     };
@@ -371,39 +371,29 @@ async fn bind_listening_room(store: &Store) -> (Uuid, Uuid) {
 }
 
 #[tokio::test]
-async fn single_listening_room_adopts_the_first_live_source_only() {
+async fn bindings_route_only_their_named_recording() {
     let (store, _options, admin, schema) = db().await;
-    let (conversation, room) = bind_listening_room(&store).await;
-    let source = Uuid::new_v4();
+    // A binding without a named recording never claims whichever one arrives next.
+    let (sourceless, _) = bind_room(&store, None).await;
+    let stranger = Uuid::new_v4();
+    assert_eq!(store.conversation_for_source(stranger).await.unwrap(), None);
+    assert!(
+        store
+            .load(sourceless)
+            .await
+            .unwrap()
+            .binding()
+            .unwrap()
+            .source_conversation_id
+            .is_none()
+    );
 
-    let adoption = store.adopt_listening_source(source).await.unwrap().unwrap();
-    assert_eq!(adoption.room_id, room);
-    assert_eq!(adoption.conversation_id, conversation);
+    let chosen = Uuid::new_v4();
+    let (conversation, _) = bind_room(&store, Some(chosen)).await;
     assert_eq!(
-        store.conversation_for_source(source).await.unwrap(),
+        store.conversation_for_source(chosen).await.unwrap(),
         Some(conversation)
     );
-    let pipeline = store.load(conversation).await.unwrap();
-    assert_eq!(
-        pipeline.binding().unwrap().source_conversation_id,
-        Some(source.to_string())
-    );
-    assert!(pipeline.capabilities.stable_ids);
-    // Once claimed, the room stops listening; a second recording stays unbound.
-    assert_eq!(
-        store.adopt_listening_source(Uuid::new_v4()).await.unwrap(),
-        None
-    );
-    finish(store, admin, &schema).await;
-}
-
-#[tokio::test]
-async fn ambiguous_listening_rooms_never_adopt_a_source() {
-    let (store, _options, admin, schema) = db().await;
-    bind_listening_room(&store).await;
-    bind_listening_room(&store).await;
-    let source = Uuid::new_v4();
-    assert_eq!(store.adopt_listening_source(source).await.unwrap(), None);
-    assert_eq!(store.conversation_for_source(source).await.unwrap(), None);
+    assert_eq!(store.conversation_for_source(stranger).await.unwrap(), None);
     finish(store, admin, &schema).await;
 }

@@ -156,6 +156,22 @@ impl<S: CommandStore> Consumer<S> {
         Ok(())
     }
 
+    /// Sends the host-level live transport state and unselected recordings.
+    pub async fn publish_live_report(&self, report: &Value) -> Result<(), &'static str> {
+        let response = self
+            .client
+            .post(format!("{}/internal/v1/bee/live", self.base))
+            .bearer_auth(&self.token)
+            .json(report)
+            .send()
+            .await
+            .map_err(|_| "sessions live report delivery failed")?;
+        if !response.status().is_success() {
+            return Err("sessions live report rejected");
+        }
+        Ok(())
+    }
+
     async fn acknowledge(&self, command: Uuid) -> Result<(), &'static str> {
         let response = self
             .client

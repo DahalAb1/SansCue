@@ -21,6 +21,16 @@ fences reject delayed older commands; a later bind closes an earlier local
 binding when switching conversations. Sessions remains authoritative for
 speaker permission and room lifecycle. Neither service queries the other's DB.
 
+A room never claims a live recording on its own. When the optional live
+adapter runs, it posts a host-level report to `POST /internal/v1/bee/live`
+about every five seconds: `transport` (`connected` while the Bee CLI stream
+process runs, otherwise `reconnecting`) and up to ten recordings it hears that
+no binding names, each with only `source_conversation_id`, `first_seen_at`,
+`last_seen_at` and `utterances`. Their speech is dropped, never stored or
+reported. Sessions keeps only the latest report, treats one older than 20
+seconds as `not_running`, and shows it to speakers so they can bind the intended
+recording explicitly. A running stream does not prove transcript delivery.
+
 The current worker is device-independent; it is not a Bee transport. Exactly
 one worker instance is supported because poll rows are not leased. Keep its
 internal URL and service token on trusted private transport/network only; do not
