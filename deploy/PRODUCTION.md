@@ -89,6 +89,18 @@ database operation before changing service configuration. PostgreSQL's
 
 ## Model credentials
 
+For Claude Haiku through Cloudflare, use `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID`, with `TOPICS_MODEL=anthropic/claude-haiku-5.5` in the
+private runtime file. Leave Anthropic and Bedrock credentials blank. The token
+must have Workers AI Read access to that account. EC2 calls Cloudflare's
+`/accounts/{account_id}/ai/v1/messages` endpoint using bearer authentication;
+no Worker or hosting migration is required. Gateway request logging and caching
+are bypassed for transcript requests. Structured responses still pass the same
+grounding checks and moderator review. Third-party Haiku inference uses AI Gateway
+credits; the student Workers subscription waiver does not establish that these
+credits are available. Verify a real request before changing the hosted service.
+See [Cloudflare REST authentication and billing](https://developers.cloudflare.com/ai-gateway/usage/rest-api/).
+
 Configure at most one provider in EC2's private `deploy/.env`. All blank runs
 the clearly labeled placeholder; a transcript reaching the UI does not prove
 AI generation. For an initial live Bedrock rehearsal, configure a valid Bedrock

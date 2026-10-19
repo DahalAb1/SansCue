@@ -76,8 +76,10 @@ services:
       TOPICS_MAX_TRANSCRIPT_AGE_SECONDS: "45"
       TOPICS_MIN_ATTEMPT_INTERVAL_SECONDS: "${TOPICS_MIN_ATTEMPT_INTERVAL_SECONDS:-15}"
       # Optional Claude question generation; all blank keeps the placeholder.
-      # Configure one of: Anthropic API key, Bedrock API key, or Bedrock credentials file.
+      # Configure one provider: Cloudflare, Anthropic, or Bedrock.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      CLOUDFLARE_API_TOKEN: "${CLOUDFLARE_API_TOKEN:-}"
+      CLOUDFLARE_ACCOUNT_ID: "${CLOUDFLARE_ACCOUNT_ID:-}"
       AWS_BEARER_TOKEN_BEDROCK: "${AWS_BEARER_TOKEN_BEDROCK:-}"
       TOPICS_BEDROCK_CREDENTIALS_FILE: "${TOPICS_BEDROCK_CREDENTIALS_FILE:-}"
       AWS_REGION: "${AWS_REGION:-us-east-1}"

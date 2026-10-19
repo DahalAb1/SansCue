@@ -11,6 +11,41 @@ use uuid::Uuid;
 
 const SPEECH: &str = "The learning rate decides how far each gradient step moves the weights.";
 
+/// Explicit paid smoke check only; ordinary test runs never use live credentials.
+#[tokio::test]
+#[ignore = "requires private Cloudflare token/account files and makes one billable request"]
+async fn cloudflare_live_grounded_candidate() {
+    let token_file = std::env::var("CLOUDFLARE_TEST_TOKEN_FILE").expect("token file path required");
+    let account_file =
+        std::env::var("CLOUDFLARE_TEST_ACCOUNT_FILE").expect("account file path required");
+    let token = std::fs::read_to_string(token_file).expect("read private token file");
+    let token = token
+        .trim()
+        .strip_prefix("CLOUDFLARE_API_TOKEN=")
+        .unwrap_or(token.trim())
+        .trim_matches(['\'', '"']);
+    let account = std::fs::read_to_string(account_file).expect("read account ID file");
+    let generator = ClaudeGenerator::cloudflare(
+        TopicWindowGenerator::new(Default::default(), "gate"),
+        token,
+        account.trim(),
+        None,
+    )
+    .unwrap();
+    let outcome = generator.generate(input(SPEECH)).await.unwrap();
+    let GenerationOutcome::Candidate(question) = outcome else {
+        panic!("expected a grounded candidate, got {outcome:?}");
+    };
+    assert_eq!(
+        question.generator_version,
+        "anthropic/claude-haiku-5.5/topic-check-v1"
+    );
+    println!(
+        "Live Cloudflare Haiku returned a grounded candidate: {}",
+        question.text
+    );
+}
+
 /// Serves one canned Messages API reply and records the request it received.
 async fn mock_api(status: u16, reply: Value) -> (String, Arc<Mutex<Option<(HeaderMap, Value)>>>) {
     let seen = Arc::new(Mutex::new(None));

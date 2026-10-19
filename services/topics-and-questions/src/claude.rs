@@ -14,6 +14,7 @@ use std::{
 
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 pub const DEFAULT_BEDROCK_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+pub const DEFAULT_CLOUDFLARE_MODEL: &str = "anthropic/claude-haiku-5.5";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 
@@ -45,6 +46,8 @@ abstain (boolean), question (string), evidence_quote (string). No other text.";
 enum Backend {
     /// Anthropic Messages API, authenticated with an API key.
     Anthropic { api_key: String, fallbacks: bool },
+    /// Cloudflare's Anthropic-compatible Messages endpoint.
+    Cloudflare { api_token: String },
     /// Amazon Bedrock InvokeModel.
     Bedrock { region: String, auth: BedrockAuth },
 }
@@ -71,6 +74,26 @@ pub struct ClaudeGenerator {
 }
 
 impl ClaudeGenerator {
+    /// Claude via Cloudflare AI Gateway Unified Billing, called directly from EC2.
+    pub fn cloudflare(
+        gate: TopicWindowGenerator,
+        api_token: &str,
+        account_id: &str,
+        model: Option<&str>,
+    ) -> Result<Self, &'static str> {
+        if account_id.len() != 32 || !account_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("invalid Cloudflare account ID");
+        }
+        Self::build(
+            gate,
+            format!("https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/messages"),
+            Backend::Cloudflare {
+                api_token: credential(api_token)?,
+            },
+            model.unwrap_or(DEFAULT_CLOUDFLARE_MODEL),
+        )
+    }
+
     /// Claude through the Anthropic API.
     pub fn anthropic(
         gate: TopicWindowGenerator,
@@ -136,7 +159,16 @@ impl ClaudeGenerator {
         model: &str,
     ) -> Result<Self, &'static str> {
         let model = model.trim();
-        if model.is_empty() || model.len() > 100 || model.contains('/') {
+        let valid_name = match &backend {
+            Backend::Cloudflare { .. } => model.strip_prefix("anthropic/").is_some_and(|name| {
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+            }),
+            _ => !model.contains('/'),
+        };
+        if model.is_empty() || model.len() > 100 || !valid_name {
             return Err("invalid model configuration");
         }
         let client = reqwest::Client::builder()
@@ -177,7 +209,7 @@ impl ClaudeGenerator {
             "content": format!("<earlier_check_ins>\n{earlier}\n</earlier_check_ins>\n<transcript>\n{lines}\n</transcript>"),
         }]);
         match &self.backend {
-            Backend::Anthropic { fallbacks, .. } => {
+            Backend::Anthropic { .. } | Backend::Cloudflare { .. } => {
                 let mut request = json!({
                     "model": self.model,
                     "max_tokens": 4000,
@@ -201,7 +233,13 @@ impl ClaudeGenerator {
                         },
                     },
                 });
-                if *fallbacks {
+                if matches!(
+                    &self.backend,
+                    Backend::Anthropic {
+                        fallbacks: true,
+                        ..
+                    }
+                ) {
                     request["fallbacks"] = json!("default");
                 }
                 request
@@ -227,6 +265,10 @@ impl ClaudeGenerator {
             .post(&self.endpoint)
             .header("content-type", "application/json");
         request = match &self.backend {
+            Backend::Cloudflare { api_token } => request
+                .bearer_auth(api_token)
+                .header("cf-aig-collect-log", "false")
+                .header("cf-aig-skip-cache", "true"),
             Backend::Anthropic { api_key, fallbacks } => {
                 request = request
                     .header("x-api-key", api_key)
@@ -577,6 +619,69 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn cloudflare_validates_account_and_model_without_exposing_credentials() {
+        let make = |account: &str, model: Option<&str>| {
+            ClaudeGenerator::cloudflare(
+                TopicWindowGenerator::new(Default::default(), "gate"),
+                "test-token",
+                account,
+                model,
+            )
+        };
+        assert!(make("not-an-account", None).is_err());
+        assert!(make("00000000000000000000000000000000/evil", None).is_err());
+        for model in ["claude-haiku-5.5", "anthropic/../evil", "anthropic/a/b"] {
+            assert!(make("00000000000000000000000000000000", Some(model)).is_err());
+        }
+        let generator = make("00000000000000000000000000000000", None).unwrap();
+        assert_eq!(
+            generator.endpoint,
+            "https://api.cloudflare.com/client/v4/accounts/00000000000000000000000000000000/ai/v1/messages"
+        );
+        let body = generator.request(&window(&["first idea"]), &[]);
+        assert_eq!(body["model"], DEFAULT_CLOUDFLARE_MODEL);
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert!(body.get("fallbacks").is_none());
+    }
+
+    #[tokio::test]
+    async fn cloudflare_uses_bearer_auth_and_parses_grounded_messages() {
+        use axum::{Json, Router, http::HeaderMap, routing::post};
+        let app = Router::new().route("/messages", post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+            assert_eq!(headers["authorization"], "Bearer test-token");
+            assert!(!headers.contains_key("x-api-key"));
+            assert!(!headers.contains_key("anthropic-beta"));
+            assert_eq!(headers["cf-aig-collect-log"], "false");
+            assert_eq!(headers["cf-aig-skip-cache"], "true");
+            assert_eq!(body["model"], DEFAULT_CLOUDFLARE_MODEL);
+            Json(json!({"stop_reason":"end_turn", "content":[{"type":"text", "text":
+                "{\"abstain\":false,\"question\":\"How clear is what the learning rate controls?\",\"evidence_quote\":\"how far each gradient step moves\"}"}]}))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut generator = ClaudeGenerator::cloudflare(
+            TopicWindowGenerator::new(Default::default(), "gate"),
+            "test-token",
+            "00000000000000000000000000000000",
+            None,
+        )
+        .unwrap();
+        generator.endpoint = format!("http://{address}/messages");
+        let result = generator
+            .ask(
+                &window(&[
+                    "The learning rate decides how far each gradient step moves the weights.",
+                ]),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, GenerationOutcome::Candidate(_)));
+        server.abort();
     }
 
     #[test]

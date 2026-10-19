@@ -88,9 +88,14 @@ def validate(settings):
     if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", settings.get("SESSIONS_OPERATOR_EPOCH", "")):
         errors.append("SESSIONS_OPERATOR_EPOCH is required")
     providers = [key for key in ("ANTHROPIC_API_KEY", "AWS_BEARER_TOKEN_BEDROCK",
-                                "TOPICS_BEDROCK_CREDENTIALS_FILE") if settings.get(key)]
+                                "TOPICS_BEDROCK_CREDENTIALS_FILE", "CLOUDFLARE_API_TOKEN") if settings.get(key)]
     if len(providers) > 1:
         errors.append("configure at most one model provider credential")
+    if settings.get("CLOUDFLARE_API_TOKEN"):
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", settings.get("CLOUDFLARE_ACCOUNT_ID", "")):
+            errors.append("Cloudflare requires a 32-character hexadecimal CLOUDFLARE_ACCOUNT_ID")
+        if settings.get("TOPICS_MODEL") and not re.fullmatch(r"anthropic/[A-Za-z0-9.-]+", settings["TOPICS_MODEL"]):
+            errors.append("Cloudflare requires an Anthropic catalog model ID")
     return errors
 
 

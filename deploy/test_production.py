@@ -86,6 +86,19 @@ class ProductionSettings(unittest.TestCase):
         settings["POSTGRES_PASSWORD"] = secret
         self.assertNotIn(secret, "\n".join(production.validate(settings)))
 
+    def test_cloudflare_requires_account_and_exclusive_provider(self):
+        settings = fixture()
+        settings["CLOUDFLARE_API_TOKEN"] = "fake-cloudflare-token"
+        self.assertTrue(production.validate(settings))
+        settings["CLOUDFLARE_ACCOUNT_ID"] = "0" * 32
+        settings["TOPICS_MODEL"] = "anthropic/claude-haiku-5.5"
+        self.assertEqual(production.validate(settings), [])
+        settings["ANTHROPIC_API_KEY"] = "fake-anthropic-token"
+        self.assertTrue(production.validate(settings))
+        del settings["ANTHROPIC_API_KEY"]
+        settings["TOPICS_MODEL"] = "anthropic/../invalid"
+        self.assertTrue(production.validate(settings))
+
     def test_private_file_and_shell_override_checks(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
             path = Path(directory) / ".env"
