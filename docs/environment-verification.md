@@ -26,10 +26,11 @@ passed. These are local code checks, not Docker or hosted acceptance.
 
 ## October 19 deployment preparation
 
-On `feat/ec2-deployment`, based on `c43c8cd`, the production override, Caddy
+At the initial preparation checkpoint on `feat/ec2-deployment`, based on
+`c43c8cd`, the production override, Caddy
 configuration, private environment templates, preflight validator, restricted
-database initializer and Mac SSH-tunnel runbook were added. No AWS resources
-were created and no emails were sent.
+database initializer and Mac SSH-tunnel runbook were added. At that checkpoint no AWS resources were created and no emails
+were sent.
 
 - All 26 deployment tests passed, including four actual merged-configuration
   checks using standalone Docker Compose 2.40.3 with synthetic settings. These
@@ -47,6 +48,30 @@ were created and no emails were sent.
 See the [production runbook](../deploy/PRODUCTION.md) for configuration and
 remaining execution steps. Organizer email login is a proposal, not an
 implemented access mechanism.
+
+## Open demo and IP deployment update
+
+The user selected immediate room creation without email approval for judging.
+`SESSIONS_DEMO_OPEN_ROOMS` enables browser-owned organizer rooms, with audience
+permissions unchanged; disabling it withdraws anonymous speaker authority.
+Production now includes bounded public API/room/bootstrap limits, request-size
+limits, and a Caddy-overwritten client-IP header on a private backend.
+
+On the current deployment branch, 109 Rust workspace tests passed against
+fresh native PostgreSQL 17 databases with `--test-threads=1`, and the synthetic
+end-to-end acceptance passed. The initial parallel run exposed two existing
+Topics generation-reliability tests sharing the same queue; the serial run
+passed. All 25 frontend tests and the production build passed. All 29 deploy
+utility/configuration tests passed, including actual Compose merge checks.
+Sessions Clippy passed. Caddy 2.11.7 adapted both DNS and bare-public-IP configs
+with the public short-lived ACME profile; no certificate issuance is implied
+by adaptation alone.
+
+A separate t3.small EC2 instance with a 30 GiB encrypted gp3 disk was created
+in us-east-1 for SansCue. The existing OpenClaw instance was not modified.
+Image builds and hosted acceptance are in progress. Availability requested:
+November 9–20, 2026 (America/Chicago), with shutdown permitted outside judging.
+Optional email-login work was set aside locally and is not part of this demo.
 
 ## Historical October 10 acceptance gates (`411fba0`)
 

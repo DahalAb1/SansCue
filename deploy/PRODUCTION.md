@@ -1,7 +1,7 @@
 # EC2 deployment preparation
 
-Status: configuration prepared; no EC2 resources have been created and no hosted
-HTTPS acceptance is claimed. Local live/Compose results are recorded in
+Status: a separate low-cost EC2 instance has been created; image builds and
+hosted HTTPS acceptance are in progress. Local live/Compose results are recorded in
 [environment verification](../docs/environment-verification.md). Use a staging
 deployment with consented test speech before inviting an external audience.
 
@@ -21,7 +21,8 @@ the rehearsal audience size before opening registration.
 - An AWS account/region, Linux EC2 host with Docker Engine and Compose **2.24.4
   or later**, Python 3, Git, persistent encrypted EBS storage and sufficient
   disk/RAM for the Rust image builds. Instance sizing remains to be measured.
-- A stable public address and a domain/subdomain with DNS pointing to it. Do
+- A public IPv4 address for the initial demo. A custom domain is optional later;
+  when using one, point its DNS at the instance. Do
   not publish an AAAA record unless IPv6 reaches the instance.
 - Security group: public inbound TCP 80 and 443; SSH TCP 22 from the trusted
   administrator/Mac IP only. No inbound database or service ports. Verify the
@@ -31,7 +32,8 @@ the rehearsal audience size before opening registration.
 
 Caddy manages certificates and HTTP-to-HTTPS redirects; `/data` is persisted
 across container recreation. See [Caddy HTTPS requirements](https://caddyserver.com/docs/automatic-https).
-The production override uses Docker's [replacement/reset semantics](https://docs.docker.com/reference/compose-file/merge/)
+Public-IP mode uses explicit short-lived ACME certificates (see below). The
+production override uses Docker's [replacement/reset semantics](https://docs.docker.com/reference/compose-file/merge/)
 to remove the local web/DB port configuration.
 
 ## Configure on EC2
@@ -45,8 +47,8 @@ cp deploy/.env.production.example deploy/.env
 chmod 600 deploy/.env
 ```
 
-Edit the private file locally on EC2: set `SANSCUE_DOMAIN` to the bare lowercase
-hostname, `ACME_EMAIL` to your contact address, and fill all database passwords,
+Edit the private file locally on EC2: set `SANSCUE_DOMAIN` to the public IPv4
+address (or a bare lowercase hostname later), and fill all database passwords,
 bootstrap passwords and service tokens with distinct random values from a
 password manager (32 random bytes encoded as hex works). Use plain `KEY=value`
 syntax without quotes, spaces, comments after values or interpolation. Do not
@@ -67,8 +69,8 @@ key into this file, and the plaintext credential into the private
 `local-data/operator/credential` file. Read it privately for the current operator
 login; rerunning rotates access. The tool's printed generic local restart hint
 must be replaced with `sh deploy/production.sh up -d --wait sessions` on EC2.
-Email organizer login is proposed, not implemented; do not email this shared
-operator credential as a substitute for a one-time login code.
+The hackathon uses open demo room creation instead of email login. The host
+credential remains private administration access.
 
 Always use the production wrapper for this deployment. It selects both Compose
 files and the project, checks private settings without printing values, and
@@ -198,23 +200,54 @@ may not support new migrations: application rollback is permitted only after
 schema compatibility is checked, otherwise recover the matching backups into
 a separate stack. The first restore and rollback rehearsal remain release gates.
 
-## Organizer email login proposal
+## Open hackathon access and abuse limits
 
-The current single host-operator credential grants room creation and can
-restore speaker access across rooms. Email access therefore needs a deliberate
-authorization change, not just a mail-sending button. Pending product choices:
-one-time code versus sign-in link, approved organizer addresses, and email
-provider/domain. Recommended flow: approved organizer requests access, receives
-a short-lived single-use code, submits it on the HTTPS page, and receives a
-Secure HttpOnly session. Store only a keyed hash of a short code, limit requests
-and guesses across sessions, consume atomically, and return generic request
-responses. Each organizer should own their rooms rather than inherit global
-operator access. Keep bootstrap operator access restricted to the host.
+`SESSIONS_DEMO_OPEN_ROOMS=true` lets any visitor create a room immediately at
+`/operator`, without email or approval. The browser session owns the room;
+other visitors cannot take its speaker controls by changing a URL. Audience
+links still grant only audience access. Keep the creating browser's cookies
+and save the room URL; this demo identity expires with the existing browser
+session (24-hour absolute / 12-hour idle limits). Host administration can
+restore access. Set the flag to `false` and recreate Sessions to disable new
+anonymous rooms and existing anonymous speaker authority. Default application
+and local configuration are closed; the production example explicitly enables
+this hackathon behavior.
 
-AWS SES is one possible provider; sandbox accounts can send only to verified
-recipients (or the mailbox simulator) until production access is granted. See
-[SES production access](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html).
-Email login and outbound email sending have not been implemented or executed.
+Production enables in-process token buckets with a bounded table of 4,096
+client IPs. No paid rate-limit service is required. Per-IP limits refill at
+600 reads/minute (burst 100), 120 writes/minute (burst 30), 60 bootstraps/minute
+(burst 15), and 10 room creations/hour (burst 3). Global limits refill at 3,000
+requests/minute (burst 300), 300 bootstraps/minute (burst 100), and 50 room
+creations/hour (burst 10). Limits reset on a service restart. Excess requests
+receive 429 with Retry-After; bodies are limited to 16 KiB. Existing login,
+CSRF, session, role and 64-WebSocket limits remain in effect. These are bounded
+MVP protections, not a claim of DDoS resistance or measured 500-user capacity.
+
+Caddy overwrites `X-Sanscue-Client-IP`; Sessions trusts it only under the
+production proxy configuration. Do not expose the backend listener directly
+or place an unconfigured CDN/proxy in front of Caddy. Conference attendees may
+share an IP, so rehearse the expected simultaneous audience before changing
+limits. Free room creation does not expose model credentials or Bee's private
+service ports. Email login was set aside for this demo; no emails are sent.
+
+## Public IP HTTPS and judging window
+
+The first deployment uses a public IPv4 URL. Caddy explicitly requests the
+Let's Encrypt `shortlived` ACME profile and supplies default SNI for clients
+opening an IP URL. Use Caddy 2.10.1 or later. These public certificates last
+about six days and Caddy renews them automatically; keep TCP 80/443 reachable
+and the certificate volume persistent. See [Let's Encrypt IP certificate availability](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)
+and [Caddy IP configuration](https://github.com/caddyserver/caddy/issues/7118).
+An automatically assigned EC2 IP changes after stop/start, so update the public
+origin and Caddy endpoint on each boot before starting the stack.
+
+Judging availability requested: **November 9–20, 2026, America/Chicago**.
+Keep the instance on for that whole window; stop outside demos and judging to
+save compute cost. A t3.small in us-east-1 currently costs $0.0208/hour, plus
+$0.005/hour for public IPv4 and approximately $2.40/month for 30 GiB gp3. Twelve
+continuous days are about $8.40 before tax, model usage, backups and setup.
+The existing t3.large OpenClaw server is a separate budget item; no capacity or
+cost reduction on it is assumed. Instance sizing remains subject to rehearsal.
 
 ## Checks for configuration changes
 
@@ -231,3 +264,20 @@ are explicitly skipped. They verify the rendered configuration has only public
 80/443, loopback bridge ports, restricted-role initialization, the HTTPS origin,
 persistent volumes and the optional container worker. Passing configuration
 tests does not establish container startup or certificate issuance.
+
+## Small-instance bootstrap
+
+`deploy/ec2-bootstrap.sh` is credential-free Ubuntu 24.04 user data. It installs
+Docker/Compose, creates a 4 GiB swap file on the encrypted root disk and prepares
+a systemd service. Rust images use one build job and an identical workspace
+build stage so the three independent runtime images can reuse compilation.
+The production wrapper serializes builds. Before enabling the service, upload
+only the reviewed source archive to `/opt/sanscue`, initialize runtime settings
+with `sudo python3 -B deploy/configure-production.py`, build, and rehearse.
+That initializer creates distinct secrets privately on first use, keeps them
+on later boots, and reads EC2's current public IPv4 through IMDSv2 to refresh
+the origin after stop/start. It never prints credentials. Enable/start
+`sanscue.service` only after images are built; it does not perform image builds
+at boot. The deployment-only SSH key and instance metadata stay in ignored
+`local-data/ec2/`, not in Git. No scheduler or automatic start/stop has yet been
+configured; record how the judging window will be maintained before shutdown.

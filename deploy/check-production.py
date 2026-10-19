@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate private production settings without printing their values (stdlib only)."""
 import os
+import ipaddress
 from pathlib import Path
 import re
 import stat
@@ -40,16 +41,21 @@ def read_settings(path):
 
 def validate(settings):
     errors = []
+    if settings.get("SESSIONS_DEMO_OPEN_ROOMS", "false") not in {"true", "false"}:
+        errors.append("SESSIONS_DEMO_OPEN_ROOMS must be true or false")
     domain = settings.get("SANSCUE_DOMAIN", "")
+    try:
+        address = ipaddress.ip_address(domain)
+        public_ip = address.version == 4 and address.is_global
+    except ValueError:
+        public_ip = False
     labels = domain.split(".")
-    if (len(domain) > 253 or len(labels) < 2
+    if not public_ip and (len(domain) > 253 or len(labels) < 2
             or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)
             or labels[-1] in {"localhost", "local", "test", "invalid", "example"}
             or domain in {"example.com", "example.org", "example.net"}
             or not re.fullmatch(r"[a-z]{2,63}", labels[-1])):
-        errors.append("SANSCUE_DOMAIN must be a real public DNS hostname in lowercase")
-    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", settings.get("ACME_EMAIL", "")):
-        errors.append("ACME_EMAIL is required")
+        errors.append("SANSCUE_DOMAIN must be a public IPv4 address or a real lowercase DNS hostname")
     secrets = []
     for prefix in DATABASES:
         for suffix in ("DB", "USER"):

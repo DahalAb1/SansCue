@@ -17,6 +17,14 @@ See [environment verification](environment-verification.md) for revisions and
 reported versus locally executed checks. Older results remain useful within
 their scope and do not need to be discarded.
 
+**Hackathon deployment decision:** Visitors may create rooms immediately when
+`SESSIONS_DEMO_OPEN_ROOMS=true`; each room's organizer authority belongs to its
+creating browser session. Audience users still join normally. Production API
+limits and private service networking protect the initial public deployment.
+The first endpoint uses EC2's public IPv4 with HTTPS; a custom domain can come
+later. Judging requires continuous availability November 9–20, 2026. Email
+approval is deferred for this demo.
+
 ## Services
 
 | Service | Owns |

@@ -17,7 +17,7 @@ spec.loader.exec_module(production)
 
 def fixture():
     values = {
-        "SANSCUE_DOMAIN": "sanscue.acme.org", "ACME_EMAIL": "admin@acme.org",
+        "SANSCUE_DOMAIN": "sanscue.acme.org",
         "SESSIONS_OPERATOR_EPOCH": "test-deployment-1",
     }
     for prefix, db in zip(production.DATABASES, ("sessions", "bee", "topics")):
@@ -37,6 +37,17 @@ def write_fixture(path, values):
 class ProductionSettings(unittest.TestCase):
     def test_complete_settings(self):
         self.assertEqual(production.validate(fixture()), [])
+
+    def test_public_ip_and_demo_mode(self):
+        settings = fixture()
+        settings["SANSCUE_DOMAIN"] = "8.8.8.8"
+        settings["SESSIONS_DEMO_OPEN_ROOMS"] = "true"
+        self.assertEqual(production.validate(settings), [])
+        settings["SESSIONS_DEMO_OPEN_ROOMS"] = "yes"
+        self.assertTrue(production.validate(settings))
+        for address in ("127.0.0.1", "10.0.0.1", "192.168.1.1", "0.0.0.0", "169.254.169.254"):
+            settings["SANSCUE_DOMAIN"] = address
+            self.assertTrue(production.validate(settings))
 
     def test_missing_secret_and_local_defaults_are_rejected(self):
         for key in (*production.TOKENS, *production.KEYS, *production.BOOTSTRAP,
@@ -140,6 +151,8 @@ class ProductionCompose(unittest.TestCase):
         env = self.config["services"]["sessions"]["environment"]
         self.assertEqual(env["SESSIONS_PUBLIC_ORIGIN"], "https://sanscue.acme.org")
         self.assertEqual(env["SESSIONS_ALLOW_INSECURE_LOOPBACK"], "false")
+        self.assertEqual(env["SESSIONS_PUBLIC_RATE_LIMITS"], "true")
+        self.assertEqual(env["SESSIONS_TRUST_CLIENT_IP_HEADER"], "true")
         for key in production.KEYS:
             self.assertEqual(env[key], fixture()[key])
 

@@ -2,11 +2,12 @@
 # The repository toolchain file selects the same Rust version as host builds.
 FROM rust:bookworm AS build
 WORKDIR /app
+ENV CARGO_BUILD_JOBS=1
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY services/sessions/ services/sessions/
 COPY services/bee-connection/ services/bee-connection/
 COPY services/topics-and-questions/ services/topics-and-questions/
-RUN cargo build --locked --release --package sessions-service --bin sessions-service
+RUN cargo build --locked --release --workspace
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
