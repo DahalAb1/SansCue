@@ -50,14 +50,19 @@ async fn run() -> Result<(), &'static str> {
         return Err("invalid HTTP_PORT");
     };
     let addr = SocketAddr::new(host, port);
+    // Starting points for live evaluation, not settled product values.
     let cadence_policy = CadencePolicy {
         min_interval_between_questions: duration_setting(
             "TOPICS_MIN_QUESTION_INTERVAL_SECONDS",
-            20,
+            90,
         )?,
-        min_words_per_window: usize_setting("TOPICS_MIN_WINDOW_WORDS", 8)?,
+        min_words_per_window: usize_setting("TOPICS_MIN_WINDOW_WORDS", 60)?,
         max_window_duration: duration_setting("TOPICS_MAX_WINDOW_SECONDS", 180)?,
         silence_boundary_threshold: duration_setting("TOPICS_SILENCE_BOUNDARY_SECONDS", 5)?,
+        max_transcript_age: Some(duration_setting("TOPICS_MAX_TRANSCRIPT_AGE_SECONDS", 45)?),
+        min_interval_between_attempts: duration_setting("TOPICS_MIN_ATTEMPT_INTERVAL_SECONDS", 15)?,
+        recent_question_limit: usize_setting("TOPICS_RECENT_QUESTION_LIMIT", 5)?,
+        recent_question_window: duration_setting("TOPICS_RECENT_QUESTION_WINDOW_SECONDS", 1800)?,
     };
     let gate = TopicWindowGenerator::new(cadence_policy, "topic-window-stub-v1");
     let bedrock_auth = match (

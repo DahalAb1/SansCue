@@ -3,6 +3,49 @@ use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+/// How long a generated draft stays reviewable and how many the moderator sees at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReviewPolicy {
+    /// Measured from arrival or the latest moderator edit, whichever is later.
+    pub draft_ttl_seconds: u64,
+    pub visible_drafts: i64,
+}
+
+impl Default for ReviewPolicy {
+    fn default() -> Self {
+        Self {
+            draft_ttl_seconds: 600,
+            visible_drafts: 3,
+        }
+    }
+}
+
+impl ReviewPolicy {
+    fn from_env(get: impl Fn(&str) -> Option<String>) -> Result<Self, &'static str> {
+        let defaults = Self::default();
+        let ttl = match get("SESSIONS_DRAFT_TTL_SECONDS") {
+            Some(value) => value
+                .parse::<u64>()
+                .ok()
+                .filter(|seconds| (30..=86_400).contains(seconds))
+                .ok_or("SESSIONS_DRAFT_TTL_SECONDS must be 30 to 86400")?,
+            None => defaults.draft_ttl_seconds,
+        };
+        let visible = match get("SESSIONS_MAX_VISIBLE_DRAFTS") {
+            Some(value) => value
+                .parse::<i64>()
+                .ok()
+                .filter(|count| (1..=20).contains(count))
+                .ok_or("SESSIONS_MAX_VISIBLE_DRAFTS must be 1 to 20")?,
+            None => defaults.visible_drafts,
+        };
+        Ok(Self {
+            draft_ttl_seconds: ttl,
+            visible_drafts: visible,
+        })
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Security {
     pub origin: Option<String>,
@@ -15,10 +58,11 @@ pub struct Security {
     /// Private Topics base URL and credential for staff transcript reads.
     pub topics_url: Option<String>,
     pub topics_read_credential: Option<String>,
+    pub review: ReviewPolicy,
 }
 impl Security {
     pub fn from_env() -> Result<Self, &'static str> {
-        let get = |k| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let s = Self {
             origin: get("SESSIONS_PUBLIC_ORIGIN"),
             insecure_loopback: get("SESSIONS_ALLOW_INSECURE_LOOPBACK").as_deref() == Some("true"),
@@ -29,6 +73,7 @@ impl Security {
             topics_credential: get("SESSIONS_TOPICS_SERVICE_TOKEN"),
             topics_url: get("TOPICS_INTERNAL_URL"),
             topics_read_credential: get("TOPICS_SESSIONS_SERVICE_TOKEN"),
+            review: ReviewPolicy::from_env(get)?,
         };
         s.validate()?;
         Ok(s)
@@ -125,5 +170,40 @@ mod tests {
         );
         let disabled = Security::default();
         assert!(!disabled.operator_enabled());
+    }
+
+    #[test]
+    fn review_policy_defaults_and_bounds() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert_eq!(
+            ReviewPolicy::from_env(env(&[])),
+            Ok(ReviewPolicy::default())
+        );
+        assert_eq!(
+            ReviewPolicy::from_env(env(&[
+                ("SESSIONS_DRAFT_TTL_SECONDS", "900"),
+                ("SESSIONS_MAX_VISIBLE_DRAFTS", "5")
+            ])),
+            Ok(ReviewPolicy {
+                draft_ttl_seconds: 900,
+                visible_drafts: 5
+            })
+        );
+        for bad in [
+            ("SESSIONS_DRAFT_TTL_SECONDS", "0"),
+            ("SESSIONS_DRAFT_TTL_SECONDS", "ten"),
+            ("SESSIONS_MAX_VISIBLE_DRAFTS", "0"),
+            ("SESSIONS_MAX_VISIBLE_DRAFTS", "500"),
+        ] {
+            let pairs: &'static [(&'static str, &'static str)] = Box::leak(Box::new([bad]));
+            assert!(ReviewPolicy::from_env(env(pairs)).is_err(), "{bad:?}");
+        }
     }
 }

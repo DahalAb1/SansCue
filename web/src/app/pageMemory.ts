@@ -59,3 +59,22 @@ export function keepPublishedQuestionDraft(key: string, questionId: string, vers
 export function clearPublishedQuestionDraft(key: string) {
   drafts.delete(key);
 }
+
+type ReviewDraft = { base: string; text: string };
+
+/** Unsaved moderator wording for a draft; dropped once the saved wording changes. */
+export function memoryReviewDraft(key: string, base: string): string {
+  const raw = drafts.get(key);
+  if (!raw) return base;
+  try {
+    const draft = JSON.parse(raw) as Partial<ReviewDraft>;
+    return draft.base === base && typeof draft.text === 'string' ? draft.text : base;
+  } catch {
+    return base;
+  }
+}
+
+export function keepReviewDraft(key: string, base: string, text: string) {
+  if (text === base) drafts.delete(key);
+  else drafts.set(key, JSON.stringify({ base, text } satisfies ReviewDraft));
+}

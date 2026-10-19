@@ -82,8 +82,8 @@ function Landing({ kind, token }: { kind: 'join' | 'invite'; token: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   return <section class="panel">
-    <h1>{kind === 'join' ? 'Join the audience' : 'Accept TA invitation'}</h1>
-    <p>{kind === 'join' ? 'This link grants audience membership only. Existing speaker or TA membership is preserved.' : 'This single-use invitation grants TA access, not speaker or operator authority.'}</p>
+    <h1>{kind === 'join' ? 'Join the audience' : 'Accept moderator invitation'}</h1>
+    <p>{kind === 'join' ? 'This link grants audience membership only. Existing speaker or moderator membership is preserved.' : 'This single-use invitation grants moderator (TA) access: reviewing and publishing questions and replying to audience questions. It does not grant speaker or operator authority.'}</p>
     <Retention />
     {error && <p role="alert" class="error">{error}</p>}
     <form onSubmit={async event => {
@@ -161,7 +161,7 @@ export function App() {
       </section> : <section class="intro">
         <p class="eyebrow">Rooms and access</p>
         <h1>A shared room.<br /><span>Your own perspective.</span></h1>
-        <p class="intro-copy">Join using the speaker’s QR code or audience link. Invited TAs use their private invitation.</p>
+        <p class="intro-copy">Join using the speaker’s QR code or audience link. Invited moderators use their private invitation.</p>
         <p><a href="/operator" onClick={event => followLink(event, '/operator')}>Host operator sign-in and room creation</a></p>
         <p class="scope-note">Questions, responses, live updates and Bee integration are coming in later stages.</p>
       </section>}

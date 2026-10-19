@@ -50,6 +50,11 @@ export function tabLabel(tab: string): string {
   return ({ response: 'Response', qa: 'Q&A', dashboard: 'Dashboard', questions: 'Questions', transcript: 'Transcript', access: 'Room access' } as Record<string, string>)[tab] ?? tab;
 }
 
+/** The `ta` role identifier is kept; in this product the person moderates the room. */
+export function roleLabel(role: Role): string {
+  return role === 'ta' ? 'Moderator (TA)' : role === 'speaker' ? 'Speaker' : 'Audience';
+}
+
 export function sharePath(kind: 'join' | 'invite', value: string | null | undefined): string | null {
   if (typeof value !== 'string') return null;
   const prefix = '/' + kind + '/';
