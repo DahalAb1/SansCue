@@ -31,11 +31,16 @@ async fn authenticated_ingress_is_idempotent_and_rejects_identity_reuse() {
         received_at: Utc::now(),
         source_id: Some("synthetic-event".into()),
         source_sequence: Some(u64::MAX),
+        source_utterance_id: None,
+        source_spoken_at: None,
+        source_start_millis: None,
+        source_end_millis: None,
         text: "Synthetic transcript passage.".into(),
     };
     let app = router(App {
         pool: pool.clone(),
         bee_token: Arc::from("test-bee-token"),
+        sessions_token: None,
     });
     let make = |body: Value, auth: bool| {
         let mut req = axum::http::Request::builder()
@@ -157,6 +162,11 @@ async fn terminal_stale_candidate_does_not_block_later_outbox_rows() {
             ingest_ordinal: index as u64 + 1,
             received_at,
             excerpt: format!("Synthetic passage {index}"),
+            source_id: None,
+            source_start_millis: None,
+            source_end_millis: None,
+            window_start_time: None,
+            window_end_time: None,
         };
         sqlx::query("INSERT INTO transcript_events(event_id,schema_version,conversation_id,room_id,session_id,source_conversation_id,ingest_ordinal,received_at,source_id,source_sequence,text,projection_hash) VALUES($1,1,$2,$3,$4,NULL,$5,$6,NULL,NULL,$7,$8)")
             .bind(event_id).bind(conversation_id).bind(room_id).bind(session_id).bind(index as i64 + 1).bind(received_at).bind(&evidence.excerpt).bind(vec![0_u8;32])
@@ -249,4 +259,109 @@ async fn terminal_stale_candidate_does_not_block_later_outbox_rows() {
         .await
         .unwrap();
     pool.close().await;
+}
+
+#[tokio::test]
+async fn staff_transcript_read_requires_the_sessions_token_and_stays_in_its_room() {
+    let url = std::env::var("TOPICS_TEST_DATABASE_URL")
+        .expect("TOPICS_TEST_DATABASE_URL must name a disposable Topics-only PostgreSQL database");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("connect Topics test DB");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrate Topics test DB");
+    let app = router(App {
+        pool: pool.clone(),
+        bee_token: Arc::from("test-bee-token"),
+        sessions_token: Some(Arc::from("test-sessions-token")),
+    });
+    let room = Uuid::new_v4();
+    let binding = Binding {
+        conversation_id: Uuid::new_v4(),
+        source_conversation_id: None,
+        room_id: room,
+        session_id: Uuid::new_v4(),
+    };
+    let started = Utc::now();
+    for (ordinal, text) in [(1, "First line."), (2, "Second line.")] {
+        let event = TranscriptEvent {
+            schema_version: 1,
+            event_id: Uuid::new_v4(),
+            binding: binding.clone(),
+            ingest_ordinal: ordinal,
+            received_at: started + chrono::Duration::seconds(ordinal as i64),
+            source_id: None,
+            source_sequence: None,
+            source_utterance_id: None,
+            source_spoken_at: None,
+            source_start_millis: None,
+            source_end_millis: None,
+            text: text.into(),
+        };
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/internal/v1/transcript-events")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer test-bee-token")
+            .body(axum::body::Body::from(serde_json::to_vec(&event).unwrap()))
+            .unwrap();
+        let status = app.clone().oneshot(request).await.unwrap().status();
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    }
+    let read = |room: Uuid, token: &str| {
+        axum::http::Request::builder()
+            .uri(format!("/internal/v1/rooms/{room}/transcript"))
+            .header("authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap()
+    };
+    let rejected = app
+        .clone()
+        .oneshot(read(room, "test-bee-token"))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), axum::http::StatusCode::UNAUTHORIZED);
+    let response = app
+        .clone()
+        .oneshot(read(room, "test-sessions-token"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let lines: Vec<_> = body["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| line["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(lines, ["First line.", "Second line."]);
+    let other = app
+        .oneshot(read(Uuid::new_v4(), "test-sessions-token"))
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(other.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["lines"],
+        serde_json::json!([])
+    );
+    // Other tests in this shared database count pending generation work.
+    sqlx::query("DELETE FROM generation_jobs WHERE event_id IN (SELECT event_id FROM transcript_events WHERE room_id=$1)")
+        .bind(room)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM transcript_events WHERE room_id=$1")
+        .bind(room)
+        .execute(&pool)
+        .await
+        .unwrap();
 }

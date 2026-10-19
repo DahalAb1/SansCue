@@ -24,6 +24,14 @@ pub enum CommandOutcome {
     Stale,
 }
 
+/// A listening room binding that just claimed a live Bee conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Adoption {
+    pub room_id: Uuid,
+    pub conversation_id: Uuid,
+    pub revision: i64,
+}
+
 impl Store {
     pub async fn connect(url: &str) -> Result<Self, &'static str> {
         let options = PgConnectOptions::from_str(url).map_err(|_| "invalid Bee database URL")?;
@@ -64,12 +72,16 @@ impl Store {
 
     /// Ensure a command-target conversation exists without changing any
     /// previously persisted transport capability assertion.
-    pub async fn ensure_command_conversation(&self, id: Uuid) -> Result<(), &'static str> {
+    pub async fn ensure_command_conversation(
+        &self,
+        id: Uuid,
+        capabilities: Capabilities,
+    ) -> Result<(), &'static str> {
         if id.is_nil() {
             return Err("invalid conversation ID");
         }
         sqlx::query("INSERT INTO bee_conversations (conversation_id,state) VALUES ($1,$2) ON CONFLICT DO NOTHING")
-            .bind(id).bind(Json(Pipeline::new(id, Capabilities::default())))
+            .bind(id).bind(Json(Pipeline::new(id, capabilities)))
             .execute(&self.pool).await.map_err(|_| "Bee conversation creation failed")?;
         Ok(())
     }
@@ -178,10 +190,137 @@ impl Store {
             .map_err(|_| "Bee state write failed")?;
         sqlx::query("INSERT INTO bee_command_inbox(command_id,room_id,conversation_id,revision,command_type,result) VALUES($1,$2,$3,$4,$5,'{}')")
             .bind(command_id).bind(binding.room_id).bind(binding.conversation_id).bind(revision).bind(action).execute(&mut *tx).await.map_err(|_| "Bee command receipt write failed")?;
-        sqlx::query("UPDATE bee_room_revision SET revision=$2,conversation_id=$3,updated_at=now() WHERE room_id=$1")
-            .bind(binding.room_id).bind(revision).bind(if action == "bind" {Some(binding.conversation_id)} else {None}).execute(&mut *tx).await.map_err(|_| "Bee room revision update failed")?;
+        sqlx::query("UPDATE bee_room_revision SET revision=$2,conversation_id=$3,source_conversation_id=$4,updated_at=now() WHERE room_id=$1")
+            .bind(binding.room_id)
+            .bind(revision)
+            .bind(if action == "bind" {Some(binding.conversation_id)} else {None})
+            .bind(if action == "bind" {binding.source_conversation_id.as_deref()} else {None})
+            .execute(&mut *tx).await.map_err(|_| "Bee room revision update failed")?;
         tx.commit().await.map_err(|_| "Bee commit failed")?;
         Ok(CommandOutcome::Applied)
+    }
+
+    pub async fn conversation_for_source(
+        &self,
+        source_conversation_id: Uuid,
+    ) -> Result<Option<Uuid>, &'static str> {
+        let conversation: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT conversation_id FROM bee_room_revision WHERE lower(source_conversation_id)=lower($1)",
+        )
+        .bind(source_conversation_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| "Bee source binding lookup failed")?;
+        Ok(conversation.flatten())
+    }
+
+    /// Binds an unseen live source to the single listening room, if exactly one exists.
+    /// With zero or several listening rooms the source stays unbound; routing never guesses.
+    pub async fn adopt_listening_source(
+        &self,
+        source_conversation_id: Uuid,
+    ) -> Result<Option<Adoption>, &'static str> {
+        if source_conversation_id.is_nil() {
+            return Ok(None);
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| "Bee transaction start failed")?;
+        let listening = sqlx::query(
+            "SELECT room_id,revision,conversation_id FROM bee_room_revision \
+             WHERE conversation_id IS NOT NULL AND source_conversation_id IS NULL FOR UPDATE",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| "Bee listening binding lookup failed")?;
+        let [room] = listening.as_slice() else {
+            return Ok(None);
+        };
+        let adoption = Adoption {
+            room_id: room.get("room_id"),
+            conversation_id: room
+                .get::<Option<Uuid>, _>("conversation_id")
+                .ok_or("Bee listening binding invalid")?,
+            revision: room.get("revision"),
+        };
+        let state: Json<Pipeline> = sqlx::query_scalar(
+            "SELECT state FROM bee_conversations WHERE conversation_id=$1 FOR UPDATE",
+        )
+        .bind(adoption.conversation_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| "Bee conversation lock failed")?;
+        let mut pipeline = state.0;
+        pipeline.adopt_source(source_conversation_id.to_string())?;
+        sqlx::query("UPDATE bee_conversations SET state=$2 WHERE conversation_id=$1")
+            .bind(adoption.conversation_id)
+            .bind(Json(pipeline))
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| "Bee state write failed")?;
+        sqlx::query(
+            "UPDATE bee_room_revision SET source_conversation_id=$2,updated_at=now() WHERE room_id=$1",
+        )
+        .bind(adoption.room_id)
+        .bind(source_conversation_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Bee source adoption failed")?;
+        tx.commit().await.map_err(|_| "Bee commit failed")?;
+        Ok(Some(adoption))
+    }
+
+    pub async fn active_conversations(&self) -> Result<Vec<Uuid>, &'static str> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT conversation_id FROM bee_room_revision \
+             WHERE conversation_id IS NOT NULL ORDER BY conversation_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| "Bee active conversation lookup failed")
+    }
+
+    pub async fn record_numeric_source_mapping(
+        &self,
+        numeric_id: u64,
+        source_conversation_id: Uuid,
+    ) -> Result<(), &'static str> {
+        if numeric_id == 0 || numeric_id > i64::MAX as u64 || source_conversation_id.is_nil() {
+            return Err("invalid numeric mapping parameters");
+        }
+        sqlx::query(
+            "INSERT INTO bee_numeric_conversation_mapping (source_numeric_id, source_conversation_uuid) \
+             VALUES ($1, $2) \
+             ON CONFLICT (source_numeric_id) DO UPDATE SET source_conversation_uuid = EXCLUDED.source_conversation_uuid",
+        )
+        .bind(numeric_id as i64)
+        .bind(source_conversation_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| "Bee numeric mapping persistence failed")?;
+        Ok(())
+    }
+
+    pub async fn conversation_for_numeric_source(
+        &self,
+        numeric_id: u64,
+    ) -> Result<Option<Uuid>, &'static str> {
+        if numeric_id == 0 || numeric_id > i64::MAX as u64 {
+            return Ok(None);
+        }
+        let conversation: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT r.conversation_id \
+             FROM bee_numeric_conversation_mapping m \
+             JOIN bee_room_revision r ON lower(r.source_conversation_id) = lower(m.source_conversation_uuid::text) \
+             WHERE m.source_numeric_id = $1",
+        )
+        .bind(numeric_id as i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| "Bee numeric source lookup failed")?;
+        Ok(conversation.flatten())
     }
 
     pub async fn ingest(

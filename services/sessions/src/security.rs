@@ -12,6 +12,9 @@ pub struct Security {
     pub hmac_key: Option<Vec<u8>>,
     pub bee_credential: Option<String>,
     pub topics_credential: Option<String>,
+    /// Private Topics base URL and credential for staff transcript reads.
+    pub topics_url: Option<String>,
+    pub topics_read_credential: Option<String>,
 }
 impl Security {
     pub fn from_env() -> Result<Self, &'static str> {
@@ -24,6 +27,8 @@ impl Security {
             hmac_key: decode_key(get("SESSIONS_IDEMPOTENCY_HMAC_KEY"))?,
             bee_credential: get("SESSIONS_BEE_SERVICE_TOKEN"),
             topics_credential: get("SESSIONS_TOPICS_SERVICE_TOKEN"),
+            topics_url: get("TOPICS_INTERNAL_URL"),
+            topics_read_credential: get("TOPICS_SESSIONS_SERVICE_TOKEN"),
         };
         s.validate()?;
         Ok(s)

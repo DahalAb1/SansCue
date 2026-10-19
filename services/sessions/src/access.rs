@@ -161,6 +161,7 @@ pub fn router(access: Access) -> Router {
         .route("/invitations/{token}/redeem", post(mutate))
         .route("/rooms/{room}/state", get(read))
         .route("/rooms/{room}/qa", get(read).post(mutate))
+        .route("/rooms/{room}/transcript", get(read))
         .route("/rooms/{room}/questions/{question}/versions", post(mutate))
         .route("/rooms/{room}/questions/{question}/publish", post(mutate))
         .route("/rooms/{room}/questions/{question}/response", post(mutate))
@@ -515,10 +516,20 @@ fn check_shape(path: &str, body: &Value) -> Result<()> {
         };
     }
     if path.ends_with("/bee/bind") {
+        // `{"listen": true}` waits for the next live Bee conversation instead of naming one.
+        if object.len() == 1 && body.get("listen") == Some(&Value::Bool(true)) {
+            return Ok(());
+        }
         let allowed = ["conversation_id", "source_conversation_id"];
-        if !object.contains_key("conversation_id")
-            || object.keys().any(|k| !allowed.contains(&k.as_str()))
-            || !body["conversation_id"].is_string()
+        let supplied_internal = body.get("conversation_id").is_some_and(Value::is_string);
+        let supplied_source = body
+            .get("source_conversation_id")
+            .is_some_and(Value::is_string);
+        if object.keys().any(|k| !allowed.contains(&k.as_str()))
+            || (!supplied_internal && !supplied_source)
+            || body
+                .get("conversation_id")
+                .is_some_and(|value| !value.is_string())
             || body
                 .get("source_conversation_id")
                 .is_some_and(|v| !v.is_null() && !v.is_string())
@@ -951,16 +962,27 @@ async fn bind_bee(
     room_id: Uuid,
     body: &Value,
 ) -> Result<Value> {
-    let conversation = Uuid::parse_str(body["conversation_id"].as_str().ok_or_else(invalid)?)
-        .map_err(|_| invalid())?;
+    let conversation = match body.get("conversation_id").and_then(Value::as_str) {
+        Some(value) => Uuid::parse_str(value).map_err(|_| invalid())?,
+        None => Uuid::new_v4(),
+    };
     if conversation.is_nil() {
         return Err(invalid());
     }
     let source = body["source_conversation_id"]
         .as_str()
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-    if source.is_some_and(|s| s.len() > 256) {
+        .filter(|s| !s.is_empty())
+        .map(|source| {
+            Uuid::parse_str(source)
+                .ok()
+                .filter(|id| !id.is_nil())
+                .map(|id| id.to_string())
+                .ok_or_else(invalid)
+        })
+        .transpose()?;
+    let listen = body.get("listen") == Some(&Value::Bool(true));
+    if body.get("conversation_id").is_none() && source.is_none() && !listen {
         return Err(invalid());
     }
     if let Some(old) =
@@ -975,6 +997,19 @@ async fn bind_bee(
             "Unbind the current conversation before changing it",
         ));
     }
+    if let Some(source) = source.as_deref()
+        && sqlx::query_scalar::<_, Uuid>("SELECT room_id FROM bee_room_bindings WHERE lower(source_conversation_id)=lower($1) AND status<>'unbound' AND room_id<>$2")
+            .bind(source)
+            .bind(room_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_some()
+    {
+        return Err(conflict(
+            "bee_source_already_bound",
+            "Bee conversation is already bound to another room",
+        ));
+    }
     let rev: i64 = sqlx::query_scalar("SELECT sequence+1 FROM rooms WHERE id=$1")
         .bind(room_id)
         .fetch_one(&mut **tx)
@@ -982,12 +1017,14 @@ async fn bind_bee(
     let command_id = Uuid::new_v4();
     let speaker_session: Uuid = sqlx::query_scalar("SELECT session_id FROM memberships WHERE room_id=$1 AND role='speaker' AND status='active'")
         .bind(room_id).fetch_one(&mut **tx).await?;
-    let payload = json!({"conversation_id":conversation,"source_conversation_id":source,"room_id":room_id,"session_id":speaker_session,"revision":rev});
+    let payload = json!({"conversation_id":conversation,"source_conversation_id":source.clone(),"room_id":room_id,"session_id":speaker_session,"revision":rev});
     sqlx::query("INSERT INTO bee_room_bindings(room_id,conversation_id,source_conversation_id,status,revision,session_id) VALUES($1,$2,$3,'binding',$4,$5) ON CONFLICT(room_id) DO UPDATE SET conversation_id=EXCLUDED.conversation_id,source_conversation_id=EXCLUDED.source_conversation_id,status='binding',revision=EXCLUDED.revision,session_id=EXCLUDED.session_id,updated_at=now()")
-        .bind(room_id).bind(conversation).bind(source).bind(rev).bind(speaker_session).execute(&mut **tx).await?;
+        .bind(room_id).bind(conversation).bind(source.as_deref()).bind(rev).bind(speaker_session).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO bee_command_outbox(command_id,room_id,conversation_id,command_type,revision,payload) VALUES($1,$2,$3,'bind',$4,$5)").bind(command_id).bind(room_id).bind(conversation).bind(rev).bind(payload).execute(&mut **tx).await?;
     change(tx, room_id, false).await?;
-    Ok(json!({"status":"binding","command_id":command_id,"revision":rev}))
+    Ok(
+        json!({"status":"binding","command_id":command_id,"conversation_id":conversation,"revision":rev}),
+    )
 }
 
 async fn active_question(
@@ -1544,6 +1581,16 @@ async fn read(
         state
     } else if p[2] == "qa" {
         written_question_list(&mut tx, room_id, member.get("id"), member.get("role")).await?
+    } else if p[2] == "transcript" {
+        if member.get::<String, _>("role") == "audience" {
+            return Err(forbidden());
+        }
+        // Release the database transaction before calling Topics.
+        tx.commit().await?;
+        return Ok(reply(
+            StatusCode::OK,
+            room_transcript(&access.security, room_id).await?,
+        ));
     } else if p[2] == "memberships" || p[2] == "invitations" {
         require_speaker(&member)?;
         let (limit, after) = list_window(uri.query())?;
@@ -1553,6 +1600,44 @@ async fn read(
     };
     tx.commit().await?;
     Ok(reply(StatusCode::OK, body))
+}
+
+/// Recent transcript lines for room staff, read from Topics, which owns them.
+async fn room_transcript(security: &Security, room_id: Uuid) -> Result<Value> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let unavailable = || {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "transcript_unavailable",
+            "The live transcript is unavailable",
+        )
+    };
+    let (Some(base), Some(token)) = (&security.topics_url, &security.topics_read_credential) else {
+        return Err(unavailable());
+    };
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_default()
+    });
+    let response = client
+        .get(format!(
+            "{}/internal/v1/rooms/{room_id}/transcript",
+            base.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| unavailable())?;
+    if !response.status().is_success() {
+        return Err(unavailable());
+    }
+    let body: Value = response.json().await.map_err(|_| unavailable())?;
+    if !body["lines"].is_array() {
+        return Err(unavailable());
+    }
+    Ok(json!({"lines": body["lines"]}))
 }
 
 fn list_window(query: Option<&str>) -> Result<(i64, Option<Uuid>)> {
@@ -1730,9 +1815,37 @@ async fn topics_candidate(
         || candidate["text"]
             .as_str()
             .is_none_or(|s| s.trim().is_empty() || s.len() > 1000)
-        || candidate["evidence"]
-            .as_object()
-            .is_none_or(|o| o.len() != 4)
+        || candidate["evidence"].as_object().is_none_or(|o| {
+            if o.len() < 4 || o.len() > 9 {
+                return true;
+            }
+            for (k, v) in o {
+                match k.as_str() {
+                    "conversation_id" | "ingest_ordinal" | "received_at" | "excerpt" => {}
+                    "source_id" => {
+                        if !v.is_null() && !v.is_string() {
+                            return true;
+                        }
+                    }
+                    "source_start_millis" | "source_end_millis" => {
+                        if !v.is_null() && !v.is_u64() {
+                            return true;
+                        }
+                    }
+                    "window_start_time" | "window_end_time" => {
+                        if !v.is_null()
+                            && !v
+                                .as_str()
+                                .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+                        {
+                            return true;
+                        }
+                    }
+                    _ => return true,
+                }
+            }
+            false
+        })
     {
         return Err(invalid());
     }
@@ -1965,7 +2078,10 @@ async fn bee_status(
 ) -> Result<Response> {
     require_bee(&headers, &access)?;
     let room = Uuid::parse_str(&room).map_err(|_| missing())?;
-    if !status.is_object() || status.as_object().is_some_and(|o| o.len() > 16) {
+    if !status.is_object()
+        || status.as_object().is_some_and(|o| o.len() > 16)
+        || status["has_gaps"].as_bool().is_none()
+    {
         return Err(invalid());
     }
     let conversation = Uuid::parse_str(status["binding_id"].as_str().unwrap_or("")).ok();
@@ -2009,6 +2125,16 @@ async fn bee_status(
             StatusCode::OK,
             json!({"accepted":true,"duplicate":true}),
         ));
+    }
+    if valid_bind
+        && let Some(source) = status["source_conversation_id"]
+            .as_str()
+            .and_then(|source| Uuid::parse_str(source).ok())
+            .filter(|source| !source.is_nil())
+    {
+        // A listening binding learns its Bee conversation when the worker adopts one.
+        sqlx::query("UPDATE bee_room_bindings SET source_conversation_id=$2,updated_at=now() WHERE room_id=$1 AND source_conversation_id IS NULL AND NOT EXISTS (SELECT 1 FROM bee_room_bindings other WHERE other.room_id<>$1 AND other.status<>'unbound' AND lower(other.source_conversation_id)=lower($2))")
+            .bind(room).bind(source.to_string()).execute(&mut *tx).await?;
     }
     sqlx::query("INSERT INTO bee_room_status(room_id,status) VALUES($1,$2) ON CONFLICT(room_id) DO UPDATE SET status=EXCLUDED.status,updated_at=now()").bind(room).bind(status).execute(&mut *tx).await?;
     change(&mut tx, room, false).await?;

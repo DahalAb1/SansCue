@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import QRCode from 'qrcode';
-import { ApiError, api, deniesRoomRead, errorMessage, parseRoomState, paths } from './api';
-import type { State, Invitation, Membership, Page, LinkResult, QuestionCandidate } from './api';
+import { ApiError, api, deniesRoomRead, errorMessage, generatorLabel, isUuid, parseRoomState, parseTranscript, paths } from './api';
+import type { BeeState, State, Invitation, Membership, Page, LinkResult, QuestionCandidate, TranscriptLine } from './api';
 import { followLink, selectedSection, sharePath, tabLabel } from './navigation';
 import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft } from './pageMemory';
 import { parseRoomEvent, reconnectDelay } from './live';
@@ -34,6 +34,39 @@ export function ShareLink({ value, kind }: { value: string; kind: 'join' | 'invi
     <label>{label}<input readOnly value={url} onFocus={event => event.currentTarget.select()} /></label>
     <a href={safe} target="_blank" rel="noreferrer noopener">Open {kind === 'join' ? 'audience link' : 'TA invitation'}</a>
     <p>Copy this link now. It is kept only in this page’s memory.{kind === 'invite' && ' Share only with your intended TA; this invitation is single-use.'}</p>
+  </section>;
+}
+
+function TranscriptPanel({ roomId }: { roomId: string }) {
+  const [lines, setLines] = useState<TranscriptLine[] | null>(null);
+  const [error, setError] = useState('');
+  const box = useRef<HTMLOListElement>(null);
+  useEffect(() => {
+    let current = true;
+    const load = () => api.read<unknown>(paths.transcript(roomId))
+      .then(result => {
+        if (!current) return;
+        const parsed = parseTranscript(result);
+        if (parsed) { setLines(parsed); setError(''); }
+        else setError('The transcript response was not understood.');
+      })
+      .catch(reason => { if (current) setError(errorMessage(reason)); });
+    void load();
+    // Polling keeps the panel independent of the room event stream.
+    const timer = window.setInterval(() => void load(), 3000);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [roomId]);
+  useEffect(() => {
+    if (box.current) box.current.scrollTop = box.current.scrollHeight;
+  }, [lines?.length]);
+  return <section aria-label="Live transcript">
+    <p>What Bee heard, newest last. Only the speaker and TAs see this.</p>
+    {error && <p role="status">{error}</p>}
+    {lines === null && !error && <p role="status">Loading the transcript…</p>}
+    {lines?.length === 0 && <p role="status">Nothing yet. Speech appears here a few seconds after Bee hears it.</p>}
+    {lines && lines.length > 0 && <ol class="transcript" ref={box} aria-live="polite">
+      {lines.map((line, index) => <li key={index}><time dateTime={line.spoken_at}>{new Date(line.spoken_at).toLocaleTimeString()}</time> {line.text}</li>)}
+    </ol>}
   </section>;
 }
 
@@ -87,10 +120,10 @@ function QuestionsPanel({ state, refresh, ended }: { state: State; refresh: () =
         <button disabled={busy || draft.trim() === state.active_question.text} onClick={() => void addVersion()}>Publish new version</button>
       </>}
     </> : <p>No question is published.</p>}
-    <h3>Evidence-backed candidates</h3>
-    <p><strong>Development preview — deterministic stub-v1, not AI-generated.</strong> Candidates are visible only to the speaker and TAs. Evidence is retained as an immutable copy when published.</p>
-    {candidates.length === 0 ? <p role="status">No development candidates yet.</p> : <ul class="access-list">{candidates.map(candidate => <li key={candidate.candidate_id}>
-      <div><strong>{candidate.text}</strong><p>Unpublished · {candidate.generator_version} · evidence ordinal {candidate.evidence.ingest_ordinal}</p><blockquote>{candidate.evidence.excerpt}</blockquote><small>Transcript event {candidate.event_id}</small></div>
+    <h3>Question drafts</h3>
+    <p>Drafted from the live transcript. Only the speaker and TAs see drafts; the audience sees a question only after you publish it. The quoted evidence is kept with the published question.</p>
+    {candidates.length === 0 ? <p role="status">No drafts yet. They appear while you speak; pauses, small talk and the cooldown between questions can delay them.</p> : <ul class="access-list">{candidates.map(candidate => <li key={candidate.candidate_id}>
+      <div><strong>{candidate.text}</strong><p>Unpublished · {generatorLabel(candidate.generator_version)}</p><blockquote>{candidate.evidence.excerpt}</blockquote></div>
       {state.membership.role === 'speaker' && !ended && <button disabled={busy} onClick={() => void publish(candidate)}>Publish</button>}
     </li>)}</ul>}
   </>;
@@ -175,6 +208,12 @@ function QaPanel({ state, ended, revision }: { state: State; ended: boolean; rev
 
 type IssuedInvite = { id: string; expires: string; link: string | null };
 
+function beeLabel(bee: BeeState): string {
+  if (bee.status === 'bound' && !bee.source_conversation_id) return 'listening for a Bee recording';
+  if (bee.status === 'bound') return 'live';
+  return bee.status;
+}
+
 function joinStatus(state: State): string {
   if (state.room.status === 'ended') return 'This room has ended; links no longer admit new members.';
   if (state.join_link_enabled === true) return 'The audience link is enabled.';
@@ -189,6 +228,7 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
   const [members, setMembers] = useState<Page<Membership>>();
   const [joinLink, setJoinLink] = useState<string | null>(memoryJoin(roomId));
   const [issued, setIssued] = useState<IssuedInvite | undefined>(memoryInvite(roomId));
+  const [beeConversation, setBeeConversation] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -254,6 +294,43 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
     {listError && <p role="alert" class="error">{listError}</p>}
     {notice && <p role="status">{notice}</p>}
     <button type="button" disabled={busy} onClick={() => void run(load)}>Refresh access lists</button>
+    <h3>Bee live transcript</h3>
+    {!state.bee ? <p role="status">Bee binding status is unavailable.</p> : <>
+      <p>Status: <strong>{beeLabel(state.bee)}</strong>{state.bee.has_gaps ? ' · transcript gaps detected' : ''}</p>
+      {state.bee.status === 'unbound' ? <>
+        <p>Click Start listening, then start recording on your Bee or Apple Watch. SansCue connects the next new Bee conversation to this room.</p>
+        <button type="button" disabled={busy || ended} onClick={() => void run(async () => {
+          await api.mutate(paths.bindBee(roomId), { listen: true });
+          await refresh();
+          setNotice('Listening for your next Bee recording.');
+        })}>Start listening</button>
+        <details>
+          <summary>Connect a specific Bee conversation</summary>
+          <label>Bee conversation UUID
+            <input
+              autoComplete="off"
+              placeholder="00000000-0000-0000-0000-000000000000"
+              value={beeConversation}
+              onInput={event => setBeeConversation(event.currentTarget.value)}
+            />
+          </label>
+          <p>Use this when several rooms listen at once. Copy <code>conversation_uuid</code> from <code>bee stream --json</code>.</p>
+          <button type="button" disabled={busy || ended || !isUuid(beeConversation.trim())} onClick={() => void run(async () => {
+            await api.mutate(paths.bindBee(roomId), { source_conversation_id: beeConversation.trim() });
+            setBeeConversation('');
+            await refresh();
+            setNotice('Bee conversation binding requested.');
+          })}>Bind Bee conversation</button>
+        </details>
+      </> : <button type="button" disabled={busy || state.bee.status === 'unbinding'} onClick={() => {
+        if (!window.confirm('Stop routing this Bee conversation to the room?')) return;
+        void run(async () => {
+          await api.mutate(paths.unbindBee(roomId));
+          await refresh();
+          setNotice('Bee conversation unbinding requested.');
+        });
+      }}>{state.bee.status === 'bound' && !state.bee.source_conversation_id ? 'Stop listening' : 'Unbind Bee conversation'}</button>}
+    </>}
     <h3>Audience link</h3>
     <p>{joinStatus(state)} Existing members keep their access.</p>
     {!ended && joinLink && state.join_link_enabled === true && <ShareLink value={joinLink} kind="join" />}
@@ -510,6 +587,7 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
             : selected === 'response' ? <FeedbackPanel state={state} ended={ended} refresh={refresh} />
             : selected === 'dashboard' ? <DashboardPanel state={state} />
             : selected === 'questions' && state.membership.role !== 'audience' ? <QuestionsPanel state={state} refresh={refresh} ended={ended} />
+            : selected === 'transcript' && state.membership.role !== 'audience' ? <TranscriptPanel roomId={state.room.id} />
             : <p>{selected === 'questions' ? 'Candidate preview is not available to audience members.' : 'No active question is available.'}</p>}
         </>}
     </div>

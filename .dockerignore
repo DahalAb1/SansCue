@@ -29,6 +29,11 @@
 !web/src/**/*.tsx
 !web/src/**/*.css
 !deploy/Caddyfile
+# The classic builder only descends into a denied directory when an exception
+# names it explicitly, so each nested frontend source directory is listed here.
+!web/src/app/**/*.ts
+!web/src/app/**/*.tsx
+!web/src/app/**/*.css
 # Defense in depth for sensitive directories even if they contain source-like files.
 **/.env
 **/.env.*
@@ -71,6 +76,9 @@ web/vite.config.ts/**
 web/src/**/*.ts/**
 web/src/**/*.tsx/**
 web/src/**/*.css/**
+web/src/app/**/*.ts/**
+web/src/app/**/*.tsx/**
+web/src/app/**/*.css/**
 deploy/Caddyfile/**
 services/bee-connection/Cargo.toml/**
 services/bee-connection/src/**/*.rs/**
