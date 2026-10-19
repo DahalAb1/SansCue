@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import QRCode from 'qrcode';
-import { ApiError, api, deniesRoomRead, errorMessage, generatorLabel, isUuid, parseRoomState, parseTranscript, paths } from './api';
-import type { BeeState, State, Invitation, Membership, Page, LinkResult, QuestionCandidate, TranscriptLine } from './api';
-import { followLink, selectedSection, sharePath, tabLabel } from './navigation';
-import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft } from './pageMemory';
+import { ApiError, api, deniesRoomRead, errorMessage, generatorLabel, isUuid, parseRoomState, parseTranscript, parseWrittenQuestions, paths } from './api';
+import type { State, Invitation, Membership, Page, LinkResult, QuestionCandidate, TranscriptLine, WrittenQuestion } from './api';
+import { followLink, roleLabel, selectedSection, sharePath, tabLabel } from './navigation';
+import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, keepReviewDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft, memoryReviewDraft } from './pageMemory';
 import { parseRoomEvent, reconnectDelay } from './live';
+import { chartRows, draftExpiry, earlierWordingNote, formatPercent, respondentSummary, responseOptions } from './feedback';
+import { ago, connectionStatus, parseBeeConnection } from './connection';
+import type { BeeConnection } from './connection';
+
+type LiveStatus = 'connecting' | 'connected' | 'disconnected' | 'ended';
 
 function when(value: string): string {
   const date = new Date(value);
@@ -27,13 +32,13 @@ export function ShareLink({ value, kind }: { value: string; kind: 'join' | 'invi
     return () => { current = false; };
   }, [url]);
   if (!safe) return <p role="alert">The service returned an unusable link. Issue a new link.</p>;
-  const label = kind === 'join' ? 'Audience join URL' : 'Private TA invitation URL';
-  return <section class="share-link" aria-label={kind === 'join' ? 'Audience join link' : 'Private TA invitation'}>
-    {qr && <img src={qr} width="280" height="280" alt={kind === 'join' ? 'QR code for the audience join link below' : 'QR code for the private TA invitation below'} />}
+  const label = kind === 'join' ? 'Audience join URL' : 'Private moderator invitation URL';
+  return <section class="share-link" aria-label={kind === 'join' ? 'Audience join link' : 'Private moderator invitation'}>
+    {qr && <img src={qr} width="280" height="280" alt={kind === 'join' ? 'QR code for the audience join link below' : 'QR code for the private moderator invitation below'} />}
     {failed && <p role="status">QR could not be generated. Use the text link instead.</p>}
     <label>{label}<input readOnly value={url} onFocus={event => event.currentTarget.select()} /></label>
-    <a href={safe} target="_blank" rel="noreferrer noopener">Open {kind === 'join' ? 'audience link' : 'TA invitation'}</a>
-    <p>Copy this link now. It is kept only in this page’s memory.{kind === 'invite' && ' Share only with your intended TA; this invitation is single-use.'}</p>
+    <a href={safe} target="_blank" rel="noreferrer noopener">Open {kind === 'join' ? 'audience link' : 'moderator invitation'}</a>
+    <p>Copy this link now. It is kept only in this page’s memory.{kind === 'invite' && ' Share only with your intended moderator; this invitation is single-use.'}</p>
   </section>;
 }
 
@@ -60,7 +65,7 @@ function TranscriptPanel({ roomId }: { roomId: string }) {
     if (box.current) box.current.scrollTop = box.current.scrollHeight;
   }, [lines?.length]);
   return <section aria-label="Live transcript">
-    <p>What Bee heard, newest last. Only the speaker and TAs see this.</p>
+    <p>What Bee heard, newest last. Only the speaker and moderators see this.</p>
     {error && <p role="status">{error}</p>}
     {lines === null && !error && <p role="status">Loading the transcript…</p>}
     {lines?.length === 0 && <p role="status">Nothing yet. Speech appears here a few seconds after Bee hears it.</p>}
@@ -70,9 +75,78 @@ function TranscriptPanel({ roomId }: { roomId: string }) {
   </section>;
 }
 
+/** Re-renders on an interval and returns the time of this render. */
+function useNow(intervalMs: number): number {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick(tick => tick + 1), intervalMs);
+    return () => window.clearInterval(timer);
+  }, [intervalMs]);
+  return Date.now();
+}
+
+function evidenceTime(candidate: QuestionCandidate): string {
+  const at = candidate.evidence.window_end_time ?? candidate.evidence.received_at;
+  const date = new Date(at);
+  return Number.isNaN(date.getTime()) ? '' : 'Spoken around ' + date.toLocaleTimeString();
+}
+
+type Run = (task: () => Promise<void>) => Promise<void>;
+
+function DraftCard({ state, candidate, now, busy, run, replacing }: { state: State; candidate: QuestionCandidate; now: number; busy: boolean; run: Run; replacing: boolean }) {
+  const key = draftKey(state.room.id, state.membership.id, 'review-draft\n' + candidate.candidate_id);
+  const [text, setText] = useState(() => memoryReviewDraft(key, candidate.text));
+  useEffect(() => setText(memoryReviewDraft(key, candidate.text)), [key, candidate.text]);
+  const moderator = state.membership.role === 'ta' && state.room.status === 'open';
+  const expiry = draftExpiry(candidate.expires_at, now);
+  const trimmed = text.trim();
+  const changed = trimmed !== candidate.text;
+  const invalid = trimmed === '' || [...trimmed].length > 1000;
+  const fieldId = 'draft-' + candidate.candidate_id;
+  return <li class="draft">
+    <p class="draft-meta">
+      <span>{generatorLabel(candidate.generator_version)}</span>
+      {candidate.edited && <span>Edited by moderator</span>}
+      {expiry.label && <span class={expiry.expired ? 'draft-expired' : undefined}>{expiry.label}</span>}
+    </p>
+    {moderator ? <>
+      <label for={fieldId} class="visually-hidden">Question wording</label>
+      <textarea id={fieldId} class="draft-text" rows={2} maxLength={1000} value={text} disabled={expiry.expired} onInput={event => {
+        const value = event.currentTarget.value;
+        setText(value);
+        keepReviewDraft(key, candidate.text, value);
+      }} />
+    </> : <p class="draft-text">{candidate.text}</p>}
+    {candidate.edited && candidate.original_text && <p class="draft-original">Generated wording: {candidate.original_text}</p>}
+    <figure class="evidence">
+      <blockquote>{candidate.evidence.excerpt}</blockquote>
+      <figcaption>Transcript evidence{evidenceTime(candidate) && ' · ' + evidenceTime(candidate)}</figcaption>
+    </figure>
+    {moderator && <div class="actions">
+      <button type="button" class="primary" disabled={busy || expiry.expired || invalid} onClick={() => void run(async () => {
+        await api.mutate(paths.publishQuestion(state.room.id, candidate.candidate_id), changed ? { text: trimmed } : {});
+        keepReviewDraft(key, text, text);
+      })}>{replacing ? 'Publish and replace current' : 'Publish'}</button>
+      <button type="button" disabled={busy || expiry.expired || invalid || !changed} onClick={() => void run(async () => {
+        await api.mutate(paths.saveDraft(state.room.id, candidate.candidate_id), { text: trimmed });
+        keepReviewDraft(key, text, text);
+      })}>Save edit</button>
+      <button type="button" disabled={busy} onClick={() => {
+        if (!window.confirm('Dismiss this draft? It will not come back.')) return;
+        void run(async () => {
+          await api.mutate(paths.dismissDraft(state.room.id, candidate.candidate_id));
+          keepReviewDraft(key, text, text);
+        });
+      }}>Dismiss</button>
+    </div>}
+  </li>;
+}
+
 function QuestionsPanel({ state, refresh, ended }: { state: State; refresh: () => Promise<boolean>; ended: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const now = useNow(15_000);
+  const moderator = state.membership.role === 'ta';
   const owner = draftKey(state.room.id, state.membership.id, 'question-publication');
   const active = state.active_question;
   const [draft, setDraft] = useState(() => active
@@ -82,57 +156,51 @@ function QuestionsPanel({ state, refresh, ended }: { state: State; refresh: () =
     setDraft(active ? memoryPublishedQuestionDraft(owner, active.id, active.version, active.text) : '');
   }, [owner, active?.id, active?.version]);
   const candidates = state.question_candidates ?? [];
-  async function publish(candidate: QuestionCandidate) {
+  async function run(task: () => Promise<void>) {
     setBusy(true); setError('');
-    try {
-      const result = await api.mutate<{ question_id?: string; version?: number }>(paths.publishQuestion(state.room.id, candidate.candidate_id));
-      if (result.question_id && Number.isSafeInteger(result.version)) keepPublishedQuestionDraft(owner, result.question_id, result.version!, candidate.text);
-      else clearPublishedQuestionDraft(owner);
-      await refresh();
-    }
-    catch (reason) { setError(errorMessage(reason)); }
+    try { await task(); await refresh(); }
+    catch (reason) { setError(errorMessage(reason)); await refresh(); }
     finally { setBusy(false); }
   }
   async function addVersion() {
     if (!state.active_question || draft.trim() === '') return;
-    setBusy(true); setError('');
-    try {
-      const result = await api.mutate<{ question_id?: string; version?: number }>(paths.questionVersion(state.room.id, state.active_question.id), { text: draft });
+    await run(async () => {
+      const result = await api.mutate<{ question_id?: string; version?: number }>(paths.questionVersion(state.room.id, state.active_question!.id), { text: draft });
       if (result.question_id && Number.isSafeInteger(result.version)) keepPublishedQuestionDraft(owner, result.question_id, result.version!, draft);
       else clearPublishedQuestionDraft(owner);
-      await refresh();
-    }
-    catch (reason) { setError(errorMessage(reason)); }
-    finally { setBusy(false); }
+    });
   }
   return <>
     {error && <p role="alert" class="error">{error}</p>}
     <h3>Published question</h3>
-    {state.active_question ? <>
-      <p>{state.active_question.text} <small>Version {state.active_question.version}</small></p>
-      {state.active_question.versions && <ul aria-label="Immutable published versions">{state.active_question.versions.map(item => <li key={item.version}><strong>Version {item.version}</strong>: {item.text} <small>{when(item.created_at)}</small></li>)}</ul>}
-      {state.membership.role === 'speaker' && !ended && <>
+    {active ? <>
+      <p class="published-text">{active.text} <small>Version {active.version}</small></p>
+      {active.versions && active.versions.length > 1 && <ul aria-label="Immutable published versions">{active.versions.map(item => <li key={item.version}><strong>Version {item.version}</strong>: {item.text} <small>{when(item.created_at)}</small></li>)}</ul>}
+      {moderator && !ended && <details class="version-editor">
+        <summary>Correct the published wording</summary>
+        <p>This creates version {active.version + 1}. Responses already given stay attached, and the speaker’s chart shows how many were given to earlier wording.</p>
         <label>New immutable version<textarea rows={3} maxLength={1000} value={draft} onInput={e => {
           const value = e.currentTarget.value;
           setDraft(value);
-          keepPublishedQuestionDraft(owner, state.active_question!.id, state.active_question!.version, value);
+          keepPublishedQuestionDraft(owner, active.id, active.version, value);
         }} /></label>
-        <button disabled={busy || draft.trim() === state.active_question.text} onClick={() => void addVersion()}>Publish new version</button>
-      </>}
+        <button type="button" disabled={busy || draft.trim() === '' || draft.trim() === active.text} onClick={() => void addVersion()}>Publish new version</button>
+      </details>}
     </> : <p>No question is published.</p>}
     <h3>Question drafts</h3>
-    <p>Drafted from the live transcript. Only the speaker and TAs see drafts; the audience sees a question only after you publish it. The quoted evidence is kept with the published question.</p>
-    {candidates.length === 0 ? <p role="status">No drafts yet. They appear while you speak; pauses, small talk and the cooldown between questions can delay them.</p> : <ul class="access-list">{candidates.map(candidate => <li key={candidate.candidate_id}>
-      <div><strong>{candidate.text}</strong><p>Unpublished · {generatorLabel(candidate.generator_version)}</p><blockquote>{candidate.evidence.excerpt}</blockquote></div>
-      {state.membership.role === 'speaker' && !ended && <button disabled={busy} onClick={() => void publish(candidate)}>Publish</button>}
-    </li>)}</ul>}
+    <p>{moderator
+      ? 'Drafted automatically from the live transcript and visible only to room staff. Check the quoted evidence, edit if needed, then publish. The audience sees a question only after you publish it.'
+      : 'Drafted automatically from the live transcript. Your moderator reviews, edits and publishes them; you see them here read-only.'}</p>
+    {candidates.length === 0
+      ? <p role="status">No drafts right now. Drafts appear after the speaker explains an idea; greetings, pauses, repeated ideas and the minimum gap between drafts can delay them. Unpublished drafts expire after a few minutes.</p>
+      : <ul class="drafts" aria-label="Drafts awaiting review">{candidates.map(candidate => <DraftCard key={candidate.candidate_id} state={state} candidate={candidate} now={now} busy={busy} run={run} replacing={active !== null} />)}</ul>}
   </>;
 }
 
 function FeedbackPanel({ state, ended, refresh }: { state: State; ended: boolean; refresh: () => Promise<boolean> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const responses = [{ value: 'clear', label: 'Clear' }, { value: 'partly_clear', label: 'Partly clear' }, { value: 'need_help', label: 'Need help' }] as const;
+  const responses = responseOptions;
   async function respond(value: typeof responses[number]['value']) {
     if (!state.active_question) return;
     setBusy(true); setError('');
@@ -147,6 +215,8 @@ function FeedbackPanel({ state, ended, refresh }: { state: State; ended: boolean
       <p>How clear is this question?</p>
       <div class="actions">{responses.map(item => <button key={item.value} aria-pressed={state.my_response === item.value} disabled={busy || ended} onClick={() => void respond(item.value)}>{item.label}</button>)}</div>
       {state.my_response && <p role="status">Your response: {responses.find(item => item.value === state.my_response)?.label}</p>}
+      {state.my_response && typeof state.my_response_version === 'number' && state.my_response_version < state.active_question.version
+        && <p class="notice">The wording changed after you responded. Choose again if your answer is different.</p>}
     </> : <p>No active question to respond to.</p>}
   </>;
 }
@@ -154,7 +224,7 @@ function FeedbackPanel({ state, ended, refresh }: { state: State; ended: boolean
 function DashboardPanel({ state }: { state: State }) {
   const dashboard = state.dashboard;
   if (!dashboard) return <p role="status">Response dashboard unavailable.</p>;
-  const percent = (value: number | null) => typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)}%` : '—';
+  const percent = formatPercent;
   return <>
     <p>{dashboard.respondents} audience response{dashboard.respondents === 1 ? '' : 's'}</p>
     <dl>
@@ -165,7 +235,57 @@ function DashboardPanel({ state }: { state: State }) {
   </>;
 }
 
-type WrittenQuestion = { message_id: string; question_id: string | null; body: string; created_at: string };
+function SpeakerDashboard({ state, liveStatus }: { state: State; liveStatus: LiveStatus }) {
+  const dashboard = state.dashboard;
+  const question = state.active_question;
+  const ended = state.room.status === 'ended';
+  if (!dashboard) return <p role="status">Response results are unavailable. Refresh room state.</p>;
+  const rows = chartRows(dashboard);
+  return <section class="response-chart" aria-labelledby="chart-question">
+    {!ended && liveStatus !== 'connected' && <p role="status" class="notice">
+      {liveStatus === 'connecting' ? 'Connecting to live updates…' : 'Live updates are reconnecting. These results may be out of date.'}
+    </p>}
+    {!question ? <>
+      <h3 id="chart-question" class="chart-question">No question is published</h3>
+      <p>{ended ? 'This room has ended without an active question.' : 'Your moderator reviews drafts and publishes check-in questions. Results appear here as the audience responds.'}</p>
+    </> : <>
+      <p class="chart-kicker">{ended ? 'Final results · room ended' : 'Live results'} · Version {question.version}</p>
+      <h3 id="chart-question" class="chart-question">{question.text}</h3>
+      <p class="chart-total" aria-live="polite">{respondentSummary(dashboard)}</p>
+      <ul class="chart-bars" aria-label="Responses by rating">
+        {rows.map(row => <li key={row.value} class={'chart-row chart-row--' + row.value}>
+          <span class="chart-label">{row.label}</span>
+          <span class="chart-track" aria-hidden="true"><span class="chart-fill" style={{ width: row.width + '%' }} /></span>
+          <span class="chart-value">
+            {row.count}<span class="visually-hidden"> {row.count === 1 ? 'response' : 'responses'}</span>
+            {row.percent === null
+              ? <span aria-hidden="true"> · —</span>
+              : <> <span aria-hidden="true">·</span> {formatPercent(row.percent)}</>}
+          </span>
+        </li>)}
+      </ul>
+      {earlierWordingNote(dashboard, question.version) && <p class="notice">{earlierWordingNote(dashboard, question.version)}</p>}
+      <p class="chart-note">Percentages are shares of audience members who responded, not of everyone in the room.</p>
+    </>}
+  </section>;
+}
+
+function ReplyForm({ state, item, busy, send }: { state: State; item: WrittenQuestion; busy: boolean; send: (item: WrittenQuestion, body: string) => Promise<boolean> }) {
+  const key = draftKey(state.room.id, state.membership.id, 'qa-reply\n' + item.message_id);
+  const [text, setText] = useState(() => memoryDraft(key));
+  useEffect(() => setText(memoryDraft(key)), [key]);
+  const fieldId = 'reply-' + item.message_id;
+  return <form class="reply-form" onSubmit={async event => {
+    event.preventDefault();
+    if (!text.trim() || busy) return;
+    if (await send(item, text)) { setText(''); keepDraft(key, ''); }
+  }}>
+    <label for={fieldId}>Reply privately to {item.author_label ?? 'this participant'}</label>
+    <textarea id={fieldId} rows={2} maxLength={2000} value={text} onInput={event => { const value = event.currentTarget.value; setText(value); keepDraft(key, value); }} />
+    <button disabled={busy || !text.trim()}>Send reply</button>
+  </form>;
+}
+
 function QaPanel({ state, ended, revision }: { state: State; ended: boolean; revision: number }) {
   const [items, setItems] = useState<WrittenQuestion[]>([]);
   const owner = draftKey(state.room.id, state.membership.id, state.membership.role);
@@ -173,13 +293,19 @@ function QaPanel({ state, ended, revision }: { state: State; ended: boolean; rev
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const role = state.membership.role;
+  async function load() {
+    const parsed = parseWrittenQuestions(await api.read<unknown>(paths.qa(state.room.id)));
+    if (!parsed) throw new Error('Invalid Q&A');
+    setItems(parsed);
+  }
   useEffect(() => setDraft(memoryDraft(owner)), [owner]);
   useEffect(() => {
     let current = true;
-    api.read<{items?: unknown}>(paths.qa(state.room.id)).then(result => {
+    api.read<unknown>(paths.qa(state.room.id)).then(result => {
       if (!current) return;
-      const list = Array.isArray(result.items) ? result.items as WrittenQuestion[] : [];
-      setItems(list);
+      const parsed = parseWrittenQuestions(result);
+      if (parsed) setItems(parsed);
+      else setError('The Q&A response was not understood.');
     }).catch(reason => { if (current) setError(errorMessage(reason)); });
     return () => { current = false; };
   }, [state.room.id, revision]);
@@ -190,9 +316,17 @@ function QaPanel({ state, ended, revision }: { state: State; ended: boolean; rev
       await api.mutate(paths.qa(state.room.id), { body: draft, question_id: state.active_question?.id ?? null });
       setDraft('');
       keepDraft(owner, '');
-      const result = await api.read<{items?: unknown}>(paths.qa(state.room.id));
-      setItems(Array.isArray(result.items) ? result.items as WrittenQuestion[] : []);
+      await load();
     } catch (reason) { setError(errorMessage(reason)); }
+    finally { setBusy(false); }
+  }
+  async function sendReply(item: WrittenQuestion, body: string): Promise<boolean> {
+    setBusy(true); setError('');
+    try {
+      await api.mutate(paths.reply(state.room.id, item.message_id), { body });
+      await load();
+      return true;
+    } catch (reason) { setError(errorMessage(reason)); return false; }
     finally { setBusy(false); }
   }
   return <>
@@ -200,18 +334,150 @@ function QaPanel({ state, ended, revision }: { state: State; ended: boolean; rev
     {role === 'audience' && <>
       <label>Write a question<textarea rows={4} maxLength={4000} value={draft} readOnly={ended} onInput={e => { const value = e.currentTarget.value; setDraft(value); keepDraft(owner, value); }} /></label>
       <button disabled={busy || ended || !draft.trim()} onClick={() => void submit()}>Send question</button>
-      <p>Your written questions are private to you and the speaker/TAs.</p>
+      <p>Your written questions are private to you and the room staff. Replies from the moderator appear under your question.</p>
     </>}
-    {items.length === 0 ? <p role="status">No written questions.</p> : <ul class="access-list">{items.map(item => <li key={item.message_id}><div><p>{item.body}</p><small>{when(item.created_at)}</small></div></li>)}</ul>}
+    {role === 'ta' && <p>Questions are private to their author. Your reply is visible only to that participant and the room staff.</p>}
+    {items.length === 0 ? <p role="status">No written questions.</p> : <ul class="threads">{items.map(item => <li key={item.message_id} class="thread">
+      <p class="thread-meta">{item.author_label && <strong>{item.author_label}</strong>} <small>{when(item.created_at)}</small></p>
+      <p class="thread-body">{item.body}</p>
+      {item.replies.length > 0 && <ol class="thread-replies" aria-label="Replies">{item.replies.map(reply => <li key={reply.reply_id}>
+        <p class="thread-meta"><strong>Moderator reply</strong> <small>{when(reply.created_at)}</small></p>
+        <p class="thread-body">{reply.body}</p>
+      </li>)}</ol>}
+      {role === 'ta' && !ended && <ReplyForm state={state} item={item} busy={busy} send={sendReply} />}
+    </li>)}</ul>}
   </>;
 }
 
 type IssuedInvite = { id: string; expires: string; link: string | null };
 
-function beeLabel(bee: BeeState): string {
-  if (bee.status === 'bound' && !bee.source_conversation_id) return 'listening for a Bee recording';
-  if (bee.status === 'bound') return 'live';
-  return bee.status;
+const SETUP_POLL_MS = 3000;
+
+/** Polls a staff read while mounted; keeps the last good value across transient errors. */
+function usePolled<T>(path: string | null, parse: (value: unknown) => T | null): { value: T | undefined; error: string } {
+  const [value, setValue] = useState<T>();
+  const [error, setError] = useState('');
+  useEffect(() => {
+    setValue(undefined);
+    if (!path) return;
+    let current = true;
+    const load = () => api.read<unknown>(path)
+      .then(body => {
+        if (!current) return;
+        const parsed = parse(body);
+        if (parsed === null) setError('The service response was not understood.');
+        else { setValue(parsed); setError(''); }
+      })
+      .catch(reason => { if (current) setError(errorMessage(reason)); });
+    void load();
+    const timer = window.setInterval(() => void load(), SETUP_POLL_MS);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [path]);
+  return { value, error };
+}
+
+function transportLabel(connection: BeeConnection | undefined): string {
+  if (!connection) return 'checking…';
+  if (connection.transport.state === 'connected') return 'Bee stream running';
+  if (connection.transport.state === 'reconnecting') return 'restarting the Bee stream';
+  return 'not running';
+}
+
+function BeeSetup({ state, busy, run, refresh, notify, receiving }: { state: State; busy: boolean; run: (task: () => Promise<void>) => Promise<void>; refresh: () => Promise<boolean>; notify: (message: string) => void; receiving: (live: boolean) => void }) {
+  const roomId = state.room.id;
+  const ended = state.room.status === 'ended';
+  const bee = state.bee;
+  const now = useNow(5000);
+  const [manual, setManual] = useState('');
+  const { value: connection, error: connectionError } = usePolled(ended ? null : paths.beeConnection(roomId), parseBeeConnection);
+  const bound = bee?.status === 'bound' || bee?.status === 'binding';
+  const { value: lines, error: transcriptError } = usePolled(bound ? paths.transcript(roomId) : null, parseTranscript);
+  const last = lines === undefined ? undefined : lines.length === 0 ? null : lines[lines.length - 1];
+  const status = connectionStatus(bee, connection?.transport.state, last, now);
+  useEffect(() => receiving(status.tone === 'live'), [status.tone]);
+  // Pending commands settle asynchronously; an ended room no longer has live
+  // updates to announce the result, so poll until the binding settles.
+  const pending = bee?.status === 'binding' || bee?.status === 'unbinding';
+  useEffect(() => {
+    if (!pending) return;
+    const timer = window.setInterval(() => void refresh(), SETUP_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [pending]);
+  async function bind(source: string, message: string) {
+    await run(async () => {
+      await api.mutate(paths.bindBee(roomId), { source_conversation_id: source });
+      await refresh();
+      notify(message);
+    });
+  }
+  return <section aria-labelledby="bee-title">
+    <h3 id="bee-title">3. Connect your Bee recording</h3>
+    {!ended && <p class="service-note" role="status">Bee listener on the presenter’s computer: <strong>{transportLabel(connection)}</strong>{connectionError && ` · ${connectionError}`}</p>}
+    {!bee ? <p role="status">Bee binding status is unavailable.</p> : ended && bee.status === 'unbound' ? <p role="status">
+      This room has ended. No recording is connected and new speech is no longer sent to this room.
+    </p> : bee.status === 'unbound' ? <>
+      <p>Start recording on your Bee and say a few words, then choose that recording here. Only the recording you choose is sent to this room; speech from any other recording is ignored and not stored.</p>
+      {connection && connection.recordings.length > 0 ? <ul class="access-list" aria-label="Live Bee recordings">{connection.recordings.map(recording => <li key={recording.source_conversation_id}>
+        <div>
+          <strong>Recording started {new Date(recording.first_seen_at).toLocaleTimeString()}</strong>
+          <p>{recording.utterances} utterance{recording.utterances === 1 ? '' : 's'} heard · last speech {ago(recording.last_seen_at, now)}</p>
+          <code>{recording.source_conversation_id}</code>
+        </div>
+        <button type="button" class="primary" disabled={busy || ended} onClick={() => {
+          if (!window.confirm(`Send this recording’s transcript to “${state.room.title}”? No other room will receive it.`)) return;
+          void bind(recording.source_conversation_id, 'Recording connected. Say a short phrase to check delivery.');
+        }}>Use this recording</button>
+      </li>)}</ul> : <p role="status">{connection?.transport.state === 'connected'
+        ? 'No unconnected recording heard yet. Start recording on the Bee and speak; it appears here within a few seconds.'
+        : 'Recordings appear here once the Bee listener is running on the presenter’s computer.'}</p>}
+      <details>
+        <summary>Enter a Bee conversation ID instead</summary>
+        <label>Bee conversation UUID
+          <input autoComplete="off" placeholder="00000000-0000-0000-0000-000000000000" value={manual} onInput={event => setManual(event.currentTarget.value)} />
+        </label>
+        <p>Copy <code>conversation_uuid</code> from <code>bee stream --json</code> on the presenter’s computer.</p>
+        <button type="button" disabled={busy || ended || !isUuid(manual.trim())} onClick={() => void bind(manual.trim(), 'Bee conversation connection requested.').then(() => setManual(''))}>Connect this conversation</button>
+      </details>
+    </> : <>
+      <div class={'connection connection--' + status.tone} role="status">
+        <strong>{status.label}</strong>
+        <p>{status.detail}</p>
+      </div>
+      {bee.has_gaps && <p class="notice">Transcript gaps detected. Drafts skip incomplete stretches; published questions and replies are unaffected.</p>}
+      {transcriptError && <p role="status">{transcriptError}</p>}
+      {last && <figure class="evidence">
+        <blockquote>{last.text}</blockquote>
+        <figcaption>Latest speech received · {new Date(last.spoken_at).toLocaleTimeString()}</figcaption>
+      </figure>}
+      {bee.source_conversation_id && <p class="service-note">Recording <code>{bee.source_conversation_id}</code></p>}
+      <button type="button" disabled={busy || bee.status === 'unbinding'} onClick={() => {
+        if (!window.confirm('Stop sending this recording to the room?')) return;
+        void run(async () => {
+          await api.mutate(paths.unbindBee(roomId));
+          await refresh();
+          notify('Recording disconnected from this room.');
+        });
+      }}>Disconnect recording</button>
+    </>}
+    <p class="service-note">Ending the room stops sending this recording to the room. It does not stop your Bee from recording or delete what it captured.</p>
+  </section>;
+}
+
+function SetupChecklist({ state, members, joinLink, receiving }: { state: State; members?: Page<Membership>; joinLink: string | null; receiving: boolean }) {
+  const moderators = members?.items.filter(item => item.role === 'ta' && item.status === 'active').length;
+  const audience = members?.items.filter(item => item.role === 'audience' && item.status === 'active').length;
+  const steps = [
+    { done: (moderators ?? 0) > 0, label: 'Invite your moderator', detail: moderators === undefined ? 'Checking…' : moderators > 0 ? `${moderators} moderator${moderators === 1 ? '' : 's'} joined` : 'Not joined yet' },
+    { done: state.join_link_enabled === true && Boolean(joinLink), label: 'Share the audience link or QR code', detail: audience === undefined ? '' : `${audience} audience member${audience === 1 ? '' : 's'} joined` },
+    { done: state.bee?.status === 'bound', label: 'Connect your Bee recording', detail: state.bee?.status === 'bound' ? 'Connected' : state.bee?.status === 'binding' ? 'Connecting…' : 'Not connected' },
+    { done: receiving, label: 'Check incoming speech', detail: receiving ? 'Speech is arriving' : 'Say a short phrase and watch for it below' },
+  ];
+  return <ol class="setup-steps" aria-label="Room setup">
+    {steps.map(step => <li key={step.label} class={step.done ? 'done' : undefined}>
+      <span class="setup-mark" aria-hidden="true">{step.done ? '✓' : ''}</span>
+      <span><strong>{step.label}</strong>{step.detail && <small> · {step.detail}</small>}<span class="visually-hidden">{step.done ? ' (done)' : ' (to do)'}</span></span>
+    </li>)}
+  </ol>;
 }
 
 function joinStatus(state: State): string {
@@ -228,7 +494,7 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
   const [members, setMembers] = useState<Page<Membership>>();
   const [joinLink, setJoinLink] = useState<string | null>(memoryJoin(roomId));
   const [issued, setIssued] = useState<IssuedInvite | undefined>(memoryInvite(roomId));
-  const [beeConversation, setBeeConversation] = useState('');
+  const [receiving, setReceiving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -288,74 +554,9 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
     return safe;
   }
 
-  return <section aria-labelledby="access-title" aria-busy={busy}>
-    <h2 id="access-title">Room access</h2>
-    {error && <p role="alert" class="error">{error}</p>}
-    {listError && <p role="alert" class="error">{listError}</p>}
-    {notice && <p role="status">{notice}</p>}
-    <button type="button" disabled={busy} onClick={() => void run(load)}>Refresh access lists</button>
-    <h3>Bee live transcript</h3>
-    {!state.bee ? <p role="status">Bee binding status is unavailable.</p> : <>
-      <p>Status: <strong>{beeLabel(state.bee)}</strong>{state.bee.has_gaps ? ' · transcript gaps detected' : ''}</p>
-      {state.bee.status === 'unbound' ? <>
-        <p>Click Start listening, then start recording on your Bee or Apple Watch. SansCue connects the next new Bee conversation to this room.</p>
-        <button type="button" disabled={busy || ended} onClick={() => void run(async () => {
-          await api.mutate(paths.bindBee(roomId), { listen: true });
-          await refresh();
-          setNotice('Listening for your next Bee recording.');
-        })}>Start listening</button>
-        <details>
-          <summary>Connect a specific Bee conversation</summary>
-          <label>Bee conversation UUID
-            <input
-              autoComplete="off"
-              placeholder="00000000-0000-0000-0000-000000000000"
-              value={beeConversation}
-              onInput={event => setBeeConversation(event.currentTarget.value)}
-            />
-          </label>
-          <p>Use this when several rooms listen at once. Copy <code>conversation_uuid</code> from <code>bee stream --json</code>.</p>
-          <button type="button" disabled={busy || ended || !isUuid(beeConversation.trim())} onClick={() => void run(async () => {
-            await api.mutate(paths.bindBee(roomId), { source_conversation_id: beeConversation.trim() });
-            setBeeConversation('');
-            await refresh();
-            setNotice('Bee conversation binding requested.');
-          })}>Bind Bee conversation</button>
-        </details>
-      </> : <button type="button" disabled={busy || state.bee.status === 'unbinding'} onClick={() => {
-        if (!window.confirm('Stop routing this Bee conversation to the room?')) return;
-        void run(async () => {
-          await api.mutate(paths.unbindBee(roomId));
-          await refresh();
-          setNotice('Bee conversation unbinding requested.');
-        });
-      }}>{state.bee.status === 'bound' && !state.bee.source_conversation_id ? 'Stop listening' : 'Unbind Bee conversation'}</button>}
-    </>}
-    <h3>Audience link</h3>
-    <p>{joinStatus(state)} Existing members keep their access.</p>
-    {!ended && joinLink && state.join_link_enabled === true && <ShareLink value={joinLink} kind="join" />}
-    {!ended && state.join_link_enabled === true && !joinLink && <p>The current URL cannot be retrieved. Rotate to issue a new one; the old URL will stop working.</p>}
-    <div class="actions">
-      <button type="button" disabled={busy || ended} onClick={() => {
-        if (!window.confirm('Issue a new audience link? The previous link will stop working.')) return;
-        void run(async () => {
-          const result = await api.mutate<LinkResult>(paths.rotateJoin(roomId));
-          const safe = rememberJoin(result.join_url ?? null);
-          setNotice(result.link_unavailable || !safe ? 'Rotation was recovered, but its link is unavailable. Rotate again to get a new link.' : 'New audience link issued.');
-          await refresh();
-        });
-      }}>Rotate audience link</button>
-      <button type="button" disabled={busy || ended || state.join_link_enabled !== true} onClick={() => {
-        if (!window.confirm('Disable new audience joins? Existing memberships stay active.')) return;
-        void run(async () => {
-          await api.mutate(paths.revokeJoin(roomId));
-          rememberJoin(null);
-          await refresh();
-          setNotice('Audience link revoked.');
-        });
-      }}>Revoke audience link</button>
-    </div>
-    <h3>TA invitations</h3>
+  const moderatorSection = <>
+    <h3>1. Invite your moderator</h3>
+    <p>Invite the person who will review drafts, publish questions and reply to the audience. Speakers cannot publish questions.</p>
     <button type="button" disabled={busy || ended} onClick={() => void run(async () => {
       const result = await api.mutate<LinkResult & { invitation_id?: string; expires_at?: string }>(paths.invitations(roomId), {}, 201);
       const link = sharePath('invite', result.invite_url ?? null);
@@ -366,7 +567,7 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
       setIssued(next);
       setNotice(result.link_unavailable || !link ? 'Invitation created, but its link was lost. Revoke the identified invitation below and create another.' : 'Invitation created.');
       await load();
-    })}>Create TA invitation</button>
+    })}>Create moderator invitation</button>
     {issued && <p>Issued invitation: <code>{issued.id}</code> · Expires {issued.expires ? when(issued.expires) : 'Unknown time'}</p>}
     {issued?.link && !ended && <ShareLink value={issued.link} kind="invite" />}
     {!invitations ? <p role="status">{listError ? 'Invitation list not loaded.' : 'Loading invitations…'}</p> : <>
@@ -391,12 +592,47 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
         setInvitations({ ...next, items: [...invitations.items, ...next.items] });
       })}>More invitations</button>}
     </>}
+  </>;
+
+  return <section aria-labelledby="access-title" aria-busy={busy}>
+    <h2 id="access-title">Room setup and access</h2>
+    {error && <p role="alert" class="error">{error}</p>}
+    {listError && <p role="alert" class="error">{listError}</p>}
+    {notice && <p role="status">{notice}</p>}
+    {!ended && <SetupChecklist state={state} members={members} joinLink={joinLink} receiving={receiving} />}
+    <button type="button" disabled={busy} onClick={() => void run(load)}>Refresh access lists</button>
+    {moderatorSection}
+    <h3>2. Share the audience link</h3>
+    <p>{joinStatus(state)} Existing members keep their access.</p>
+    {!ended && joinLink && state.join_link_enabled === true && <ShareLink value={joinLink} kind="join" />}
+    {!ended && state.join_link_enabled === true && !joinLink && <p>The current URL cannot be retrieved. Rotate to issue a new one; the old URL will stop working.</p>}
+    <div class="actions">
+      <button type="button" disabled={busy || ended} onClick={() => {
+        if (!window.confirm('Issue a new audience link? The previous link will stop working.')) return;
+        void run(async () => {
+          const result = await api.mutate<LinkResult>(paths.rotateJoin(roomId));
+          const safe = rememberJoin(result.join_url ?? null);
+          setNotice(result.link_unavailable || !safe ? 'Rotation was recovered, but its link is unavailable. Rotate again to get a new link.' : 'New audience link issued.');
+          await refresh();
+        });
+      }}>Rotate audience link</button>
+      <button type="button" disabled={busy || ended || state.join_link_enabled !== true} onClick={() => {
+        if (!window.confirm('Disable new audience joins? Existing memberships stay active.')) return;
+        void run(async () => {
+          await api.mutate(paths.revokeJoin(roomId));
+          rememberJoin(null);
+          await refresh();
+          setNotice('Audience link revoked.');
+        });
+      }}>Revoke audience link</button>
+    </div>
+    <BeeSetup state={state} busy={busy} run={run} refresh={refresh} notify={setNotice} receiving={setReceiving} />
     <h3>Memberships</h3>
     <p>Room-local aliases, not personal identities. Last activity is not a presence guarantee.</p>
     {!members ? <p role="status">{listError ? 'Membership list not loaded.' : 'Loading memberships…'}</p> : <>
       {members.items.length === 0 && <p>No memberships.</p>}
       <ul class="access-list">{members.items.map(item => <li key={item.membership_id}>
-        <div><strong>{item.label}</strong><p>{item.role} · {item.status} · Last activity: {item.last_seen_at ? when(item.last_seen_at) : 'Not recorded'}</p></div>
+        <div><strong>{item.label}</strong><p>{roleLabel(item.role)} · {item.status} · Last activity: {item.last_seen_at ? when(item.last_seen_at) : 'Not recorded'}</p></div>
         {item.role !== 'speaker' && item.status === 'active' && <button type="button" disabled={busy} onClick={() => {
           if (!window.confirm('Revoke access for this member? This takes effect immediately.')) return;
           void run(async () => {
@@ -421,7 +657,7 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
   const [state, setState] = useState<State>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [liveStatus, setLiveStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'ended'>('connecting');
+  const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const seenRevision = useRef(-1);
   const liveSequence = useRef(0);
   const refreshLive = useRef<(() => Promise<boolean>) | undefined>(undefined);
@@ -542,7 +778,7 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
   const { tabs, selected, redirected } = selectedSection(state.membership.role, tab);
   const ended = state.room.status === 'ended';
   return <section class="room">
-    <p class="eyebrow">{state.membership.role} · {state.room.status}</p>
+    <p class="eyebrow">{roleLabel(state.membership.role)} · {state.room.status}</p>
     <h1>{state.room.title}</h1>
     {ended && <p role="status" class="notice">Room ended. Saved state is read-only. Ending a room does not delete its data.</p>}
     {error && <p role="alert" class="error">{error}</p>}
@@ -585,6 +821,7 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
           <h2>{tabLabel(selected)}</h2>
           {selected === 'qa' ? <QaPanel state={state} ended={ended} revision={state.revision} />
             : selected === 'response' ? <FeedbackPanel state={state} ended={ended} refresh={refresh} />
+            : selected === 'dashboard' && state.membership.role === 'speaker' ? <SpeakerDashboard state={state} liveStatus={liveStatus} />
             : selected === 'dashboard' ? <DashboardPanel state={state} />
             : selected === 'questions' && state.membership.role !== 'audience' ? <QuestionsPanel state={state} refresh={refresh} ended={ended} />
             : selected === 'transcript' && state.membership.role !== 'audience' ? <TranscriptPanel roomId={state.room.id} />

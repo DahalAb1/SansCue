@@ -3,12 +3,14 @@ use crate::{
     domain::{Observation, Signal},
     live::{LiveEventError, MAX_LIVE_EVENT_BYTES, parse_new_utterance},
     pipeline::Disposition,
-    store::{Adoption, Store},
+    store::Store,
 };
 use chrono::{DateTime, Utc};
 use std::{
+    collections::HashMap,
     ffi::OsString,
     process::Stdio,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -21,14 +23,14 @@ const INITIAL_RESTART_DELAY: Duration = Duration::from_secs(1);
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
 const HEALTHY_RUN: Duration = Duration::from_secs(30);
 const REJECTION_LOG_INTERVAL: Duration = Duration::from_secs(10);
+const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+/// Unbound recordings stop being offered for selection after this long without speech.
+const SIGHTING_RETENTION: chrono::TimeDelta = chrono::TimeDelta::minutes(15);
+const MAX_REPORTED_RECORDINGS: usize = 10;
 
 #[allow(async_fn_in_trait)]
 pub trait LiveStore: Clone + Send + Sync {
     async fn active_conversations(&self) -> Result<Vec<Uuid>, &'static str>;
-    async fn adopt_listening_source(
-        &self,
-        source_conversation_id: Uuid,
-    ) -> Result<Option<Adoption>, &'static str>;
     async fn conversation_for_source(
         &self,
         source_conversation_id: Uuid,
@@ -52,12 +54,6 @@ pub trait LiveStore: Clone + Send + Sync {
 impl LiveStore for Store {
     async fn active_conversations(&self) -> Result<Vec<Uuid>, &'static str> {
         Store::active_conversations(self).await
-    }
-    async fn adopt_listening_source(
-        &self,
-        source_conversation_id: Uuid,
-    ) -> Result<Option<Adoption>, &'static str> {
-        Store::adopt_listening_source(self, source_conversation_id).await
     }
     async fn conversation_for_source(
         &self,
@@ -95,6 +91,32 @@ pub struct LiveCliWorker<S = Store> {
     executable: OsString,
     store: S,
     status: Option<Consumer>,
+    live: Arc<Mutex<LiveState>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Transport {
+    /// The Bee CLI stream is not running; the worker is starting or retrying it.
+    #[default]
+    Reconnecting,
+    /// The Bee CLI stream process is running. This alone does not prove speech delivery.
+    Connected,
+}
+
+/// A live Bee recording that no room has selected. Only identity, timing and
+/// counts are kept; its speech is dropped, never stored or reported.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sighting {
+    pub source_conversation_id: Uuid,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub utterances: u64,
+}
+
+#[derive(Default)]
+struct LiveState {
+    transport: Transport,
+    sightings: HashMap<Uuid, Sighting>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -125,46 +147,87 @@ impl<S: LiveStore> LiveCliWorker<S> {
             executable,
             store,
             status: None,
+            live: Arc::default(),
         })
     }
 
-    /// Reports adopted conversations to sessions so a listening room shows it is live.
+    /// Reports transport state and unselected recordings to sessions so a
+    /// speaker can confirm which recording belongs to their room.
     pub fn with_status_reporter(mut self, status: Consumer) -> Self {
         self.status = Some(status);
         self
     }
 
-    /// Resolves the room conversation for a live source, letting a listening room claim it.
+    /// Routes a live source only through an explicit sessions binding. A
+    /// recording nobody selected is never attached to a room automatically.
     async fn route_source(&self, source: Uuid) -> Result<Option<Uuid>, &'static str> {
-        if let Some(conversation) = self.store.conversation_for_source(source).await? {
-            return Ok(Some(conversation));
-        }
-        let Some(adoption) = self.store.adopt_listening_source(source).await? else {
-            return Ok(None);
-        };
-        if let Some(status) = &self.status {
-            let summary = serde_json::json!({
-                "binding_id": adoption.conversation_id,
-                "status": "bound",
-                "has_gaps": false,
-                "connectivity_revision": adoption.revision,
-                "source_conversation_id": source,
-            });
-            // The adoption is durable; a missed status update only delays the room's label.
-            if let Err(error) = status.publish_status(adoption.room_id, &summary).await {
-                eprintln!("Bee listening room status update failed ({error})");
-            }
-        }
-        Ok(Some(adoption.conversation_id))
+        self.store.conversation_for_source(source).await
+    }
+
+    fn note_unbound(&self, source: Uuid, at: DateTime<Utc>, utterance: bool) {
+        let mut live = self
+            .live
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sighting = live.sightings.entry(source).or_insert(Sighting {
+            source_conversation_id: source,
+            first_seen_at: at,
+            last_seen_at: at,
+            utterances: 0,
+        });
+        sighting.last_seen_at = sighting.last_seen_at.max(at);
+        sighting.utterances += u64::from(utterance);
+    }
+
+    fn set_transport(&self, transport: Transport) {
+        self.live
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .transport = transport;
+    }
+
+    /// The sanitized host-level report sent to sessions: stream state and the
+    /// most recently heard unselected recordings, newest first.
+    pub fn live_report(&self, now: DateTime<Utc>) -> serde_json::Value {
+        live_report(&self.live, now)
     }
 
     pub async fn run(self) -> Result<(), &'static str> {
+        let reporter = self.status.clone().map(|status| {
+            let live = self.live.clone();
+            tokio::spawn(async move {
+                let mut failing = false;
+                loop {
+                    match status
+                        .publish_live_report(&live_report(&live, Utc::now()))
+                        .await
+                    {
+                        Ok(()) => failing = false,
+                        Err(error) if !failing => {
+                            failing = true;
+                            eprintln!("Bee live report delivery failed; retrying ({error})");
+                        }
+                        Err(_) => {}
+                    }
+                    tokio::time::sleep(REPORT_INTERVAL).await;
+                }
+            })
+        });
+        let result = self.supervise().await;
+        if let Some(reporter) = reporter {
+            reporter.abort();
+        }
+        result
+    }
+
+    async fn supervise(&self) -> Result<(), &'static str> {
         let mut delay = INITIAL_RESTART_DELAY;
         loop {
             let started = Instant::now();
             if let Err(error) = self.run_once().await {
                 eprintln!("bee live stream unavailable; retrying ({error})");
             }
+            self.set_transport(Transport::Reconnecting);
             self.record_transport_signal(Signal::Disconnected).await?;
             let sleep_for = delay;
             if started.elapsed() >= HEALTHY_RUN {
@@ -258,6 +321,7 @@ impl<S: LiveStore> LiveCliWorker<S> {
             Ok(event) => {
                 let Some(conversation_id) = self.route_source(event.conversation_uuid).await?
                 else {
+                    self.note_unbound(event.conversation_uuid, received_at, true);
                     return Ok(LiveLineOutcome::Unbound);
                 };
                 let observation = event
@@ -279,7 +343,11 @@ impl<S: LiveStore> LiveCliWorker<S> {
                             self.store
                                 .record_numeric_source_mapping(c.id, c.uuid)
                                 .await?;
-                            self.route_source(c.uuid).await?
+                            let routed = self.route_source(c.uuid).await?;
+                            if routed.is_none() {
+                                self.note_unbound(c.uuid, received_at, false);
+                            }
+                            routed
                         }
                         crate::live::LiveLifecycleEvent::Updated(u) => {
                             self.store.conversation_for_numeric_source(u.id).await?
@@ -323,6 +391,7 @@ impl<S: LiveStore> LiveCliWorker<S> {
         let stdout = child.stdout.take().ok_or("Bee CLI stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("Bee CLI stderr unavailable")?;
         self.record_transport_signal(Signal::Reconnected).await?;
+        self.set_transport(Transport::Connected);
         let diagnostics = tokio::spawn(drain_diagnostics(stderr));
         let summary = self.consume(stdout).await;
         if summary.is_err() {
@@ -339,6 +408,27 @@ impl<S: LiveStore> LiveCliWorker<S> {
         }
         Ok(summary)
     }
+}
+
+fn live_report(live: &Mutex<LiveState>, now: DateTime<Utc>) -> serde_json::Value {
+    let mut live = live.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    live.sightings
+        .retain(|_, sighting| now - sighting.last_seen_at <= SIGHTING_RETENTION);
+    let mut recordings: Vec<_> = live.sightings.values().cloned().collect();
+    recordings.sort_by_key(|sighting| std::cmp::Reverse(sighting.last_seen_at));
+    recordings.truncate(MAX_REPORTED_RECORDINGS);
+    serde_json::json!({
+        "transport": match live.transport {
+            Transport::Connected => "connected",
+            Transport::Reconnecting => "reconnecting",
+        },
+        "recordings": recordings.iter().map(|sighting| serde_json::json!({
+            "source_conversation_id": sighting.source_conversation_id,
+            "first_seen_at": sighting.first_seen_at,
+            "last_seen_at": sighting.last_seen_at,
+            "utterances": sighting.utterances,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 async fn read_bounded_line<R: AsyncBufRead + Unpin>(

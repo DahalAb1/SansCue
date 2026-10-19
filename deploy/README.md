@@ -19,6 +19,13 @@ Topics drafts check-in questions with Claude when `ANTHROPIC_API_KEY` is set in
 the key blank, the deterministic placeholder generator runs and nothing leaves
 the machine. Recreate `topics-and-questions` after changing either value.
 
+Draft frequency uses demo starting points that you can override in
+`deploy/.env` after a rehearsal: `TOPICS_MIN_QUESTION_INTERVAL_SECONDS` (90),
+`TOPICS_MIN_WINDOW_WORDS` (60), `TOPICS_SILENCE_BOUNDARY_SECONDS` (5) and
+`TOPICS_MIN_ATTEMPT_INTERVAL_SECONDS` (15). Sessions shows the moderator at most
+`SESSIONS_MAX_VISIBLE_DRAFTS` (3) drafts, each expiring after
+`SESSIONS_DRAFT_TTL_SECONDS` (600). Only the moderator (TA) can publish.
+
 ## Configure and start
 
 ```sh
@@ -80,7 +87,7 @@ cargo build --locked --package bee-connection
 deploy/run-live-bee-worker.sh
 ```
 
-The script reads the private local Compose settings, connects only to the three loopback endpoints above, and executes the fixed authenticated Bee stream. It does not print credentials or transcript contents. Keep it running while the speaker binds the consented Bee `conversation_uuid` in the room Access tab. Speak a short consented test phrase, then verify exactly one unpublished candidate appears only for speaker/TA review. Publish it, submit one audience response, and confirm the staff count changes while another room sees nothing. Record only sanitized counts/status in the device runbook.
+The script reads the private local Compose settings, connects only to the three loopback endpoints above, and executes the fixed authenticated Bee stream. It does not print credentials or transcript contents. Keep it running during the talk. In the room's **Room access** tab, the Bee section should say "Bee stream running"; start recording on the Bee and speak, then choose that recording with **Use this recording** (or paste its `conversation_uuid` under the manual option). Recordings nobody selects are never routed to a room. Say a short consented test phrase and wait for **Receiving transcript** with that phrase shown; "Bee stream running" alone does not prove delivery. After a substantive explanation, verify one unpublished draft appears for the moderator, publish it as the moderator, submit one audience response, and confirm the speaker chart changes while another room sees nothing. If the worker stops, the tab shows "Bee listener not running" within about 20 seconds; restart the script and repeat the test phrase. Record only sanitized counts/status in the device runbook.
 
 Startup gates database health, then sessions readiness, then Caddy health. Sessions readiness uses its database pool; Caddy health probes its static root independently. Dependency gates apply at startup, not continuous supervision: a later database outage does not stop Caddy or restart sessions automatically. The 120-second wait is a health-wait bound, not an image download/build deadline or the service startup bound (documented by the sessions implementation).
 

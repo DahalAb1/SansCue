@@ -81,7 +81,7 @@ async fn connect(
     };
     let digest = hash(presented.as_bytes());
     let row = match sqlx::query(
-        "SELECT r.sequence,r.status AS room_status,m.role,m.status AS member_status,EXISTS(SELECT 1 FROM browser_sessions op WHERE op.token_hash=$2 AND op.operator_epoch=$3 AND op.created_at>now()-interval '24 hours' AND op.last_seen_at>now()-interval '12 hours') AS is_operator FROM rooms r JOIN memberships m ON m.room_id=r.id LEFT JOIN browser_sessions s ON s.id=m.session_id WHERE r.id=$1 AND ((s.token_hash=$2 AND s.created_at>now()-interval '24 hours' AND s.last_seen_at>now()-interval '12 hours') OR (m.role='speaker' AND EXISTS(SELECT 1 FROM browser_sessions op WHERE op.token_hash=$2 AND op.operator_epoch=$3 AND op.created_at>now()-interval '24 hours' AND op.last_seen_at>now()-interval '12 hours'))) ORDER BY CASE WHEN m.role='speaker' AND $3::text IS NOT NULL THEN 0 ELSE 1 END,m.created_at LIMIT 1",
+        "SELECT r.sequence,r.status AS room_status,m.id AS membership_id,m.role,m.status AS member_status,EXISTS(SELECT 1 FROM browser_sessions op WHERE op.token_hash=$2 AND op.operator_epoch=$3 AND op.created_at>now()-interval '24 hours' AND op.last_seen_at>now()-interval '12 hours') AS is_operator FROM rooms r JOIN memberships m ON m.room_id=r.id LEFT JOIN browser_sessions s ON s.id=m.session_id WHERE r.id=$1 AND ((s.token_hash=$2 AND s.created_at>now()-interval '24 hours' AND s.last_seen_at>now()-interval '12 hours') OR (m.role='speaker' AND EXISTS(SELECT 1 FROM browser_sessions op WHERE op.token_hash=$2 AND op.operator_epoch=$3 AND op.created_at>now()-interval '24 hours' AND op.last_seen_at>now()-interval '12 hours'))) ORDER BY CASE WHEN m.role='speaker' AND $3::text IS NOT NULL THEN 0 ELSE 1 END,m.created_at LIMIT 1",
     )
     .bind(room_id)
     .bind(digest)
@@ -96,6 +96,7 @@ async fn connect(
         return reject(StatusCode::NOT_FOUND);
     }
     let role: String = row.get("role");
+    let membership_id: Uuid = row.get("membership_id");
     let operator = access.security.operator_enabled() && row.get::<bool, _>("is_operator");
     if role == "speaker" && !operator {
         return reject(StatusCode::NOT_FOUND);
@@ -126,6 +127,7 @@ async fn connect(
                 room_id,
                 session_hash,
                 expected_epoch,
+                membership_id,
                 role,
                 staff,
                 sequence: last_sequence,
@@ -155,6 +157,7 @@ struct LiveConnection {
     room_id: Uuid,
     session_hash: Vec<u8>,
     expected_epoch: Option<String>,
+    membership_id: Uuid,
     role: String,
     staff: bool,
     sequence: i64,
@@ -170,6 +173,7 @@ async fn stream(
         room_id,
         session_hash,
         expected_epoch,
+        membership_id,
         role,
         staff,
         mut sequence,
@@ -196,16 +200,16 @@ async fn stream(
                     tracing::debug!(room_id=%room_id, role=%role, "live heartbeat sent");
                 }
                 let auth = sqlx::query(
-                    "SELECT r.status AS room_status,m.status AS member_status,m.role FROM rooms r JOIN memberships m ON m.room_id=r.id JOIN browser_sessions s ON s.token_hash=$2 AND s.created_at>now()-interval '24 hours' AND s.last_seen_at>now()-interval '12 hours' WHERE r.id=$1 AND (m.session_id=s.id OR (m.role='speaker' AND $3::text IS NOT NULL AND s.operator_epoch=$3)) ORDER BY CASE WHEN m.role='speaker' AND $3::text IS NOT NULL THEN 0 ELSE 1 END,m.created_at LIMIT 1"
+                    "SELECT r.status AS room_status,m.id AS membership_id,m.status AS member_status,m.role FROM rooms r JOIN memberships m ON m.room_id=r.id JOIN browser_sessions s ON s.token_hash=$2 AND s.created_at>now()-interval '24 hours' AND s.last_seen_at>now()-interval '12 hours' WHERE r.id=$1 AND (m.session_id=s.id OR (m.role='speaker' AND $3::text IS NOT NULL AND s.operator_epoch=$3)) ORDER BY CASE WHEN m.role='speaker' AND $3::text IS NOT NULL THEN 0 ELSE 1 END,m.created_at LIMIT 1"
                 ).bind(room_id).bind(&session_hash).bind(expected_epoch.as_deref()).fetch_optional(&pool).await;
                 let auth = match auth {
-                    Ok(Some(row)) if row.get::<String,_>("member_status") == "active" && row.get::<String,_>("role") == role => row,
+                    Ok(Some(row)) if row.get::<String,_>("member_status") == "active" && row.get::<String,_>("role") == role && row.get::<Uuid,_>("membership_id") == membership_id => row,
                     Ok(_) => { close(&mut socket, 1008, "room access revoked").await; return; }
                     Err(_) => { close(&mut socket, 1011, "storage unavailable").await; return; }
                 };
                 let room_status: String = auth.get("room_status");
                 let result = sqlx::query(
-                    "SELECT event_id,event_type,schema_version,sequence,occurred_at,payload,visibility FROM room_events WHERE room_id=$1 AND sequence>$2 ORDER BY sequence LIMIT $3"
+                    "SELECT event_id,event_type,schema_version,sequence,occurred_at,payload,visibility,target_membership_id FROM room_events WHERE room_id=$1 AND sequence>$2 ORDER BY sequence LIMIT $3"
                 )
                 .bind(room_id).bind(sequence).bind(MAX_EVENTS_PER_POLL + 1).fetch_all(&pool).await;
                 let mut rows = match result {
@@ -216,7 +220,7 @@ async fn stream(
                 for row in rows {
                     sequence = row.get("sequence");
                     let visibility: String = row.get("visibility");
-                    if visibility == "speaker" && !staff { continue; }
+                    if !delivers(&visibility, row.get("target_membership_id"), staff, membership_id) { continue; }
                     let payload: Value = row.get("payload");
                     let event = json!({
                         "type": row.get::<String,_>("event_type"),
@@ -261,6 +265,16 @@ async fn stream(
     }
 }
 
+/// Staff receive every invalidation; audience members receive room-wide ones
+/// and those targeted at their own membership (private Q&A threads).
+fn delivers(visibility: &str, target: Option<Uuid>, staff: bool, membership_id: Uuid) -> bool {
+    match visibility {
+        "all" => true,
+        "member" => staff || target == Some(membership_id),
+        _ => staff,
+    }
+}
+
 async fn close(socket: &mut axum::extract::ws::WebSocket, code: u16, reason: &'static str) {
     use axum::extract::ws::{CloseFrame, Message};
     let _ = timeout(
@@ -275,7 +289,21 @@ async fn close(socket: &mut axum::extract::ws::WebSocket, code: u16, reason: &'s
 
 #[cfg(test)]
 mod tests {
-    use super::parse_after;
+    use super::{delivers, parse_after};
+    use uuid::Uuid;
+
+    #[test]
+    fn private_thread_events_reach_only_staff_and_their_author() {
+        let author = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        assert!(delivers("member", Some(author), false, author));
+        assert!(!delivers("member", Some(author), false, other));
+        assert!(delivers("member", Some(author), true, other));
+        assert!(!delivers("speaker", None, false, author));
+        assert!(delivers("speaker", None, true, other));
+        assert!(delivers("all", None, false, other));
+        assert!(!delivers("unknown", None, false, author));
+    }
 
     #[test]
     fn accepts_only_one_nonnegative_sequence_cursor() {

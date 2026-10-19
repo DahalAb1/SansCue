@@ -160,6 +160,7 @@ async fn rolling_window_aggregates_multiple_utterances() {
             min_words_per_window: 5,
             max_window_duration: Duration::from_secs(60),
             silence_boundary_threshold: Duration::from_secs(5),
+            ..CadencePolicy::default()
         });
 
     let window = delivery.load_topic_window(&e2).await.unwrap();
@@ -215,6 +216,7 @@ async fn silence_boundary_splits_rolling_windows() {
             min_words_per_window: 3,
             max_window_duration: Duration::from_secs(120),
             silence_boundary_threshold: Duration::from_secs(4),
+            ..CadencePolicy::default()
         });
 
     let window = delivery.load_topic_window(&e2).await.unwrap();
@@ -269,6 +271,7 @@ async fn cooldown_abstention_enforces_question_frequency_limits() {
         min_words_per_window: 1,
         max_window_duration: Duration::from_secs(180),
         silence_boundary_threshold: Duration::from_secs(10),
+        ..CadencePolicy::default()
     };
 
     let generator = Arc::new(TopicWindowGenerator::new(policy, "window-v1"));
@@ -358,6 +361,7 @@ async fn conversational_filler_and_repetition_abstain() {
         min_words_per_window: 1,
         max_window_duration: Duration::from_secs(60),
         silence_boundary_threshold: Duration::from_secs(5),
+        ..CadencePolicy::default()
     };
     let generator = Arc::new(TopicWindowGenerator::new(policy, "window-v1"));
     let delivery = Delivery::new(pool.clone(), "http://127.0.0.1:1", "sessions-token")
@@ -485,6 +489,7 @@ async fn representative_session_produces_timely_grounded_candidates() {
         min_words_per_window: 5,
         max_window_duration: Duration::from_secs(60),
         silence_boundary_threshold: Duration::from_secs(8),
+        ..CadencePolicy::default()
     };
     let generator = Arc::new(TopicWindowGenerator::new(policy, "window-v1"));
     let delivery = Delivery::new(pool.clone(), "http://127.0.0.1:1", "sessions-token")

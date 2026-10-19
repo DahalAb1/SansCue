@@ -3,8 +3,8 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use topics_and_questions::{
-    AbstentionReason, Binding, GenerationInput, GenerationOutcome, QuestionGenerator, TopicWindow,
-    TopicWindowGenerator, TranscriptEvent,
+    AbstentionReason, Binding, GenerationInput, GenerationOutcome, QuestionGenerator,
+    RecentQuestion, TopicWindow, TopicWindowGenerator, TranscriptEvent,
     claude::{BedrockAuth, ClaudeGenerator},
 };
 use uuid::Uuid;
@@ -68,6 +68,7 @@ fn input(text: &str) -> GenerationInput {
     GenerationInput {
         event,
         window: Some(window),
+        recent_questions: Vec::new(),
     }
 }
 
@@ -142,6 +143,37 @@ async fn model_abstention_and_ungrounded_quotes_publish_nothing() {
         GenerationOutcome::Abstained {
             reason: AbstentionReason::WeaklyGrounded
         }
+    );
+}
+
+#[tokio::test]
+async fn factual_quiz_output_is_rejected_and_recent_drafts_reach_the_prompt() {
+    let (base, seen) = mock_api(
+        200,
+        answer(
+            false,
+            "What does the learning rate decide?",
+            "how far each gradient step moves",
+        ),
+    )
+    .await;
+    let mut request = input(SPEECH);
+    request.recent_questions = vec![RecentQuestion {
+        text: "How clear is gradient descent?".into(),
+        evidence_excerpt: "gradient".into(),
+    }];
+    assert_eq!(
+        generator(&base).generate(request).await.unwrap(),
+        GenerationOutcome::Abstained {
+            reason: AbstentionReason::UnsuitableQuestion
+        }
+    );
+    let (_, body) = seen.lock().unwrap().clone().unwrap();
+    let content = body["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        content.contains(
+            "<earlier_check_ins>\n- How clear is gradient descent?\n</earlier_check_ins>"
+        )
     );
 }
 
