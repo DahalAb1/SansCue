@@ -10,7 +10,9 @@ pub fn router(pool: PgPool) -> Router {
 
 pub fn configured_router(pool: PgPool, security: crate::security::Security) -> Router {
     let access = crate::access::Access { pool, security };
-    router(access.pool.clone())
+    let security = access.security.clone();
+    let app = router(access.pool.clone())
         .merge(crate::access::router(access.clone()))
-        .merge(crate::live::router(access))
+        .merge(crate::live::router(access));
+    crate::rate_limit::protect(app, &security)
 }

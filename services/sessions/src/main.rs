@@ -41,11 +41,14 @@ async fn run() -> Result<(), &'static str> {
     let mut public_rx = shutdown_rx.clone();
     let mut private_rx = shutdown_rx;
     let mut public = std::pin::pin!(
-        axum::serve(listener, public_app)
-            .with_graceful_shutdown(async move {
-                let _ = public_rx.wait_for(|stop| *stop).await;
-            })
-            .into_future()
+        axum::serve(
+            listener,
+            public_app.into_make_service_with_connect_info::<std::net::SocketAddr>()
+        )
+        .with_graceful_shutdown(async move {
+            let _ = public_rx.wait_for(|stop| *stop).await;
+        })
+        .into_future()
     );
     let mut private = std::pin::pin!(
         axum::serve(internal, private_app)

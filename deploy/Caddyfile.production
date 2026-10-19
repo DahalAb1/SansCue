@@ -1,9 +1,25 @@
 {
 	admin off
-	email {$ACME_EMAIL}
+	# Browsers omit SNI for bare IP URLs; select the configured public endpoint.
+	default_sni {$SANSCUE_DOMAIN}
+	servers {
+		max_header_size 16KiB
+		timeouts {
+			read_header 10s
+			read_body 30s
+			idle 2m
+		}
+	}
 }
 
 {$SANSCUE_DOMAIN} {
+	# Explicit public ACME issuer also works for a bare public IPv4 address.
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+		}
+	}
 	encode zstd gzip
 	header {
 		Strict-Transport-Security "max-age=31536000"
@@ -17,7 +33,10 @@
 		@sessions path /api/sessions /api/sessions/*
 		handle @sessions {
 			uri strip_prefix /api/sessions
-			reverse_proxy sessions:3000
+			reverse_proxy sessions:3000 {
+				# Overwrite any visitor-supplied value; backend is private.
+				header_up X-Sanscue-Client-IP {remote_host}
+			}
 		}
 		@api path /api /api/*
 		handle @api {

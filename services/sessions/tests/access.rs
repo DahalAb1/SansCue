@@ -3342,3 +3342,190 @@ async fn speaker_ranks_topics_by_confusion_and_the_audience_cannot_see_them() {
     assert_eq!(merged_topics[0]["collecting"], true);
     finish(pool, admin, schema).await;
 }
+
+#[tokio::test]
+async fn open_demo_rooms_are_browser_owned_and_can_be_disabled() {
+    let (pool, admin, schema) = db().await;
+    let mut sec = security();
+    sec.demo_open_rooms = true;
+    let app = configured_router(pool.clone(), sec);
+    let organizer = boot(&app).await;
+    let other = boot(&app).await;
+    let audience = boot(&app).await;
+    assert_eq!(
+        call(&app, &organizer, "GET", "/operator/session", json!({}))
+            .await
+            .1,
+        json!({"operator":false,"demo_open_rooms":true})
+    );
+    let key = Uuid::new_v4();
+    let (status, created, _) = request(
+        &app,
+        Some(&organizer),
+        "POST",
+        "/rooms",
+        json!({"title":"Judge demo"}),
+        attempt(key),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let room_id = created["state"]["room"]["id"].as_str().unwrap();
+    let state = format!("/rooms/{room_id}/state");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let live_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, live_app).await.unwrap();
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .http1_only()
+        .build()
+        .unwrap();
+    for (cookie, expected) in [(&organizer.cookie, 101), (&other.cookie, 404)] {
+        let response = client
+            .get(format!("http://{address}/rooms/{room_id}/events"))
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header("origin", "http://localhost:5173")
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), expected);
+    }
+    server.abort();
+
+    assert_eq!(
+        call(&app, &organizer, "GET", &state, json!({})).await.1["membership"]["role"],
+        "speaker"
+    );
+    assert_eq!(call(&app, &other, "GET", &state, json!({})).await.0, 404);
+    assert_eq!(
+        call(
+            &app,
+            &other,
+            "POST",
+            &format!("/rooms/{room_id}/end"),
+            json!({})
+        )
+        .await
+        .0,
+        404
+    );
+    assert_eq!(
+        call(
+            &app,
+            &other,
+            "POST",
+            "/rooms",
+            json!({"title":"Another demo"})
+        )
+        .await
+        .0,
+        201
+    );
+    let joined = call(
+        &app,
+        &audience,
+        "POST",
+        created["join_url"].as_str().unwrap(),
+        json!({}),
+    )
+    .await;
+    assert_eq!(joined.0, 200);
+    assert_eq!(joined.1["state"]["membership"]["role"], "audience");
+    assert_eq!(
+        request(
+            &app,
+            Some(&organizer),
+            "POST",
+            "/rooms",
+            json!({"title":"Judge demo"}),
+            attempt(key)
+        )
+        .await
+        .0,
+        201
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM rooms WHERE title='Judge demo'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let closed = configured_router(pool.clone(), security());
+    assert_eq!(
+        call(
+            &closed,
+            &organizer,
+            "POST",
+            "/rooms",
+            json!({"title":"Denied"})
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call(&closed, &organizer, "GET", &state, json!({})).await.0,
+        404
+    );
+    assert_eq!(
+        call(&closed, &audience, "GET", &state, json!({})).await.1["membership"]["role"],
+        "audience"
+    );
+    let host = boot(&closed).await;
+    login(&closed, &host).await;
+    assert_eq!(
+        call(&closed, &host, "GET", &state, json!({})).await.1["membership"]["role"],
+        "speaker"
+    );
+    finish(pool, admin, schema).await;
+}
+
+#[tokio::test]
+async fn public_limits_reject_room_floods_and_oversized_bodies() {
+    let (pool, admin, schema) = db().await;
+    let mut sec = security();
+    sec.demo_open_rooms = true;
+    sec.public_rate_limits = true;
+    sec.trust_client_ip_header = false;
+    let app = configured_router(pool.clone(), sec);
+    let browser = boot(&app).await;
+    for _ in 0..3 {
+        assert_eq!(
+            call(&app, &browser, "POST", "/rooms", json!({"title":"Demo"}))
+                .await
+                .0,
+            201
+        );
+    }
+    assert_eq!(
+        call(&app, &browser, "POST", "/rooms", json!({"title":"Flood"}))
+            .await
+            .0,
+        429
+    );
+    assert_eq!(
+        call(&app, &browser, "GET", "/operator/session", json!({}))
+            .await
+            .0,
+        200
+    );
+    // A different endpoint uses the general write budget and hits the body limit.
+    assert_eq!(
+        call(
+            &app,
+            &browser,
+            "POST",
+            "/operator/login",
+            json!({"credential":"x".repeat(17000)})
+        )
+        .await
+        .0,
+        413
+    );
+    finish(pool, admin, schema).await;
+}

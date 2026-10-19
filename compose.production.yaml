@@ -15,7 +15,6 @@ services:
     <<: *runtime
     environment:
       SANSCUE_DOMAIN: "${SANSCUE_DOMAIN:?Set SANSCUE_DOMAIN}"
-      ACME_EMAIL: "${ACME_EMAIL:?Set ACME_EMAIL}"
     ports: !override
       - "80:80"
       - "443:443"
@@ -31,6 +30,8 @@ services:
     environment:
       SESSIONS_PUBLIC_ORIGIN: "https://${SANSCUE_DOMAIN:?Set SANSCUE_DOMAIN}"
       SESSIONS_ALLOW_INSECURE_LOOPBACK: "false"
+      SESSIONS_PUBLIC_RATE_LIMITS: "true"
+      SESSIONS_TRUST_CLIENT_IP_HEADER: "true"
       SESSIONS_OPERATOR_TOKEN_SHA256: "${SESSIONS_OPERATOR_TOKEN_SHA256:?Provision operator access}"
       SESSIONS_OPERATOR_EPOCH: "${SESSIONS_OPERATOR_EPOCH:?Provision operator access}"
       SESSIONS_IDEMPOTENCY_HMAC_KEY: "${SESSIONS_IDEMPOTENCY_HMAC_KEY:?Provision operator access}"

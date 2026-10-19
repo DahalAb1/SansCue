@@ -80,6 +80,7 @@ export function segment(value: string): string {
 export const paths = {
   bootstrap: '/bootstrap',
   login: '/operator/login',
+  operatorSession: '/operator/session',
   rooms: '/rooms',
   state: (id: string) => '/rooms/' + segment(id) + '/state',
   events: (id: string, after: number) => '/rooms/' + segment(id) + '/events?after=' + encodeURIComponent(String(after)),

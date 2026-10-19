@@ -3,6 +3,7 @@ pub mod app;
 pub mod config;
 pub mod health;
 pub mod live;
+pub mod rate_limit;
 pub mod security;
 
 use sqlx::{

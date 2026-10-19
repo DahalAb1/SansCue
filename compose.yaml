@@ -33,6 +33,7 @@ services:
       TOPICS_INTERNAL_URL: "http://topics-and-questions:3002"
       TOPICS_SESSIONS_SERVICE_TOKEN: "${TOPICS_SESSIONS_SERVICE_TOKEN:-}"
       SESSIONS_ALLOW_INSECURE_LOOPBACK: "true"
+      SESSIONS_DEMO_OPEN_ROOMS: "${SESSIONS_DEMO_OPEN_ROOMS:-false}"
       # Operator access stays disabled (fail closed) unless all three are provisioned in deploy/.env.
       SESSIONS_OPERATOR_TOKEN_SHA256: "${SESSIONS_OPERATOR_TOKEN_SHA256:-}"
       SESSIONS_OPERATOR_EPOCH: "${SESSIONS_OPERATOR_EPOCH:-}"
