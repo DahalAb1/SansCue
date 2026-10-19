@@ -650,6 +650,37 @@ fn topic_candidate(
     })
 }
 
+/// Issues a single-use TA invitation as the speaker and redeems it in a new browser.
+async fn invite_moderator(app: &Router, speaker: &Browser, root: &str) -> Browser {
+    let (status, invitation) = call(
+        app,
+        speaker,
+        "POST",
+        &format!("{root}/invitations"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let token = invitation["invite_url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("/invite/")
+        .unwrap()
+        .to_owned();
+    let moderator = boot(app).await;
+    let (status, redeemed) = call(
+        app,
+        &moderator,
+        "POST",
+        &format!("/invitations/{token}/redeem"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(redeemed["state"]["membership"]["role"], "ta");
+    moderator
+}
+
 fn token_of(browser: &Browser) -> &str {
     browser.cookie.split_once('=').unwrap().1
 }
@@ -1883,6 +1914,7 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
         call(&app, &other_audience, "POST", join, json!({})).await.0,
         200
     );
+    let moderator = invite_moderator(&app, &speaker, &root).await;
 
     let conversation = Uuid::new_v4();
     let (_, binding) = call(
@@ -1945,10 +1977,23 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
         .0,
         403
     );
+    // Publication belongs to the moderator; the speaker presents results only.
+    assert_eq!(
+        call(
+            &app,
+            &speaker,
+            "POST",
+            &format!("{root}/questions/{candidate_id}/publish"),
+            json!({})
+        )
+        .await
+        .0,
+        403
+    );
 
     let (_, published) = call(
         &app,
-        &speaker,
+        &moderator,
         "POST",
         &format!("{root}/questions/{candidate_id}/publish"),
         json!({}),
@@ -2053,8 +2098,31 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
         )
         .await
         .0,
+        403
+    );
+    assert_eq!(
+        call(
+            &app,
+            &moderator,
+            "POST",
+            &format!("{root}/questions/{question_id}/versions"),
+            json!({"text":"Revised for clarity"})
+        )
+        .await
+        .0,
         200
     );
+    // Responses keep the wording they were given against, so the chart can say so.
+    let (_, after_revision) =
+        call(&app, &speaker, "GET", &format!("{root}/state"), json!({})).await;
+    assert_eq!(after_revision["dashboard"]["respondents"], 2);
+    assert_eq!(
+        after_revision["dashboard"]["earlier_version_respondents"],
+        2
+    );
+    let (_, audience_after) =
+        call(&app, &audience, "GET", &format!("{root}/state"), json!({})).await;
+    assert_eq!(audience_after["my_response_version"], 1);
     let evidence_rows = sqlx::query("SELECT version,evidence,question_text FROM published_question_versions WHERE question_id=$1 ORDER BY version")
         .bind(Uuid::parse_str(question_id).unwrap()).fetch_all(&pool).await.unwrap();
     assert_eq!(evidence_rows.len(), 2);
@@ -2147,7 +2215,7 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
                 && value.to_string().find(private_text).is_none())
     );
 
-    // Independent operator sessions concurrently publishing different
+    // Independent moderator sessions concurrently publishing different
     // candidates must serialize on the room lock, leaving exactly one active.
     let next_a = Uuid::new_v4();
     let next_b = Uuid::new_v4();
@@ -2171,13 +2239,12 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
             202
         );
     }
-    let second_operator = boot(&app).await;
-    login(&app, &second_operator).await;
+    let second_moderator = invite_moderator(&app, &speaker, &root).await;
     let path_a = format!("{root}/questions/{next_a}/publish");
     let path_b = format!("{root}/questions/{next_b}/publish");
     let (published_a, published_b) = tokio::join!(
-        call(&app, &speaker, "POST", &path_a, json!({})),
-        call(&app, &second_operator, "POST", &path_b, json!({})),
+        call(&app, &moderator, "POST", &path_a, json!({})),
+        call(&app, &second_moderator, "POST", &path_b, json!({})),
     );
     assert_eq!(published_a.0, 200);
     assert_eq!(published_b.0, 200);
@@ -2193,7 +2260,7 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
 }
 
 #[tokio::test]
-async fn listening_bee_binding_records_the_adopted_conversation() {
+async fn speaker_selects_a_reported_recording_and_ending_the_room_unbinds_it() {
     let (pool, admin, schema) = db().await;
     let security = Security {
         bee_credential: Some("synthetic-bee".into()),
@@ -2347,5 +2414,590 @@ async fn live_transcript_is_staff_only_and_read_from_topics() {
     let (status, body) = call(&unconfigured, &browser, "GET", &path, json!({})).await;
     assert_eq!(status, 503);
     assert_eq!(body["code"], "transcript_unavailable");
+    finish(pool, admin, schema).await;
+}
+
+/// Binds a synthetic conversation through the private worker routes and
+/// returns (conversation, bound speaker session) for candidate delivery.
+async fn bind_synthetic(
+    app: &Router,
+    private: &Router,
+    pool: &PgPool,
+    speaker: &Browser,
+    room: &str,
+) -> (Uuid, Uuid) {
+    let conversation = Uuid::new_v4();
+    let (_, binding) = call(
+        app,
+        speaker,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"conversation_id":conversation,"source_conversation_id":null}),
+    )
+    .await;
+    let status = json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":binding["revision"]});
+    assert_eq!(
+        private_json(
+            private,
+            "POST",
+            &format!("/internal/v1/bee/rooms/{room}/status"),
+            status
+        )
+        .await
+        .0,
+        200
+    );
+    let ack = format!(
+        "/internal/v1/bee/commands/{}/ack",
+        binding["command_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        private_json(private, "POST", &ack, json!(null)).await.0,
+        200
+    );
+    let session = sqlx::query_scalar::<_, Uuid>(
+        "SELECT session_id FROM bee_room_bindings WHERE room_id=$1::uuid",
+    )
+    .bind(room)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (conversation, session)
+}
+
+fn draft_ids(state: &Value) -> Vec<String> {
+    state["question_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["candidate_id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn moderator_reviews_publishes_and_replies_privately() {
+    let (pool, admin, schema) = db().await;
+    let sec = Security {
+        topics_credential: Some("synthetic-topics".into()),
+        ..security()
+    };
+    let app = configured_router(pool.clone(), sec.clone());
+    let private = internal_router(Access {
+        pool: pool.clone(),
+        security: sec,
+    });
+    let speaker = boot(&app).await;
+    let audience = boot(&app).await;
+    let other_audience = boot(&app).await;
+    login(&app, &speaker).await;
+    let (_, created) = call(
+        &app,
+        &speaker,
+        "POST",
+        "/rooms",
+        json!({"title":"Moderated"}),
+    )
+    .await;
+    let room = created["state"]["room"]["id"].as_str().unwrap().to_owned();
+    let room_id = Uuid::parse_str(&room).unwrap();
+    let root = format!("/rooms/{room}");
+    let join = created["join_url"].as_str().unwrap();
+    let (_, joined) = call(&app, &audience, "POST", join, json!({})).await;
+    let audience_member = joined["state"]["membership"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        call(&app, &other_audience, "POST", join, json!({})).await.0,
+        200
+    );
+    let moderator = invite_moderator(&app, &speaker, &root).await;
+    let (conversation, session) = bind_synthetic(&app, &private, &pool, &speaker, &room).await;
+
+    let deliver = |excerpt: &'static str| {
+        let private = private.clone();
+        async move {
+            let id = Uuid::new_v4();
+            let candidate = topic_candidate(id, conversation, room_id, session, excerpt);
+            assert_eq!(
+                private_topics_json(
+                    &private,
+                    "POST",
+                    "/internal/v1/topics/candidates",
+                    candidate
+                )
+                .await
+                .0,
+                202
+            );
+            id.to_string()
+        }
+    };
+    let c1 = deliver("first idea").await;
+    let c2 = deliver("second idea").await;
+    let c3 = deliver("third idea").await;
+    let c4 = deliver("fourth idea").await;
+    let state = |browser: &Browser| {
+        let app = app.clone();
+        let path = format!("{root}/state");
+        let cookie = browser.cookie.clone();
+        let csrf = browser.csrf.clone();
+        async move {
+            call(&app, &Browser { cookie, csrf }, "GET", &path, json!({}))
+                .await
+                .1
+        }
+    };
+
+    // The review queue shows only the freshest drafts, newest first.
+    assert_eq!(
+        draft_ids(&state(&moderator).await),
+        [c4.clone(), c3.clone(), c2.clone()]
+    );
+    assert_eq!(draft_ids(&state(&speaker).await).len(), 3);
+    assert!(state(&audience).await["question_candidates"].is_null());
+
+    // Only the moderator may edit, dismiss or publish drafts.
+    for (path, body) in [
+        (
+            format!("{root}/questions/{c2}/draft"),
+            json!({"text":"How clear is this?"}),
+        ),
+        (format!("{root}/questions/{c2}/dismiss"), json!({})),
+        (format!("{root}/questions/{c2}/publish"), json!({})),
+    ] {
+        assert_eq!(
+            call(&app, &speaker, "POST", &path, body.clone()).await.0,
+            403,
+            "{path}"
+        );
+        assert_eq!(
+            call(&app, &audience, "POST", &path, body.clone()).await.0,
+            403,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        call(
+            &app,
+            &moderator,
+            "POST",
+            &format!("{root}/questions/{c2}/draft"),
+            json!({"text":"  "})
+        )
+        .await
+        .0,
+        400
+    );
+
+    // A saved edit survives refresh and moves the draft to the top.
+    let edited = "How clear is the second idea now?";
+    let (status, saved) = call(
+        &app,
+        &moderator,
+        "POST",
+        &format!("{root}/questions/{c2}/draft"),
+        json!({"text": format!("  {edited} ")}),
+    )
+    .await;
+    assert_eq!((status, saved["text"].as_str()), (200, Some(edited)));
+    let refreshed = state(&moderator).await;
+    assert_eq!(draft_ids(&refreshed)[0], c2);
+    let draft = &refreshed["question_candidates"][0];
+    assert_eq!(draft["text"], edited);
+    assert_eq!(draft["edited"], true);
+    assert_eq!(
+        draft["original_text"],
+        "What is the implication of second idea?"
+    );
+    assert!(draft["expires_at"].is_string());
+
+    // Dismissal is durable and idempotent, and a dismissed draft cannot be revived.
+    for _ in 0..2 {
+        let (status, body) = call(
+            &app,
+            &moderator,
+            "POST",
+            &format!("{root}/questions/{c3}/dismiss"),
+            json!({}),
+        )
+        .await;
+        assert_eq!((status, body["dismissed"].as_bool()), (200, Some(true)));
+    }
+    assert_eq!(
+        draft_ids(&state(&moderator).await),
+        [c2.clone(), c4.clone(), c1.clone()]
+    );
+    for (suffix, body) in [("publish", json!({})), ("draft", json!({"text":"Revive?"}))] {
+        let (status, body) = call(
+            &app,
+            &moderator,
+            "POST",
+            &format!("{root}/questions/{c3}/{suffix}"),
+            body,
+        )
+        .await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (409, Some("draft_dismissed"))
+        );
+    }
+
+    // Expired drafts leave the queue and cannot be published from a stale screen.
+    sqlx::query("UPDATE topic_candidates SET created_at=now()-interval '11 minutes' WHERE candidate_id=$1::uuid")
+        .bind(&c1).execute(&pool).await.unwrap();
+    assert!(!draft_ids(&state(&moderator).await).contains(&c1));
+    let (status, body) = call(
+        &app,
+        &moderator,
+        "POST",
+        &format!("{root}/questions/{c1}/publish"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (410, Some("draft_expired"))
+    );
+
+    // Publishing uses the saved edit; a retry with the same key is replayed, not duplicated.
+    let publish_path = format!("{root}/questions/{c2}/publish");
+    let key = Uuid::new_v4();
+    let first = request(
+        &app,
+        Some(&moderator),
+        "POST",
+        &publish_path,
+        json!({}),
+        attempt(key),
+    )
+    .await;
+    let retry = request(
+        &app,
+        Some(&moderator),
+        "POST",
+        &publish_path,
+        json!({}),
+        attempt(key),
+    )
+    .await;
+    assert_eq!((first.0, retry.0), (200, 200));
+    assert_eq!(first.1["question_id"], retry.1["question_id"]);
+    assert_eq!(first.1["text"], edited);
+    let published_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM published_questions WHERE candidate_id=$1::uuid")
+            .bind(&c2)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(published_rows, 1);
+    let (status, body) = call(&app, &moderator, "POST", &publish_path, json!({})).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (409, Some("question_already_published"))
+    );
+    let audience_view = state(&audience).await;
+    assert_eq!(audience_view["active_question"]["text"], edited);
+    assert!(audience_view["active_question"].get("evidence").is_none());
+    let staff_view = state(&speaker).await;
+    assert_eq!(
+        staff_view["active_question"]["evidence"]["excerpt"],
+        "second idea"
+    );
+    let moderator_member = state(&moderator).await["membership"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let attribution = sqlx::query("SELECT p.published_by::text AS publisher,v.created_by::text AS author FROM published_questions p JOIN published_question_versions v USING(question_id) WHERE p.candidate_id=$1::uuid")
+        .bind(&c2).fetch_one(&pool).await.unwrap();
+    assert_eq!(attribution.get::<String, _>("publisher"), moderator_member);
+    assert_eq!(attribution.get::<String, _>("author"), moderator_member);
+
+    // Publishing another draft with inline wording replaces the active question.
+    let (status, replaced) = call(
+        &app,
+        &moderator,
+        "POST",
+        &format!("{root}/questions/{c4}/publish"),
+        json!({"text":"How clear is the fourth idea?"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let active: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT question_id FROM published_questions WHERE room_id=$1 AND active",
+    )
+    .bind(room_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(
+        active[0].to_string(),
+        replaced["question_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        state(&audience).await["active_question"]["text"],
+        "How clear is the fourth idea?"
+    );
+
+    // A replay cannot outlive the moderator's access.
+    let c5 = deliver("fifth idea").await;
+    let draft_path = format!("{root}/questions/{c5}/draft");
+    let replay_key = Uuid::new_v4();
+    let draft_body = json!({"text":"How clear is the fifth idea?"});
+    assert_eq!(
+        request(
+            &app,
+            Some(&moderator),
+            "POST",
+            &draft_path,
+            draft_body.clone(),
+            attempt(replay_key)
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            &app,
+            &speaker,
+            "POST",
+            &format!("{root}/memberships/{moderator_member}/revoke"),
+            json!({})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        request(
+            &app,
+            Some(&moderator),
+            "POST",
+            &draft_path,
+            draft_body,
+            attempt(replay_key)
+        )
+        .await
+        .0,
+        404
+    );
+    assert_eq!(
+        call(
+            &app,
+            &moderator,
+            "POST",
+            &format!("{root}/questions/{c5}/publish"),
+            json!({})
+        )
+        .await
+        .0,
+        404
+    );
+    let moderator = invite_moderator(&app, &speaker, &root).await;
+
+    // Replies reach only the question's author and room staff.
+    let question_id = replaced["question_id"].as_str().unwrap();
+    let qa = format!("{root}/qa");
+    assert_eq!(
+        call(
+            &app,
+            &audience,
+            "POST",
+            &qa,
+            json!({"body":"Can you repeat the fourth idea?","question_id":question_id})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call(
+            &app,
+            &other_audience,
+            "POST",
+            &qa,
+            json!({"body":"Another private question"})
+        )
+        .await
+        .0,
+        200
+    );
+    let own = call(&app, &audience, "GET", &qa, json!({})).await.1;
+    let message = own["items"][0]["message_id"].as_str().unwrap().to_owned();
+    assert!(own["items"][0].get("author_label").is_none());
+    let reply_path = format!("{root}/qa/{message}/replies");
+    let reply_text = "The fourth idea is covered again on the next slide.";
+    for denied in [&speaker, &audience, &other_audience] {
+        assert_eq!(
+            call(
+                &app,
+                denied,
+                "POST",
+                &reply_path,
+                json!({"body":reply_text})
+            )
+            .await
+            .0,
+            403
+        );
+    }
+    assert_eq!(
+        call(
+            &app,
+            &moderator,
+            "POST",
+            &reply_path,
+            json!({"body":"x".repeat(2001)})
+        )
+        .await
+        .0,
+        400
+    );
+    let reply_key = Uuid::new_v4();
+    for _ in 0..2 {
+        let (status, _, _) = request(
+            &app,
+            Some(&moderator),
+            "POST",
+            &reply_path,
+            json!({"body":reply_text}),
+            attempt(reply_key),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    let reply_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM written_question_replies WHERE message_id=$1::uuid",
+    )
+    .bind(&message)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reply_rows, 1);
+    let own = call(&app, &audience, "GET", &qa, json!({})).await.1;
+    assert_eq!(own["items"][0]["replies"][0]["body"], reply_text);
+    assert_eq!(own["items"][0]["replies"][0]["from"], "moderator");
+    let others = call(&app, &other_audience, "GET", &qa, json!({})).await.1;
+    assert_eq!(others["items"].as_array().unwrap().len(), 1);
+    assert!(others["items"][0]["replies"].as_array().unwrap().is_empty());
+    assert!(!others.to_string().contains(reply_text));
+    let staff = call(&app, &speaker, "GET", &qa, json!({})).await.1;
+    assert_eq!(staff["items"].as_array().unwrap().len(), 2);
+    assert!(
+        staff["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["author_label"].is_string())
+    );
+    assert!(staff.to_string().contains(reply_text));
+
+    // The reply invalidation targets its author; no event carries private text.
+    let latest = sqlx::query("SELECT visibility,target_membership_id::text AS target,payload FROM room_events WHERE room_id=$1 ORDER BY sequence DESC LIMIT 1")
+        .bind(room_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(latest.get::<String, _>("visibility"), "member");
+    assert_eq!(
+        latest.get::<Option<String>, _>("target").as_deref(),
+        Some(audience_member.as_str())
+    );
+    assert_eq!(
+        latest.get::<Value, _>("payload"),
+        json!({"resources":["qa"]})
+    );
+    let payloads =
+        sqlx::query_scalar::<_, Value>("SELECT payload FROM room_events WHERE room_id=$1")
+            .bind(room_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(payloads.iter().all(
+        |p| !p.to_string().contains(reply_text) && !p.to_string().contains("private question")
+    ));
+
+    // A moderator of another room cannot reach this room's drafts or threads.
+    let (_, other_room) = call(
+        &app,
+        &speaker,
+        "POST",
+        "/rooms",
+        json!({"title":"Other room"}),
+    )
+    .await;
+    let other_root = format!(
+        "/rooms/{}",
+        other_room["state"]["room"]["id"].as_str().unwrap()
+    );
+    let other_moderator = invite_moderator(&app, &speaker, &other_root).await;
+    assert_eq!(
+        call(
+            &app,
+            &other_moderator,
+            "POST",
+            &format!("{other_root}/qa/{message}/replies"),
+            json!({"body":"cross-room"})
+        )
+        .await
+        .0,
+        404
+    );
+    assert_eq!(
+        call(
+            &app,
+            &other_moderator,
+            "POST",
+            &format!("{other_root}/questions/{c5}/publish"),
+            json!({})
+        )
+        .await
+        .0,
+        404
+    );
+    assert_eq!(
+        call(
+            &app,
+            &other_moderator,
+            "POST",
+            &reply_path,
+            json!({"body":"cross-room"})
+        )
+        .await
+        .0,
+        404
+    );
+
+    // Ending the room rejects further moderation and participation.
+    assert_eq!(
+        call(&app, &speaker, "POST", &format!("{root}/end"), json!({}))
+            .await
+            .0,
+        200
+    );
+    for (path, body) in [
+        (format!("{root}/questions/{c5}/publish"), json!({})),
+        (
+            format!("{root}/questions/{c5}/draft"),
+            json!({"text":"Late edit?"}),
+        ),
+        (format!("{root}/questions/{c5}/dismiss"), json!({})),
+        (reply_path.clone(), json!({"body":"Late reply"})),
+    ] {
+        let (status, body) = call(&app, &moderator, "POST", &path, body).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (409, Some("room_ended")),
+            "{path}"
+        );
+    }
+    let (status, body) = call(
+        &app,
+        &audience,
+        "POST",
+        &qa,
+        json!({"body":"Late question"}),
+    )
+    .await;
+    assert_eq!((status, body["code"].as_str()), (409, Some("room_ended")));
     finish(pool, admin, schema).await;
 }
