@@ -62,6 +62,14 @@ pub struct CadencePolicy {
     pub min_words_per_window: usize,
     pub max_window_duration: Duration,
     pub silence_boundary_threshold: Duration,
+    /// Transcript received longer ago than this is skipped as backlog; `None` disables the check.
+    pub max_transcript_age: Option<Duration>,
+    /// Minimum speech time between generator calls for one room, so each new
+    /// utterance does not trigger another model request.
+    pub min_interval_between_attempts: Duration,
+    /// Recent drafts (newest first, within the window) used to suppress repeats.
+    pub recent_question_limit: usize,
+    pub recent_question_window: Duration,
 }
 
 impl Default for CadencePolicy {
@@ -71,6 +79,10 @@ impl Default for CadencePolicy {
             min_words_per_window: 1,
             max_window_duration: Duration::from_secs(180),
             silence_boundary_threshold: Duration::from_secs(5),
+            max_transcript_age: None,
+            min_interval_between_attempts: Duration::ZERO,
+            recent_question_limit: 5,
+            recent_question_window: Duration::from_secs(30 * 60),
         }
     }
 }
@@ -78,7 +90,9 @@ impl Default for CadencePolicy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AbstentionReason {
     InsufficientContext,
-    CooldownActive { remaining_seconds: u64 },
+    CooldownActive {
+        remaining_seconds: u64,
+    },
     SilenceOrPause,
     RepetitiveTopic,
     AlreadyAnswered,
@@ -86,6 +100,12 @@ pub enum AbstentionReason {
     WeaklyGrounded,
     ModelAbstained,
     StaleTranscript,
+    /// The newest utterance stops mid-sentence; wait for the explanation to finish.
+    UnfinishedThought,
+    /// A generator call for this room ran too recently in speech time.
+    AttemptThrottled,
+    /// Output was not a short comprehension check-in for the Clear / Partly clear / Need help scale.
+    UnsuitableQuestion,
 }
 
 impl AbstentionReason {
@@ -100,6 +120,9 @@ impl AbstentionReason {
             Self::WeaklyGrounded => "weakly_grounded",
             Self::ModelAbstained => "model_abstained",
             Self::StaleTranscript => "stale_transcript",
+            Self::UnfinishedThought => "unfinished_thought",
+            Self::AttemptThrottled => "attempt_throttled",
+            Self::UnsuitableQuestion => "unsuitable_question",
         }
     }
 }
@@ -120,6 +143,14 @@ impl From<GeneratedQuestion> for GenerationOutcome {
 pub struct GenerationInput {
     pub event: TranscriptEvent,
     pub window: Option<TopicWindow>,
+    /// Drafts already produced for this room, newest first.
+    pub recent_questions: Vec<RecentQuestion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentQuestion {
+    pub text: String,
+    pub evidence_excerpt: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -161,92 +192,222 @@ impl TopicWindowGenerator {
     }
 }
 
+/// Deterministic checks that run before any generator call, so silence,
+/// filler, thin context and repeats never cost a model request.
+pub fn gate(policy: &CadencePolicy, input: &GenerationInput) -> Option<AbstentionReason> {
+    let Some(window) = &input.window else {
+        return Some(AbstentionReason::InsufficientContext);
+    };
+    let anchor_text = input.event.text.trim();
+    if anchor_text.is_empty() {
+        return Some(AbstentionReason::WeaklyGrounded);
+    }
+    if anchor_text == "..."
+        || anchor_text.eq_ignore_ascii_case("[pause]")
+        || anchor_text.eq_ignore_ascii_case("[silence]")
+        || anchor_text.chars().all(|c| c == '.' || c == ' ')
+    {
+        return Some(AbstentionReason::SilenceOrPause);
+    }
+    let lower = anchor_text.to_lowercase();
+    let is_filler = lower.split_whitespace().all(|w| {
+        matches!(
+            w.trim_matches(['.', ',', '!', '?', ';', ':', '-', '"', '\'']),
+            "um" | "uh"
+                | "yeah"
+                | "yep"
+                | "yes"
+                | "sure"
+                | "okay"
+                | "ok"
+                | "thanks"
+                | "thank"
+                | "moving"
+                | "on"
+                | "hello"
+                | "hi"
+                | "bye"
+                | "right"
+                | "so"
+        )
+    });
+    if is_filler {
+        return Some(AbstentionReason::LowValueFiller);
+    }
+    if window.total_words < policy.min_words_per_window {
+        return Some(AbstentionReason::InsufficientContext);
+    }
+    let is_repetition = window
+        .window_events
+        .iter()
+        .filter(|e| e.event_id != input.event.event_id)
+        .any(|e| e.text.trim().eq_ignore_ascii_case(anchor_text));
+    if is_repetition {
+        return Some(AbstentionReason::RepetitiveTopic);
+    }
+    if lower.starts_with("as i said")
+        || lower.starts_with("as mentioned")
+        || lower.contains("already answered")
+        || lower.contains("already covered")
+        || lower.contains("like i said earlier")
+    {
+        return Some(AbstentionReason::AlreadyAnswered);
+    }
+    if unfinished(anchor_text) {
+        return Some(AbstentionReason::UnfinishedThought);
+    }
+    None
+}
+
+/// True when speech visibly stops mid-sentence: a trailing comma, dash or
+/// ellipsis, or a dangling connective with no closing punctuation.
+fn unfinished(text: &str) -> bool {
+    let text = text.trim_end_matches(['"', '\'', ')', ' ']);
+    if text.ends_with(',')
+        || text.ends_with('-')
+        || text.ends_with('\u{2014}')
+        || text.ends_with("...")
+        || text.ends_with('\u{2026}')
+    {
+        return true;
+    }
+    if text.ends_with(['.', '?', '!', ';', ':']) {
+        return false;
+    }
+    let last = text
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    matches!(
+        last.as_str(),
+        "and"
+            | "but"
+            | "or"
+            | "so"
+            | "because"
+            | "which"
+            | "that"
+            | "the"
+            | "a"
+            | "an"
+            | "to"
+            | "of"
+            | "with"
+            | "for"
+            | "if"
+            | "when"
+            | "where"
+            | "then"
+            | "is"
+            | "are"
+    )
+}
+
+const STOP_WORDS: &[&str] = &[
+    "a",
+    "about",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "can",
+    "clear",
+    "do",
+    "does",
+    "for",
+    "from",
+    "how",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "understand",
+    "understood",
+    "was",
+    "we",
+    "what",
+    "when",
+    "where",
+    "which",
+    "why",
+    "with",
+    "you",
+    "your",
+    "follow",
+    "sense",
+    "makes",
+    "make",
+    "much",
+    "well",
+];
+
+fn content_words(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .filter(|w| !STOP_WORDS.contains(&w.as_str()))
+        .map(|w| match w.strip_suffix('s') {
+            Some(singular) if singular.len() > 2 && !singular.ends_with('s') => singular.to_owned(),
+            _ => w,
+        })
+        .filter(|w| w.len() > 1)
+        .collect()
+}
+
+/// Treats two check-ins as the same idea when most content words of the
+/// shorter one also appear in the other, catching light rephrasing.
+pub fn near_duplicate(a: &str, b: &str) -> bool {
+    let (a, b) = (content_words(a), content_words(b));
+    let smaller = a.len().min(b.len());
+    if smaller == 0 {
+        return false;
+    }
+    let shared = a.intersection(&b).count();
+    shared * 10 >= smaller * 6
+}
+
+/// Model output must be a short, single-line clarity check-in that the
+/// Clear / Partly clear / Need help scale can answer, not a factual quiz.
+pub fn is_check_in(question: &str) -> bool {
+    let question = question.trim();
+    let lower = question.to_lowercase();
+    !question.is_empty()
+        && question.ends_with('?')
+        && !question.contains(['\n', '\r'])
+        && question.split_whitespace().count() <= 25
+        && ["clear", "understand", "follow", "sense"]
+            .iter()
+            .any(|word| lower.contains(word))
+}
+
+/// A draft repeats a recent one if its question rephrases it or it quotes the same passage.
+pub fn repeats_recent(output: &GeneratedQuestion, recent: &[RecentQuestion]) -> bool {
+    recent.iter().any(|previous| {
+        near_duplicate(&output.text, &previous.text)
+            || output.evidence_excerpt.trim() == previous.evidence_excerpt.trim()
+    })
+}
+
 impl QuestionGenerator for TopicWindowGenerator {
     fn generate<'a>(&'a self, input: GenerationInput) -> GenerationFuture<'a> {
         Box::pin(async move {
-            let window = match &input.window {
-                Some(w) => w,
-                None => {
-                    return Ok(GenerationOutcome::Abstained {
-                        reason: AbstentionReason::InsufficientContext,
-                    });
-                }
-            };
-
+            if let Some(reason) = gate(&self.policy, &input) {
+                return Ok(GenerationOutcome::Abstained { reason });
+            }
             let anchor_text = input.event.text.trim();
-            if anchor_text.is_empty() {
-                return Ok(GenerationOutcome::Abstained {
-                    reason: AbstentionReason::WeaklyGrounded,
-                });
-            }
-
-            if anchor_text == "..."
-                || anchor_text.eq_ignore_ascii_case("[pause]")
-                || anchor_text.eq_ignore_ascii_case("[silence]")
-                || anchor_text.chars().all(|c| c == '.' || c == ' ')
-            {
-                return Ok(GenerationOutcome::Abstained {
-                    reason: AbstentionReason::SilenceOrPause,
-                });
-            }
-
-            let lower = anchor_text.to_lowercase();
-            let is_filler = lower.split_whitespace().all(|w| {
-                matches!(
-                    w.trim_matches(['.', ',', '!', '?', ';', ':', '-', '"', '\'']),
-                    "um" | "uh"
-                        | "yeah"
-                        | "yep"
-                        | "yes"
-                        | "sure"
-                        | "okay"
-                        | "ok"
-                        | "thanks"
-                        | "thank"
-                        | "moving"
-                        | "on"
-                        | "hello"
-                        | "hi"
-                        | "bye"
-                        | "right"
-                        | "so"
-                )
-            });
-            if is_filler {
-                return Ok(GenerationOutcome::Abstained {
-                    reason: AbstentionReason::LowValueFiller,
-                });
-            }
-
-            if window.total_words < self.policy.min_words_per_window {
-                return Ok(GenerationOutcome::Abstained {
-                    reason: AbstentionReason::InsufficientContext,
-                });
-            }
-
-            let is_repetition = window
-                .window_events
-                .iter()
-                .filter(|e| e.event_id != input.event.event_id)
-                .any(|e| e.text.trim().eq_ignore_ascii_case(anchor_text));
-            if is_repetition {
-                return Ok(GenerationOutcome::Abstained {
-                    reason: AbstentionReason::RepetitiveTopic,
-                });
-            }
-
-            let lower_anchor = anchor_text.to_lowercase();
-            if lower_anchor.starts_with("as i said")
-                || lower_anchor.starts_with("as mentioned")
-                || lower_anchor.contains("already answered")
-                || lower_anchor.contains("already covered")
-                || lower_anchor.contains("like i said earlier")
-            {
-                return Ok(GenerationOutcome::Abstained {
-                    reason: AbstentionReason::AlreadyAnswered,
-                });
-            }
-
             let excerpt = if anchor_text.len() <= 240 {
                 anchor_text.to_string()
             } else {
@@ -755,14 +916,16 @@ impl Delivery {
         let jobs = self.claim_generation_jobs(1).await?;
         let mut completed = 0;
         for (event, lease) in jobs {
-            // Check cooldown before invoking generator
-            if let Some(remaining_seconds) = self.check_cooldown(&event).await? {
+            let early = if self.is_stale(&event) {
+                Some(AbstentionReason::StaleTranscript)
+            } else {
+                self.check_cooldown(&event)
+                    .await?
+                    .map(|remaining_seconds| AbstentionReason::CooldownActive { remaining_seconds })
+            };
+            if let Some(reason) = early {
                 if self
-                    .complete_abstention(
-                        event.event_id,
-                        &lease,
-                        AbstentionReason::CooldownActive { remaining_seconds }.code(),
-                    )
+                    .complete_abstention(event.event_id, &lease, reason.code())
                     .await?
                 {
                     completed += 1;
@@ -785,19 +948,46 @@ impl Delivery {
                     continue;
                 }
             };
+            let recent_questions = self.recent_questions(&event).await?;
+            let input = GenerationInput {
+                event: event.clone(),
+                window: window.clone(),
+                recent_questions: recent_questions.clone(),
+            };
+            let gated = match gate(&self.cadence_policy, &input) {
+                Some(reason) => Some(reason),
+                None if !self.claim_attempt(&event).await? => {
+                    Some(AbstentionReason::AttemptThrottled)
+                }
+                None => None,
+            };
+            if let Some(reason) = gated {
+                if self
+                    .complete_abstention(event.event_id, &lease, reason.code())
+                    .await?
+                {
+                    completed += 1;
+                }
+                continue;
+            }
             let (heartbeat, stop_heartbeat) = self.start_lease_heartbeat(event.event_id, lease);
-            let result = tokio::time::timeout(
-                self.generation_deadline,
-                self.generator.generate(GenerationInput {
-                    event: event.clone(),
-                    window: window.clone(),
-                }),
-            )
-            .await;
+            let result =
+                tokio::time::timeout(self.generation_deadline, self.generator.generate(input))
+                    .await;
             // Gracefully stop and join the heartbeat before clearing the lease.
             // This prevents an in-flight extension from racing the retry update.
             let _ = stop_heartbeat.send(true);
             let _ = heartbeat.await;
+            let result = match result {
+                Ok(Ok(GenerationOutcome::Candidate(output)))
+                    if repeats_recent(&output, &recent_questions) =>
+                {
+                    Ok(Ok(GenerationOutcome::Abstained {
+                        reason: AbstentionReason::RepetitiveTopic,
+                    }))
+                }
+                other => other,
+            };
             match result {
                 Ok(Ok(GenerationOutcome::Candidate(output))) => {
                     if valid_generated_question(&event, &output, window.as_ref()) {
@@ -936,6 +1126,65 @@ impl Delivery {
             }
         });
         (task, stop)
+    }
+
+    fn is_stale(&self, event: &TranscriptEvent) -> bool {
+        self.cadence_policy.max_transcript_age.is_some_and(|max| {
+            (Utc::now() - event.received_at)
+                .to_std()
+                .is_ok_and(|age| age > max)
+        })
+    }
+
+    /// Drafts already produced for this room, newest first, for duplicate suppression.
+    pub async fn recent_questions(
+        &self,
+        anchor: &TranscriptEvent,
+    ) -> Result<Vec<RecentQuestion>, &'static str> {
+        let policy = &self.cadence_policy;
+        if policy.recent_question_limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT text, evidence->>'excerpt' AS excerpt FROM question_candidates
+             WHERE room_id=$1 AND created_at > now() - make_interval(secs => $2)
+             ORDER BY created_at DESC LIMIT $3",
+        )
+        .bind(anchor.binding.room_id)
+        .bind(policy.recent_question_window.as_secs_f64())
+        .bind(policy.recent_question_limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| "recent question lookup failed")?;
+        Ok(rows
+            .into_iter()
+            .map(|row| RecentQuestion {
+                text: row.get("text"),
+                evidence_excerpt: row.get::<Option<String>, _>("excerpt").unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    /// Records a generator attempt for the anchor's room unless one ran within
+    /// the configured interval of speech time. Returns false when throttled.
+    pub async fn claim_attempt(&self, anchor: &TranscriptEvent) -> Result<bool, &'static str> {
+        let interval = self.cadence_policy.min_interval_between_attempts;
+        if interval.is_zero() {
+            return Ok(true);
+        }
+        let claimed = sqlx::query(
+            "INSERT INTO room_generation_attempts(room_id, last_attempt_at) VALUES($1, $2)
+             ON CONFLICT(room_id) DO UPDATE SET last_attempt_at=EXCLUDED.last_attempt_at, updated_at=now()
+             WHERE room_generation_attempts.last_attempt_at <= EXCLUDED.last_attempt_at - make_interval(secs => $3)
+             RETURNING room_id",
+        )
+        .bind(anchor.binding.room_id)
+        .bind(anchor.source_spoken_at.unwrap_or(anchor.received_at))
+        .bind(interval.as_secs_f64())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| "generation attempt claim failed")?;
+        Ok(claimed.is_some())
     }
 
     pub async fn check_cooldown(
@@ -1083,7 +1332,18 @@ impl Delivery {
 
             let earliest = &window[0];
             let earliest_time = earliest.source_spoken_at.unwrap_or(earliest.received_at);
-            let time_gap = earliest_time.signed_duration_since(prev_time);
+            // Spoken times mark where an utterance starts, so measure silence
+            // from the previous utterance's end when its duration is known.
+            let prev_duration = match (prev.source_start_millis, prev.source_end_millis) {
+                (Some(start), Some(end)) if end > start => {
+                    chrono::Duration::milliseconds((end - start).min(600_000) as i64)
+                }
+                _ => chrono::Duration::zero(),
+            };
+            let prev_end = prev_time
+                .checked_add_signed(prev_duration)
+                .unwrap_or(prev_time);
+            let time_gap = earliest_time.signed_duration_since(prev_end);
 
             let has_millis_gap = match (earliest.source_start_millis, prev.source_end_millis) {
                 (Some(start_m), Some(end_m)) => {
@@ -1251,6 +1511,79 @@ mod delivery_tests {
 }
 
 #[cfg(test)]
+mod gate_tests {
+    use super::{
+        GeneratedQuestion, RecentQuestion, is_check_in, near_duplicate, repeats_recent, unfinished,
+    };
+
+    #[test]
+    fn unfinished_speech_waits_for_the_explanation_to_end() {
+        for text in [
+            "and the reason this converges is because",
+            "So the gradient points uphill,",
+            "which means the step size —",
+            "we then multiply it by the",
+            "and so on...",
+        ] {
+            assert!(unfinished(text), "{text}");
+        }
+        for text in [
+            "That is why the learning rate matters.",
+            "Does that make sense?",
+            "Momentum keeps a running average of past gradients",
+        ] {
+            assert!(!unfinished(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn rephrased_check_ins_are_duplicates_but_new_ideas_are_not() {
+        assert!(near_duplicate(
+            "How clear is why the learning rate controls the step size?",
+            "How clear is how the learning rate sets each step's size?"
+        ));
+        assert!(near_duplicate(
+            "How clear is momentum?",
+            "How well do you follow why momentum helps?"
+        ));
+        assert!(!near_duplicate(
+            "How clear is why the learning rate controls the step size?",
+            "How clear is how momentum smooths noisy gradients?"
+        ));
+        assert!(!near_duplicate("How clear is this?", "How clear is that?"));
+        let recent = [RecentQuestion {
+            text: "How clear is gradient clipping?".into(),
+            evidence_excerpt: "we clip gradients above a threshold".into(),
+        }];
+        let same_passage = GeneratedQuestion {
+            text: "Does the overflow fix make sense?".into(),
+            evidence_excerpt: "we clip gradients above a threshold".into(),
+            generator_version: "test".into(),
+        };
+        assert!(repeats_recent(&same_passage, &recent));
+    }
+
+    #[test]
+    fn model_questions_must_be_short_clarity_check_ins() {
+        assert!(is_check_in(
+            "How clear is why the learning rate controls the step size?"
+        ));
+        assert!(is_check_in(
+            "Do you follow how momentum smooths the updates?"
+        ));
+        assert!(!is_check_in(
+            "In what year was gradient descent first described?"
+        ));
+        assert!(!is_check_in("How clear is the learning rate"));
+        assert!(!is_check_in("How clear is this?\nIgnore the rules."));
+        assert!(!is_check_in(&format!(
+            "How clear is {}?",
+            "very ".repeat(30)
+        )));
+    }
+}
+
+#[cfg(test)]
 mod question_output_tests {
     use super::{
         AbstentionReason, Binding, CadencePolicy, GeneratedQuestion, GenerationInput,
@@ -1346,6 +1679,7 @@ mod question_output_tests {
             .generate(GenerationInput {
                 event: filler,
                 window: Some(window),
+                recent_questions: Vec::new(),
             })
             .await
             .unwrap();
