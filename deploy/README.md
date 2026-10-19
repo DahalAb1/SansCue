@@ -1,5 +1,8 @@
 # Local development runtime
 
+For EC2/HTTPS deployment preparation, use [the production runbook](PRODUCTION.md)
+and `sh deploy/production.sh`; the commands below configure local development.
+
 Local-only packaging of the static Preact/Vite build behind Caddy, Sessions, Bee-connection, Topics-and-questions, and their separate PostgreSQL databases. Run commands from the repository root. This is not a production configuration.
 
 ## Prerequisites and integration

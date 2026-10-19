@@ -7,7 +7,7 @@ import { Room } from './Room';
 import { ServiceChecks } from './ServiceChecks';
 
 function Retention() {
-  return <p class="notice">Local data, including questions, responses and any captured transcripts, is retained until the operator explicitly deletes the dataset and backups. Room end and access revocation are not deletion. Do not use real recordings if indefinite local retention is unacceptable.</p>;
+  return <p class="notice">Questions, responses and any captured transcripts are retained until the operator explicitly deletes the dataset and backups. Room end and access revocation are not deletion. Do not use real recordings if indefinite retention is unacceptable.</p>;
 }
 
 function Operator({ created }: { created: (state: State) => void }) {

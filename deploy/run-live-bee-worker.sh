@@ -2,11 +2,11 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-env_file="$repo_root/deploy/.env"
+env_file=${SANSCUE_WORKER_ENV_FILE:-"$repo_root/deploy/.env"}
 worker="$repo_root/target/debug/bee-connection"
 
 if [ ! -f "$env_file" ]; then
-  echo "deploy/.env is required; provision the local stack first" >&2
+  echo "a trusted worker env file is required; see deploy/PRODUCTION.md for remote use" >&2
   exit 1
 fi
 if [ ! -x "$worker" ]; then
@@ -15,7 +15,7 @@ if [ ! -x "$worker" ]; then
 fi
 
 set -a
-# deploy/.env is a trusted, private local configuration file.
+# This is a trusted, private shell configuration file, never an uploaded file.
 . "$env_file"
 set +a
 
