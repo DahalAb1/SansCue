@@ -818,8 +818,14 @@ impl Delivery {
         let generator_worker = self.clone();
         tokio::spawn(async move {
             loop {
-                if let Err(error) = generator_worker.generate_pending().await {
-                    eprintln!("topics-and-questions generation worker failed; retrying ({error})");
+                // Drain queued speech without pausing, so a burst of utterances
+                // is not left to age into stale backlog; pause only when idle.
+                match generator_worker.generate_pending().await {
+                    Ok(completed) if completed > 0 => continue,
+                    Ok(_) => {}
+                    Err(error) => eprintln!(
+                        "topics-and-questions generation worker failed; retrying ({error})"
+                    ),
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
