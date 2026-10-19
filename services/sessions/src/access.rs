@@ -380,6 +380,7 @@ fn snapshot(room_row: &PgRow, member: &PgRow) -> Value {
             room_row.get::<Option<Vec<u8>>, _>("join_hash").is_some()
                 && room_row.get::<String, _>("status") == "open"
         );
+        value["topics"] = json!([]);
     }
     if role == "speaker" || role == "ta" {
         value["question_candidates"] = json!([]);
@@ -555,10 +556,21 @@ fn check_shape(path: &str, body: &Value) -> Result<()> {
             .as_str()
             .is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 1000)
     };
+    let valid_publish = |object: &serde_json::Map<String, Value>, body: &Value| {
+        !object.is_empty()
+            && object.keys().all(|key| key == "text" || key == "topic")
+            && object.get("text").is_none_or(|_| question_text(body))
+            && object.get("topic").is_none_or(|value| {
+                value.as_str().is_some_and(|topic| {
+                    let topic = topic.trim();
+                    !topic.is_empty() && topic.chars().count() <= 80
+                })
+            })
+    };
     if p.len() == 5 && p[0] == "rooms" && p[2] == "questions" {
         return match p[4] {
-            "publish" if object.is_empty() => Ok(()),
-            "publish" | "draft" if object.len() == 1 && question_text(body) => Ok(()),
+            "publish" if object.is_empty() || valid_publish(object, body) => Ok(()),
+            "draft" if object.len() == 1 && question_text(body) => Ok(()),
             "dismiss" if object.is_empty() => Ok(()),
             "response"
                 if object.len() == 1
@@ -982,6 +994,7 @@ async fn apply(
             room_id,
             id(p[3])?,
             body["text"].as_str(),
+            body["topic"].as_str(),
             actor_membership_id.ok_or_else(missing)?,
         )
         .await?
@@ -1111,15 +1124,158 @@ async fn bind_bee(
     )
 }
 
+/// Short chart label for a published question. A check-in keeps the words after
+/// "How clear is"; any other wording keeps its own words, without the final
+/// question mark.
+fn topic_from_question(text: &str) -> String {
+    let trimmed = text.trim().trim_end_matches('?').trim();
+    let lower = trimmed.to_lowercase();
+    let rest = ["how clear is ", "how well do you understand "]
+        .iter()
+        .find_map(|prefix| {
+            lower
+                .starts_with(prefix)
+                .then(|| trimmed[prefix.len()..].trim())
+        })
+        .unwrap_or(trimmed);
+    let collapsed = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed
+        .chars()
+        .take(80)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn topic_key(label: &str) -> String {
+    label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Confusion from 0 to 100. Need help counts fully and Partly clear counts half.
+/// No answers is not zero: zero would look like everyone understood.
+fn confusion_score(need_help: i64, partly_clear: i64, respondents: i64) -> Option<i64> {
+    if respondents <= 0 {
+        return None;
+    }
+    let points = need_help as f64 + 0.5 * partly_clear as f64;
+    let score = (points / respondents as f64 * 100.0).round();
+    Some(score.clamp(0.0, 100.0) as i64)
+}
+
+/// One row per topic name. A person who answered the same topic more than once
+/// keeps their latest answer, so the score counts people rather than clicks.
+async fn topic_chart(tx: &mut Transaction<'_, Postgres>, room_id: Uuid) -> Result<Value> {
+    let rows = sqlx::query(
+        "SELECT p.topic_label, p.active, p.updated_at, r.membership_id, r.response, r.updated_at AS answered_at
+         FROM published_questions p
+         LEFT JOIN question_responses r ON r.question_id = p.question_id
+         WHERE p.room_id = $1",
+    )
+    .bind(room_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    struct Answer {
+        at: DateTime<Utc>,
+        response: String,
+    }
+    struct Group {
+        label: String,
+        label_at: DateTime<Utc>,
+        collecting: bool,
+        latest: std::collections::HashMap<Uuid, Answer>,
+    }
+    let mut groups: std::collections::BTreeMap<String, Group> = std::collections::BTreeMap::new();
+    for row in rows {
+        let label: String = row.get("topic_label");
+        let updated: DateTime<Utc> = row.get("updated_at");
+        let entry = groups.entry(topic_key(&label)).or_insert_with(|| Group {
+            label: label.clone(),
+            label_at: updated,
+            collecting: false,
+            latest: std::collections::HashMap::new(),
+        });
+        if updated >= entry.label_at {
+            entry.label = label;
+            entry.label_at = updated;
+        }
+        if row.get::<bool, _>("active") {
+            entry.collecting = true;
+        }
+        let Some(member) = row.get::<Option<Uuid>, _>("membership_id") else {
+            continue;
+        };
+        let answered: DateTime<Utc> = row.get("answered_at");
+        let response: String = row.get("response");
+        match entry.latest.get(&member) {
+            Some(previous) if previous.at > answered => {}
+            _ => {
+                entry.latest.insert(
+                    member,
+                    Answer {
+                        at: answered,
+                        response,
+                    },
+                );
+            }
+        }
+    }
+    let mut ranked = Vec::new();
+    for group in groups.into_values() {
+        let respondents = group.latest.len() as i64;
+        let mut need_help = 0;
+        let mut partly_clear = 0;
+        for answer in group.latest.values() {
+            match answer.response.as_str() {
+                "need_help" => need_help += 1,
+                "partly_clear" => partly_clear += 1,
+                _ => {}
+            }
+        }
+        let Some(confusion) = confusion_score(need_help, partly_clear, respondents) else {
+            continue;
+        };
+        ranked.push(json!({
+            "label": group.label,
+            "confusion": confusion,
+            "respondents": respondents,
+            "collecting": group.collecting,
+        }));
+    }
+    ranked.sort_by(|left, right| {
+        right["confusion"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&left["confusion"].as_i64().unwrap_or(0))
+            .then(
+                right["respondents"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .cmp(&left["respondents"].as_i64().unwrap_or(0)),
+            )
+            .then(
+                left["label"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(right["label"].as_str().unwrap_or("")),
+            )
+    });
+    Ok(Value::Array(ranked))
+}
+
 async fn active_question(
     tx: &mut Transaction<'_, Postgres>,
     room_id: Uuid,
     role: &str,
 ) -> Result<Value> {
-    let Some(row) = sqlx::query("SELECT p.question_id,p.current_version,v.question_text,v.evidence FROM published_questions p JOIN published_question_versions v ON v.question_id=p.question_id AND v.version=p.current_version WHERE p.room_id=$1 AND p.active=true")
+    let Some(row) = sqlx::query("SELECT p.question_id,p.current_version,p.topic_label,v.question_text,v.evidence FROM published_questions p JOIN published_question_versions v ON v.question_id=p.question_id AND v.version=p.current_version WHERE p.room_id=$1 AND p.active=true")
         .bind(room_id).fetch_optional(&mut **tx).await? else { return Ok(Value::Null); };
     let mut result = json!({"id":row.get::<Uuid,_>("question_id"),"version":row.get::<i32,_>("current_version"),"text":row.get::<String,_>("question_text")});
     if role != "audience" {
+        result["topic"] = json!(row.get::<String, _>("topic_label"));
         result["evidence"] = row.get("evidence");
         let versions = sqlx::query("SELECT version,question_text,created_at FROM published_question_versions WHERE question_id=$1 ORDER BY version DESC")
             .bind(row.get::<Uuid,_>("question_id")).fetch_all(&mut **tx).await?;
@@ -1273,13 +1429,15 @@ async fn publish_question(
     room_id: Uuid,
     candidate_id: Uuid,
     edited: Option<&str>,
+    topic: Option<&str>,
     actor: Uuid,
 ) -> Result<Value> {
     // Keep all active-pointer changes serialized, even if this helper is reused
     // outside the HTTP mutation path (which already takes this lock).
     room(tx, room_id).await?;
     let draft = reviewable_draft(tx, policy, room_id, candidate_id).await?;
-    let text = match edited.map(str::trim) {
+    let supplied_topic = topic.map(str::trim).filter(|topic| !topic.is_empty());
+    let mut text = match edited.map(str::trim).filter(|text| !text.is_empty()) {
         Some(text) => {
             record_draft_edit(tx, candidate_id, text, actor).await?;
             text.to_owned()
@@ -1288,15 +1446,29 @@ async fn publish_question(
             .get::<Option<String>, _>("draft_text")
             .unwrap_or_else(|| draft.get("candidate_text")),
     };
+    // A topic without custom wording asks the audience about that topic directly.
+    if edited.map(str::trim).unwrap_or("").is_empty()
+        && let Some(topic) = supplied_topic
+    {
+        text = format!("How clear is {topic}?");
+    }
+    let topic_label = match supplied_topic {
+        Some(topic) => topic.to_owned(),
+        None => topic_from_question(&text),
+    };
+    if topic_label.is_empty() || topic_label.chars().count() > 80 {
+        return Err(invalid());
+    }
     sqlx::query("UPDATE published_questions SET active=false,updated_at=now() WHERE room_id=$1 AND active=true").bind(room_id).execute(&mut **tx).await?;
     let question_id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO published_questions(question_id,room_id,candidate_id,published_by) VALUES($1,$2,$3,$4)",
+        "INSERT INTO published_questions(question_id,room_id,candidate_id,published_by,topic_label) VALUES($1,$2,$3,$4,$5)",
     )
     .bind(question_id)
     .bind(room_id)
     .bind(candidate_id)
     .bind(actor)
+    .bind(&topic_label)
     .execute(&mut **tx)
     .await?;
     sqlx::query("INSERT INTO published_question_versions(question_id,version,candidate_id,question_text,evidence,created_by) VALUES($1,1,$2,$3,$4,$5)")
@@ -1813,6 +1985,9 @@ async fn read(
             state["my_response_version"] = version;
         } else {
             state["dashboard"] = response_dashboard(&mut tx, room_id).await?;
+        }
+        if member.get::<String, _>("role") == "speaker" {
+            state["topics"] = topic_chart(&mut tx, room_id).await?;
         }
         if member.get::<String, _>("role") != "audience" {
             state["bee"] = bee_snapshot(&mut tx, room_id).await?;
@@ -2513,4 +2688,33 @@ fn credential_matches(configured: &Option<String>, presented: &str) -> bool {
     configured
         .as_ref()
         .is_some_and(|expected| equal(&hash(expected.as_bytes()), &hash(presented.as_bytes())))
+}
+
+#[cfg(test)]
+mod topic_score {
+    use super::{confusion_score, topic_from_question, topic_key};
+
+    #[test]
+    fn confusion_counts_need_help_fully_and_partly_clear_half() {
+        assert_eq!(confusion_score(1, 2, 9), Some(22));
+        assert_eq!(confusion_score(0, 0, 6), Some(0));
+        assert_eq!(confusion_score(4, 0, 4), Some(100));
+        assert_eq!(confusion_score(0, 0, 0), None);
+    }
+
+    #[test]
+    fn a_check_in_keeps_the_topic_name() {
+        assert_eq!(
+            topic_from_question("How clear is cache invalidation?"),
+            "cache invalidation"
+        );
+        assert_eq!(
+            topic_key("Cache invalidation"),
+            topic_key("  cache   invalidation ")
+        );
+        assert_eq!(
+            topic_from_question("What changed in the example?"),
+            "What changed in the example"
+        );
+    }
 }
