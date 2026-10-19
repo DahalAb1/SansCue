@@ -5,7 +5,7 @@ import type { State, Invitation, Membership, Page, LinkResult, QuestionCandidate
 import { followLink, roleLabel, selectedSection, sharePath, tabLabel } from './navigation';
 import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, keepReviewDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft, memoryReviewDraft } from './pageMemory';
 import { parseRoomEvent, reconnectDelay } from './live';
-import { chartRows, draftExpiry, earlierWordingNote, formatPercent, respondentSummary, responseOptions } from './feedback';
+import { answerCount, draftExpiry, formatPercent, responseOptions, topicFromQuestion } from './feedback';
 import { ago, connectionStatus, parseBeeConnection } from './connection';
 import type { BeeConnection } from './connection';
 
@@ -102,7 +102,13 @@ function DraftCard({ state, candidate, now, busy, run, replacing }: { state: Sta
   const trimmed = text.trim();
   const changed = trimmed !== candidate.text;
   const invalid = trimmed === '' || [...trimmed].length > 1000;
+  const topicKey = key + '\ntopic';
+  const [topic, setTopic] = useState(() => memoryReviewDraft(topicKey, topicFromQuestion(candidate.text)));
+  useEffect(() => setTopic(memoryReviewDraft(topicKey, topicFromQuestion(candidate.text))), [topicKey, candidate.text]);
+  const topicName = topic.trim();
+  const topicInvalid = topicName === '' || [...topicName].length > 80;
   const fieldId = 'draft-' + candidate.candidate_id;
+  const topicId = 'topic-' + candidate.candidate_id;
   return <li class="draft">
     <p class="draft-meta">
       <span>{generatorLabel(candidate.generator_version)}</span>
@@ -122,10 +128,20 @@ function DraftCard({ state, candidate, now, busy, run, replacing }: { state: Sta
       <blockquote>{candidate.evidence.excerpt}</blockquote>
       <figcaption>Transcript evidence{evidenceTime(candidate) && ' · ' + evidenceTime(candidate)}</figcaption>
     </figure>
+    {moderator && <>
+      <label for={topicId}>Topic</label>
+      <input id={topicId} maxLength={80} value={topic} disabled={expiry.expired} onInput={event => {
+        const value = event.currentTarget.value;
+        setTopic(value);
+        keepReviewDraft(topicKey, topicFromQuestion(candidate.text), value);
+      }} />
+      <p class="draft-original">The audience is asked “How clear is {topicName || 'this topic'}?” unless you edit the wording above.</p>
+    </>}
     {moderator && <div class="actions">
-      <button type="button" class="primary" disabled={busy || expiry.expired || invalid} onClick={() => void run(async () => {
-        await api.mutate(paths.publishQuestion(state.room.id, candidate.candidate_id), changed ? { text: trimmed } : {});
+      <button type="button" class="primary" disabled={busy || expiry.expired || invalid || topicInvalid} onClick={() => void run(async () => {
+        await api.mutate(paths.publishQuestion(state.room.id, candidate.candidate_id), changed ? { text: trimmed, topic: topicName } : { topic: topicName });
         keepReviewDraft(key, text, text);
+        keepReviewDraft(topicKey, topicName, topicName);
       })}>{replacing ? 'Publish and replace current' : 'Publish'}</button>
       <button type="button" disabled={busy || expiry.expired || invalid || !changed} onClick={() => void run(async () => {
         await api.mutate(paths.saveDraft(state.room.id, candidate.candidate_id), { text: trimmed });
@@ -178,7 +194,7 @@ function QuestionsPanel({ state, refresh, ended }: { state: State; refresh: () =
       {active.versions && active.versions.length > 1 && <ul aria-label="Immutable published versions">{active.versions.map(item => <li key={item.version}><strong>Version {item.version}</strong>: {item.text} <small>{when(item.created_at)}</small></li>)}</ul>}
       {moderator && !ended && <details class="version-editor">
         <summary>Correct the published wording</summary>
-        <p>This creates version {active.version + 1}. Responses already given stay attached, and the speaker’s chart shows how many were given to earlier wording.</p>
+        <p>This creates version {active.version + 1}. Responses already given stay attached to this question. The topic on the speaker’s chart stays {active.topic ?? 'the published topic'}.</p>
         <label>New immutable version<textarea rows={3} maxLength={1000} value={draft} onInput={e => {
           const value = e.currentTarget.value;
           setDraft(value);
@@ -212,7 +228,7 @@ function FeedbackPanel({ state, ended, refresh }: { state: State; ended: boolean
     {error && <p role="alert" class="error">{error}</p>}
     {state.active_question ? <>
       <h3>{state.active_question.text}</h3>
-      <p>How clear is this question?</p>
+      <p>Mark how well you understand this topic.</p>
       <div class="actions">{responses.map(item => <button key={item.value} aria-pressed={state.my_response === item.value} disabled={busy || ended} onClick={() => void respond(item.value)}>{item.label}</button>)}</div>
       {state.my_response && <p role="status">Your response: {responses.find(item => item.value === state.my_response)?.label}</p>}
       {state.my_response && typeof state.my_response_version === 'number' && state.my_response_version < state.active_question.version
@@ -236,37 +252,40 @@ function DashboardPanel({ state }: { state: State }) {
 }
 
 function SpeakerDashboard({ state, liveStatus }: { state: State; liveStatus: LiveStatus }) {
-  const dashboard = state.dashboard;
-  const question = state.active_question;
+  const topics = state.topics ?? [];
   const ended = state.room.status === 'ended';
-  if (!dashboard) return <p role="status">Response results are unavailable. Refresh room state.</p>;
-  const rows = chartRows(dashboard);
-  return <section class="response-chart" aria-labelledby="chart-question">
+  const live = state.active_question?.topic;
+  const liveOnChart = topics.some(topic => topic.collecting);
+  return <section class="topic-chart" aria-labelledby="chart-title">
     {!ended && liveStatus !== 'connected' && <p role="status" class="notice">
       {liveStatus === 'connecting' ? 'Connecting to live updates…' : 'Live updates are reconnecting. These results may be out of date.'}
     </p>}
-    {!question ? <>
-      <h3 id="chart-question" class="chart-question">No question is published</h3>
-      <p>{ended ? 'This room has ended without an active question.' : 'Your moderator reviews drafts and publishes check-in questions. Results appear here as the audience responds.'}</p>
-    </> : <>
-      <p class="chart-kicker">{ended ? 'Final results · room ended' : 'Live results'} · Version {question.version}</p>
-      <h3 id="chart-question" class="chart-question">{question.text}</h3>
-      <p class="chart-total" aria-live="polite">{respondentSummary(dashboard)}</p>
-      <ul class="chart-bars" aria-label="Responses by rating">
-        {rows.map(row => <li key={row.value} class={'chart-row chart-row--' + row.value}>
-          <span class="chart-label">{row.label}</span>
-          <span class="chart-track" aria-hidden="true"><span class="chart-fill" style={{ width: row.width + '%' }} /></span>
-          <span class="chart-value">
-            {row.count}<span class="visually-hidden"> {row.count === 1 ? 'response' : 'responses'}</span>
-            {row.percent === null
-              ? <span aria-hidden="true"> · —</span>
-              : <> <span aria-hidden="true">·</span> {formatPercent(row.percent)}</>}
-          </span>
-        </li>)}
-      </ul>
-      {earlierWordingNote(dashboard, question.version) && <p class="notice">{earlierWordingNote(dashboard, question.version)}</p>}
-      <p class="chart-note">Percentages are shares of audience members who responded, not of everyone in the room.</p>
-    </>}
+    <div class="topic-head">
+      <h3 id="chart-title">Most confusing</h3>
+      <span>Confusion</span>
+    </div>
+    {topics.length === 0 ? <p role="status">{live && !ended
+      ? `Collecting answers for ${live}.`
+      : ended
+        ? 'This room ended with no topic scores.'
+        : 'No topics yet. A topic appears here after the audience marks how well they understand it.'}</p>
+      : <>
+        {live && !liveOnChart && !ended && <p role="status">Collecting answers for {live}.</p>}
+        <ul class="topic-list" aria-label="Topics by confusion">
+          {topics.map((topic, index) => <li key={topic.label} class="topic-row">
+            <div>
+              {(index === 0 || topic.collecting) && <p class="topic-marks">
+                {index === 0 && <span>Revisit</span>}
+                {topic.collecting && <span>Collecting</span>}
+              </p>}
+              <span class="topic-name">{topic.label}</span>
+            </div>
+            <span class="chart-track" aria-hidden="true"><span class="chart-fill topic-fill" style={{ width: topic.confusion + '%' }} /></span>
+            <span class="topic-score">{topic.confusion} · {answerCount(topic.respondents)}</span>
+          </li>)}
+        </ul>
+        <p class="chart-note">Each score is how confused the people who answered were, from 0 to 100. One person counts once per topic.</p>
+      </>}
   </section>;
 }
 

@@ -44,6 +44,25 @@ export function earlierWordingNote(dashboard: Dashboard, version: number): strin
   return `${earlier} of ${dashboard.respondents} response${dashboard.respondents === 1 ? ' was' : 's were'} given before the wording changed to version ${version}.`;
 }
 
+/** Chart label for a check-in. Other wording keeps its own words, without the question mark. */
+export function topicFromQuestion(text: string): string {
+  const trimmed = text.trim().replace(/\?+$/u, '').trim().replace(/\s+/g, ' ');
+  const match = /^(?:how clear is|how well do you understand)\s+/i.exec(trimmed);
+  const topic = (match ? trimmed.slice(match[0].length) : trimmed).trim();
+  return [...topic].slice(0, 80).join('');
+}
+
+/** Need help counts fully and Partly clear counts half. No answers is not a score of 0. */
+export function confusionScore(needHelp: number, partlyClear: number, respondents: number): number | null {
+  if (!Number.isFinite(respondents) || respondents <= 0) return null;
+  const score = Math.round(((needHelp + 0.5 * partlyClear) / respondents) * 100);
+  return Math.min(100, Math.max(0, score));
+}
+
+export function answerCount(respondents: number): string {
+  return `${respondents} ${respondents === 1 ? 'answer' : 'answers'}`;
+}
+
 export function respondentSummary(dashboard: Dashboard): string {
   if (dashboard.respondents === 0) return 'No responses yet';
   return `${dashboard.respondents} audience response${dashboard.respondents === 1 ? '' : 's'}`;

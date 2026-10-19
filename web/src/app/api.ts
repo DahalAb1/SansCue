@@ -12,7 +12,9 @@ export type State = {
   membership: { id: string; role: Role };
   revision: number;
   sequence: number;
-  active_question: { id: string; version: number; text: string; evidence?: unknown; versions?: Array<{ version: number; text: string; created_at: string }> } | null;
+  active_question: { id: string; version: number; text: string; topic?: string; evidence?: unknown; versions?: Array<{ version: number; text: string; created_at: string }> } | null;
+  /** Speaker-only ranking of topics by confusion. Absent for every other role. */
+  topics?: TopicScore[] | null;
   my_response?: 'clear' | 'partly_clear' | 'need_help' | null;
   /** Wording version that was active when this audience member last responded. */
   my_response_version?: number | null;
@@ -27,6 +29,7 @@ export type State = {
   question_candidates?: QuestionCandidate[] | null;
   bee?: BeeState | null;
 };
+export type TopicScore = { label: string; confusion: number; respondents: number; collecting: boolean };
 export type TranscriptLine = { text: string; spoken_at: string };
 export type QuestionCandidate = {
   candidate_id: string;
@@ -207,6 +210,10 @@ export function parseRoomState(value: unknown, expectedId?: string): State | nul
   if (state.active_question !== null && (typeof state.active_question !== 'object' || state.active_question === null || Array.isArray(state.active_question))) return null;
   if (state.active_question !== null && (typeof state.active_question.id !== 'string' || !UUID.test(state.active_question.id) || !Number.isSafeInteger(state.active_question.version) || state.active_question.version < 1 || typeof state.active_question.text !== 'string' || state.active_question.text.trim() === '')) return null;
   if (state.membership.role === 'audience' && state.active_question !== null && Object.keys(state.active_question).some(key => !['id','version','text'].includes(key))) return null;
+  if (state.active_question?.topic !== undefined && (state.membership.role === 'audience' || typeof state.active_question.topic !== 'string' || state.active_question.topic.trim() === '' || [...state.active_question.topic].length > 80)) return null;
+  if (state.membership.role !== 'speaker' && state.topics != null) return null;
+  if (Array.isArray(state.topics) && state.topics.some(topic => !topic || typeof topic.label !== 'string' || topic.label.trim() === '' || [...topic.label].length > 80 || !isCount(topic.confusion) || topic.confusion > 100 || !isCount(topic.respondents) || topic.respondents < 1 || typeof topic.collecting !== 'boolean')) return null;
+  if (state.topics != null && !Array.isArray(state.topics)) return null;
   if (state.my_response !== undefined && state.my_response !== null && !['clear','partly_clear','need_help'].includes(state.my_response)) return null;
   if (state.membership.role === 'audience' && state.dashboard !== undefined && state.dashboard !== null) return null;
   if (state.membership.role !== 'audience' && state.dashboard !== undefined && state.dashboard !== null && (typeof state.dashboard.respondents !== 'number' || !Number.isSafeInteger(state.dashboard.respondents) || !state.dashboard.counts || !state.dashboard.percentages)) return null;

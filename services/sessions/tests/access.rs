@@ -3125,3 +3125,220 @@ async fn moderator_reviews_publishes_and_replies_privately() {
     assert_eq!((status, body["code"].as_str()), (409, Some("room_ended")));
     finish(pool, admin, schema).await;
 }
+
+#[tokio::test]
+async fn speaker_ranks_topics_by_confusion_and_the_audience_cannot_see_them() {
+    let (pool, admin, schema) = db().await;
+    let sec = Security {
+        topics_credential: Some("synthetic-topics".into()),
+        ..security()
+    };
+    let app = configured_router(pool.clone(), sec.clone());
+    let private = internal_router(Access {
+        pool: pool.clone(),
+        security: sec,
+    });
+    let speaker = boot(&app).await;
+    let audience = boot(&app).await;
+    let other_audience = boot(&app).await;
+    login(&app, &speaker).await;
+    let (_, created) = call(&app, &speaker, "POST", "/rooms", json!({"title":"Topics"})).await;
+    let room_text = created["state"]["room"]["id"].as_str().unwrap();
+    let room_id = Uuid::parse_str(room_text).unwrap();
+    let root = format!("/rooms/{room_text}");
+    let join = created["join_url"].as_str().unwrap();
+    let (_, joined) = call(&app, &audience, "POST", join, json!({})).await;
+    assert!(joined["state"].get("topics").is_none());
+    assert_eq!(
+        call(&app, &other_audience, "POST", join, json!({})).await.0,
+        200
+    );
+    let moderator = invite_moderator(&app, &speaker, &root).await;
+    let conversation = Uuid::new_v4();
+    let (_, binding) = call(
+        &app,
+        &speaker,
+        "POST",
+        &format!("{root}/bee/bind"),
+        json!({"conversation_id":conversation,"source_conversation_id":null}),
+    )
+    .await;
+    let session =
+        sqlx::query_scalar::<_, Uuid>("SELECT session_id FROM bee_room_bindings WHERE room_id=$1")
+            .bind(room_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        private_json(
+            &private,
+            "POST",
+            &format!("/internal/v1/bee/rooms/{room_text}/status"),
+            json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":binding["revision"]})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        once(
+            &private,
+            "POST",
+            &format!(
+                "/internal/v1/bee/commands/{}/ack",
+                binding["command_id"].as_str().unwrap()
+            ),
+            Some(("authorization", "Bearer synthetic-bee"))
+        )
+        .await
+        .0,
+        200
+    );
+    let deliver = |excerpt: &'static str| {
+        let private = private.clone();
+        async move {
+            let id = Uuid::new_v4();
+            assert_eq!(
+                private_topics_json(
+                    &private,
+                    "POST",
+                    "/internal/v1/topics/candidates",
+                    topic_candidate(id, conversation, room_id, session, excerpt)
+                )
+                .await
+                .0,
+                202
+            );
+            id
+        }
+    };
+    let cache = deliver("cache").await;
+    let rate = deliver("rate").await;
+    let publish = |browser: &Browser, candidate: Uuid, body: Value| {
+        let app = app.clone();
+        let path = format!("{root}/questions/{candidate}/publish");
+        let cookie = browser.cookie.clone();
+        let csrf = browser.csrf.clone();
+        async move { call(&app, &Browser { cookie, csrf }, "POST", &path, body).await }
+    };
+    assert_eq!(
+        publish(&speaker, cache, json!({"topic":"Cache invalidation"}))
+            .await
+            .0,
+        403
+    );
+    let (status, published) =
+        publish(&moderator, cache, json!({"topic":"Cache invalidation"})).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        published["text"].as_str(),
+        Some("How clear is Cache invalidation?")
+    );
+    let question = published["question_id"].as_str().unwrap();
+    for (browser, response) in [(&audience, "need_help"), (&other_audience, "partly_clear")] {
+        assert_eq!(
+            call(
+                &app,
+                browser,
+                "POST",
+                &format!("{root}/questions/{question}/response"),
+                json!({"response":response})
+            )
+            .await
+            .0,
+            200
+        );
+    }
+    assert_eq!(
+        publish(&moderator, rate, json!({"topic":"Learning rate"}))
+            .await
+            .0,
+        200
+    );
+    let rate_question = call(&app, &speaker, "GET", &format!("{root}/state"), json!({}))
+        .await
+        .1["active_question"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for browser in [&audience, &other_audience] {
+        assert_eq!(
+            call(
+                &app,
+                browser,
+                "POST",
+                &format!("{root}/questions/{rate_question}/response"),
+                json!({"response":"clear"})
+            )
+            .await
+            .0,
+            200
+        );
+    }
+    assert_eq!(
+        call(
+            &app,
+            &moderator,
+            "POST",
+            &format!("{root}/questions/{rate_question}/response"),
+            json!({"response":"need_help"})
+        )
+        .await
+        .0,
+        403
+    );
+    let speaker_state = call(&app, &speaker, "GET", &format!("{root}/state"), json!({}))
+        .await
+        .1;
+    let topics = speaker_state["topics"].as_array().unwrap();
+    assert_eq!(topics.len(), 2);
+    assert_eq!(topics[0]["label"], "Cache invalidation");
+    assert_eq!(topics[0]["confusion"], 75);
+    assert_eq!(topics[0]["respondents"], 2);
+    assert_eq!(topics[0]["collecting"], false);
+    assert_eq!(topics[1]["label"], "Learning rate");
+    assert_eq!(topics[1]["confusion"], 0);
+    assert_eq!(topics[1]["respondents"], 2);
+    assert_eq!(topics[1]["collecting"], true);
+    assert!(
+        call(&app, &audience, "GET", &format!("{root}/state"), json!({}))
+            .await
+            .1
+            .get("topics")
+            .is_none()
+    );
+    assert!(
+        call(&app, &moderator, "GET", &format!("{root}/state"), json!({}))
+            .await
+            .1
+            .get("topics")
+            .is_none()
+    );
+
+    let again = deliver("cache again").await;
+    let (status, republished) =
+        publish(&moderator, again, json!({"topic":"cache invalidation"})).await;
+    assert_eq!(status, 200);
+    let again_id = republished["question_id"].as_str().unwrap();
+    assert_eq!(
+        call(
+            &app,
+            &audience,
+            "POST",
+            &format!("{root}/questions/{again_id}/response"),
+            json!({"response":"need_help"})
+        )
+        .await
+        .0,
+        200
+    );
+    let merged = call(&app, &speaker, "GET", &format!("{root}/state"), json!({}))
+        .await
+        .1;
+    let merged_topics = merged["topics"].as_array().unwrap();
+    assert_eq!(merged_topics[0]["label"], "cache invalidation");
+    assert_eq!(merged_topics[0]["confusion"], 75);
+    assert_eq!(merged_topics[0]["respondents"], 2);
+    assert_eq!(merged_topics[0]["collecting"], true);
+    finish(pool, admin, schema).await;
+}

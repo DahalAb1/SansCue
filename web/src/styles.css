@@ -75,7 +75,17 @@ form { max-width: 660px; }
 .access-list button { flex-shrink: 0; }
 @media (max-width: 640px) { .panel { padding: 20px; } .access-list li { display: block; } .access-list button { margin-top: 10px; } .room-tabs a { padding: 10px 12px; } }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-.response-chart { max-width: 760px; }
+.response-chart, .topic-chart { max-width: 760px; }
+.topic-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin: 0 0 18px; }
+.topic-head h3, .topic-head span { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #526353; }
+.topic-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 18px; }
+.topic-row { display: grid; grid-template-columns: minmax(140px, 240px) minmax(80px, 1fr) auto; align-items: center; gap: 8px 16px; }
+.topic-name { font-weight: 650; overflow-wrap: anywhere; }
+.topic-marks { display: flex; gap: 8px; margin: 0 0 4px; }
+.topic-marks span { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #8f3526; }
+.topic-fill { background: #8f3526; }
+.topic-score { font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
+@media (max-width: 640px) { .topic-row { grid-template-columns: 1fr auto; } .topic-row .chart-track { grid-column: 1 / -1; } }
 .chart-kicker { text-transform: uppercase; letter-spacing: .12em; font-size: 11px; font-weight: 700; color: #526353; margin: 4px 0 8px; }
 .panel h3.chart-question { font-size: clamp(22px, 3vw, 30px); line-height: 1.25; letter-spacing: -.025em; margin: 0 0 12px; overflow-wrap: anywhere; }
 .chart-total { font-size: 16px; font-weight: 600; color: #3d4838; margin: 0 0 20px; }

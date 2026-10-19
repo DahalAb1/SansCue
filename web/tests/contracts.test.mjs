@@ -403,6 +403,24 @@ test('speaker chart rows use respondent shares and stay empty without responses'
   assert.equal(chartRows({ ...mixed, percentages: { ...mixed.percentages, clear: 140 } })[0].width, 100);
 });
 
+test('topic confusion ranks real answers and stays off the audience state', () => {
+  const { confusionScore, topicFromQuestion, answerCount } = feedback;
+  assert.equal(confusionScore(1, 2, 9), 22);
+  assert.equal(confusionScore(0, 0, 4), 0);
+  assert.equal(confusionScore(0, 0, 0), null);
+  assert.equal(topicFromQuestion('How clear is cache invalidation?'), 'cache invalidation');
+  assert.equal(answerCount(1), '1 answer');
+  assert.equal(answerCount(24), '24 answers');
+  const topics = [{ label: 'Cache invalidation', confusion: 82, respondents: 24, collecting: false }];
+  assert.equal(parseRoomState({ ...state('speaker'), topics }, roomId)?.topics?.[0].confusion, 82);
+  assert.equal(parseRoomState({ ...state('speaker'), topics: [] }, roomId)?.topics?.length, 0);
+  assert.equal(parseRoomState({ ...state('audience'), topics }, roomId), null);
+  assert.equal(parseRoomState({ ...state('ta'), topics }, roomId), null);
+  assert.equal(parseRoomState({ ...state('speaker'), topics: [{ ...topics[0], respondents: 0 }] }, roomId), null);
+  assert.equal(parseRoomState({ ...state('speaker'), active_question: { id: roomId, version: 1, text: 'How clear is cache invalidation?', topic: 'Cache invalidation' } }, roomId)?.active_question?.topic, 'Cache invalidation');
+  assert.equal(parseRoomState({ ...state('audience'), active_question: { id: roomId, version: 1, text: 'How clear is cache invalidation?', topic: 'Cache invalidation' } }, roomId), null);
+});
+
 test('moderator review paths, draft memory and wording notes', () => {
   const { draftExpiry, earlierWordingNote } = feedback;
   assert.equal(paths.saveDraft(roomId, memberId), '/rooms/' + roomId + '/questions/' + memberId + '/draft');
