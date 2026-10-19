@@ -3,9 +3,12 @@
 `synthetic-mvp.py` exercises the current end-to-end flow without Docker, a Bee
 device, a model provider, or AWS. It starts the three Rust services locally,
 uses the checked-in synthetic recovery fixture, and verifies binding delivery,
-repeat replay idempotency, candidate evidence/staff-only visibility,
-publication, an audience rating and written Q&A, response counts, and audience
-dashboard privacy.
+repeat replay idempotency, candidate evidence/staff-only visibility, that
+neither the speaker nor the audience can publish, a moderator (TA) edit that
+persists and is published, an audience rating and written Q&A, a private
+moderator reply that another audience member cannot see, response counts,
+audience dashboard privacy, that the setup view reports no live Bee transport
+during replay, and that ending the room withdraws the Bee binding.
 
 ## Prerequisites
 
