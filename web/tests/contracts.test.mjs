@@ -9,6 +9,7 @@ const apiModule = await server.ssrLoadModule('/src/app/api.ts');
 const navigation = await server.ssrLoadModule('/src/app/navigation.ts');
 const memory = await server.ssrLoadModule('/src/app/pageMemory.ts');
 const live = await server.ssrLoadModule('/src/app/live.ts');
+const feedback = await server.ssrLoadModule('/src/app/feedback.ts');
 await server.close();
 
 const { SessionsApi, ApiError, errorMessage, paths, parseRoomState, preferState, deniesRoomRead, parseTranscript, generatorLabel } = apiModule;
@@ -379,6 +380,26 @@ test('client source does not persist secrets or log them', () => {
   const sources = files('src').filter(path => path.endsWith('.ts') || path.endsWith('.tsx'));
   assert.ok(sources.length >= 6);
   for (const path of sources) assert.doesNotMatch(readFileSync(path, 'utf8'), banned, path);
+});
+
+test('speaker chart rows use respondent shares and stay empty without responses', () => {
+  const { chartRows, formatPercent, respondentSummary } = feedback;
+  const empty = { respondents: 0, counts: { clear: 0, partly_clear: 0, need_help: 0 }, percentages: { clear: null, partly_clear: null, need_help: null } };
+  assert.deepEqual(chartRows(empty).map(row => [row.value, row.count, row.percent, row.width]), [
+    ['clear', 0, null, 0], ['partly_clear', 0, null, 0], ['need_help', 0, null, 0],
+  ]);
+  assert.equal(respondentSummary(empty), 'No responses yet');
+  // A malformed 100% with no respondents must not render as "everyone is clear".
+  assert.equal(chartRows({ ...empty, percentages: { ...empty.percentages, clear: 100 } })[0].width, 0);
+  const mixed = { respondents: 3, counts: { clear: 2, partly_clear: 0, need_help: 1 }, percentages: { clear: 200 / 3, partly_clear: 0, need_help: 100 / 3 } };
+  const rows = chartRows(mixed);
+  assert.deepEqual(rows.map(row => row.label), ['Clear', 'Partly clear', 'Need help']);
+  assert.deepEqual(rows.map(row => row.count), [2, 0, 1]);
+  assert.deepEqual(rows.map(row => formatPercent(row.percent)), ['66.7%', '0.0%', '33.3%']);
+  assert.equal(rows[1].width, 0);
+  assert.equal(respondentSummary(mixed), '3 audience responses');
+  assert.equal(respondentSummary({ ...mixed, respondents: 1 }), '1 audience response');
+  assert.equal(chartRows({ ...mixed, percentages: { ...mixed.percentages, clear: 140 } })[0].width, 100);
 });
 
 test('transcript lines and generator labels are parsed defensively', () => {

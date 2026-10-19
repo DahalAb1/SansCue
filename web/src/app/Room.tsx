@@ -5,6 +5,9 @@ import type { BeeState, State, Invitation, Membership, Page, LinkResult, Questio
 import { followLink, selectedSection, sharePath, tabLabel } from './navigation';
 import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft } from './pageMemory';
 import { parseRoomEvent, reconnectDelay } from './live';
+import { chartRows, formatPercent, respondentSummary, responseOptions } from './feedback';
+
+type LiveStatus = 'connecting' | 'connected' | 'disconnected' | 'ended';
 
 function when(value: string): string {
   const date = new Date(value);
@@ -132,7 +135,7 @@ function QuestionsPanel({ state, refresh, ended }: { state: State; refresh: () =
 function FeedbackPanel({ state, ended, refresh }: { state: State; ended: boolean; refresh: () => Promise<boolean> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const responses = [{ value: 'clear', label: 'Clear' }, { value: 'partly_clear', label: 'Partly clear' }, { value: 'need_help', label: 'Need help' }] as const;
+  const responses = responseOptions;
   async function respond(value: typeof responses[number]['value']) {
     if (!state.active_question) return;
     setBusy(true); setError('');
@@ -154,7 +157,7 @@ function FeedbackPanel({ state, ended, refresh }: { state: State; ended: boolean
 function DashboardPanel({ state }: { state: State }) {
   const dashboard = state.dashboard;
   if (!dashboard) return <p role="status">Response dashboard unavailable.</p>;
-  const percent = (value: number | null) => typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)}%` : '—';
+  const percent = formatPercent;
   return <>
     <p>{dashboard.respondents} audience response{dashboard.respondents === 1 ? '' : 's'}</p>
     <dl>
@@ -163,6 +166,40 @@ function DashboardPanel({ state }: { state: State }) {
       <dt>Need help</dt><dd>{dashboard.counts.need_help} ({percent(dashboard.percentages.need_help)})</dd>
     </dl>
   </>;
+}
+
+function SpeakerDashboard({ state, liveStatus }: { state: State; liveStatus: LiveStatus }) {
+  const dashboard = state.dashboard;
+  const question = state.active_question;
+  const ended = state.room.status === 'ended';
+  if (!dashboard) return <p role="status">Response results are unavailable. Refresh room state.</p>;
+  const rows = chartRows(dashboard);
+  return <section class="response-chart" aria-labelledby="chart-question">
+    {!ended && liveStatus !== 'connected' && <p role="status" class="notice">
+      {liveStatus === 'connecting' ? 'Connecting to live updates…' : 'Live updates are reconnecting. These results may be out of date.'}
+    </p>}
+    {!question ? <>
+      <h3 id="chart-question" class="chart-question">No question is published</h3>
+      <p>{ended ? 'This room has ended without an active question.' : 'Your moderator reviews drafts and publishes check-in questions. Results appear here as the audience responds.'}</p>
+    </> : <>
+      <p class="chart-kicker">{ended ? 'Final results · room ended' : 'Live results'} · Version {question.version}</p>
+      <h3 id="chart-question" class="chart-question">{question.text}</h3>
+      <p class="chart-total" aria-live="polite">{respondentSummary(dashboard)}</p>
+      <ul class="chart-bars" aria-label="Responses by rating">
+        {rows.map(row => <li key={row.value} class={'chart-row chart-row--' + row.value}>
+          <span class="chart-label">{row.label}</span>
+          <span class="chart-track" aria-hidden="true"><span class="chart-fill" style={{ width: row.width + '%' }} /></span>
+          <span class="chart-value">
+            {row.count}<span class="visually-hidden"> {row.count === 1 ? 'response' : 'responses'}</span>
+            {row.percent === null
+              ? <span aria-hidden="true"> · —</span>
+              : <> <span aria-hidden="true">·</span> {formatPercent(row.percent)}</>}
+          </span>
+        </li>)}
+      </ul>
+      <p class="chart-note">Percentages are shares of audience members who responded, not of everyone in the room.</p>
+    </>}
+  </section>;
 }
 
 type WrittenQuestion = { message_id: string; question_id: string | null; body: string; created_at: string };
@@ -421,7 +458,7 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
   const [state, setState] = useState<State>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [liveStatus, setLiveStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'ended'>('connecting');
+  const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
   const seenRevision = useRef(-1);
   const liveSequence = useRef(0);
   const refreshLive = useRef<(() => Promise<boolean>) | undefined>(undefined);
@@ -585,6 +622,7 @@ export function Room({ id, tab }: { id: string; tab?: string }) {
           <h2>{tabLabel(selected)}</h2>
           {selected === 'qa' ? <QaPanel state={state} ended={ended} revision={state.revision} />
             : selected === 'response' ? <FeedbackPanel state={state} ended={ended} refresh={refresh} />
+            : selected === 'dashboard' && state.membership.role === 'speaker' ? <SpeakerDashboard state={state} liveStatus={liveStatus} />
             : selected === 'dashboard' ? <DashboardPanel state={state} />
             : selected === 'questions' && state.membership.role !== 'audience' ? <QuestionsPanel state={state} refresh={refresh} ended={ended} />
             : selected === 'transcript' && state.membership.role !== 'audience' ? <TranscriptPanel roomId={state.room.id} />
