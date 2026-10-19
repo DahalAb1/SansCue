@@ -1,9 +1,11 @@
 # Bee device / live API verification runbook
 
-**Status: prepared, not executed.** Synthetic replay is not device evidence. Do
-not mark Step 7 accepted until the scenarios below have been run with actual Bee
-device or Bee-enabled Apple Watch data through an authorized Bee CLI, MCP, or
-Agent Skill transport.
+**Status: partial live evidence recorded.** [PR #2](https://github.com/DahalAb1/SansCue/pull/2)
+reports Apple Watch recording pickup, room transcript delivery and drafts on
+local Compose. [PR #3](https://github.com/DahalAb1/SansCue/pull/3) reports live
+transcript visibility for speaker and TA. These reports do not fill every
+scenario below. Complete the remaining scenario records before full Step 7
+acceptance; preserve the reported live passes. Synthetic replay remains separate.
 
 ## Preconditions and safety
 
@@ -54,7 +56,7 @@ pass.
    not create room-visible candidates.
 6. **End-to-end delivery.** For accepted events, verify the Bee outbox delivery
    is acknowledged only after Topics accepts it, repeat delivery is
-   idempotent, and a resulting `stub-v1` candidate remains unpublished and
+   idempotent, and a resulting candidate remains unpublished until moderator publication and
    staff-only. This checks integration plumbing, not model quality.
 7. **Stop and cleanup.** Stop the stream, end the test room, revoke temporary
    access, and remove private test captures according to the agreed retention

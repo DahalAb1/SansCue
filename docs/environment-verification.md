@@ -1,12 +1,54 @@
 # Environment verification status
 
-Updated October 10, 2026. The verification below was run against the source tree
-now integrated as `dev` commit `411fba0` (the checks ran on its feature branch
-before the equivalent source tree was squash-merged). It separates
-native-PostgreSQL checks from Docker-only checks. It does not claim that live
-Bee, AWS, model quality, or production acceptance has passed.
+Updated October 19, 2026. Results below distinguish teammate-reported live
+runs from checks executed in this checkout. A result applies to its recorded
+revision and scope; it is not automatically acceptance of later changes.
 
-## Current acceptance gates
+## October 18 live integration evidence
+
+Sanskriti recorded these results in the pull request descriptions:
+
+| Evidence | Revision / branch | Reported result |
+|---|---|---|
+| [PR #2](https://github.com/DahalAb1/SansCue/pull/2) | `cfa8fc1`, `feat/speaker-bee-binding` | 88 Rust tests against disposable PostgreSQL; 18 frontend tests; synthetic end-to-end PASS. Live Apple Watch on local Compose: Start listening picked up the recording, transcript reached the room, and question drafts appeared. The report does not establish that those drafts were model-generated. |
+| [PR #3](https://github.com/DahalAb1/SansCue/pull/3) | `5af0f1d`, `feat/bedrock-live-transcript` | 92 Rust tests against disposable PostgreSQL; 19 frontend tests. Live Apple Watch transcript visible to speaker and TA on local Compose. A real Bedrock request reached AWS but hit the daily token limit; no live AI draft was observed in that run. |
+
+These reports establish observed local Watch-to-room delivery and operation of
+the local Compose stack. They do not record every device-runbook scenario,
+production HTTPS, backup/restore, load targets, a successful live Bedrock draft,
+or a two-model quality/latency/cost comparison. Retain these passes and verify
+the remaining scenarios separately. Room selection and moderator behavior have
+changed since these runs, so rehearse the current revision before release.
+
+On October 19, before deployment changes, the frontend production build and all
+25 frontend tests passed on `c43c8cd`; all 13 deployment provisioning tests also
+passed. These are local code checks, not Docker or hosted acceptance.
+
+## October 19 deployment preparation
+
+On `feat/ec2-deployment`, based on `c43c8cd`, the production override, Caddy
+configuration, private environment templates, preflight validator, restricted
+database initializer and Mac SSH-tunnel runbook were added. No AWS resources
+were created and no emails were sent.
+
+- All 26 deployment tests passed, including four actual merged-configuration
+  checks using standalone Docker Compose 2.40.3 with synthetic settings. These
+  check exposed ports, HTTPS origin, database role wiring, persistent volumes,
+  restart policies and the optional container worker; they need no Docker daemon.
+- The initializer ran on an isolated native PostgreSQL 17 instance. Each of the
+  three application roles had no superuser, create-database, create-role or
+  replication privileges, and every service's numbered SQL migrations applied
+  successfully under its own role. This does not test image initialization.
+- Shell syntax, operator configuration static checks and whitespace checks passed.
+- Docker Engine and Caddy are unavailable on this host. Image builds, actual
+  production container startup, Caddy validation, certificates, hosted browser
+  rehearsal, backup/restore and rollback remain unexecuted release gates.
+
+See the [production runbook](../deploy/PRODUCTION.md) for configuration and
+remaining execution steps. Organizer email login is a proposal, not an
+implemented access mechanism.
+
+## Historical October 10 acceptance gates (`411fba0`)
 
 - **Hardware-independent synthetic flow:** passed against the source tree now
   integrated in `dev` as `411fba0`, using three fresh, separate native
@@ -47,9 +89,11 @@ Bee/Topics/question workflow; they are retained as historical context only:
 - 13 operator-provisioning unit tests, static Compose operator-configuration
   checks, and `git diff --check`.
 
-## Pending: Docker-only checks
+## Remaining Docker and deployment checks
 
-Run these on a Docker/Compose-enabled environment after providing the local
+Local Compose startup and live routing were reported in PRs #2 and #3. The
+following detailed recovery/isolation checks have no complete recorded pass.
+Run them on a Docker/Compose-enabled environment after providing the local
 `deploy/.env` configuration described in [the runtime guide](../deploy/README.md).
 Do not print or publish resolved Compose configuration, container environments,
 or logs containing credentials.
@@ -86,7 +130,7 @@ or logs containing credentials.
    documented writer-stop procedure, then verify readiness and compare the
    restored data. Keep the backup private and remove any disposable test marker.
 
-These are environment-blocked only because Docker/Compose is unavailable here.
+Docker Engine is unavailable on the current deployment-preparation host.
 Native PostgreSQL migrations, readiness, pool behavior, persistence fixtures,
 and application integration tests are not Docker-blocked and must remain in the
 regular workflow.

@@ -1,9 +1,11 @@
 # Model comparison worksheet
 
-**Status: template only; no model/provider evaluation has been run.** The
-current `stub-v1` candidate is deterministic test plumbing, not a model result.
-Use this worksheet only after representative excerpts, provider access, and
-quality/latency/cost targets have been agreed. Do not enter credentials here.
+**Status: no completed comparison recorded.** Anthropic and Bedrock generation
+are implemented, with a deterministic placeholder when unconfigured.
+[PR #3](https://github.com/DahalAb1/SansCue/pull/3) records a real Bedrock request
+that hit the daily token limit before a live AI draft appeared. Connectivity is
+not model-quality acceptance. Use this worksheet after agreeing on excerpts and
+quality/latency/cost targets. Do not enter credentials here.
 
 ## Evaluation setup
 
