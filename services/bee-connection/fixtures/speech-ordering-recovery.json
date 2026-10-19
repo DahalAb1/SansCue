@@ -1,0 +1,85 @@
+{
+  "capabilities": { "stable_ids": true, "contiguous_sequence": false },
+  "observations": [
+    {
+      "received_at": "2026-10-18T00:00:01Z",
+      "raw": [49],
+      "decoded": {
+        "Ok": {
+          "kind": "transcript",
+          "text": "First in speech, but arrived second.",
+          "source_conversation_id": "source-test-conv",
+          "source_id": "utterance-sample-1",
+          "source_utterance_id": 1,
+          "source_spoken_at": "2026-10-18T00:00:00.000Z",
+          "source_start_millis": 0,
+          "source_end_millis": 2500
+        }
+      }
+    },
+    {
+      "received_at": "2026-10-18T00:00:00Z",
+      "raw": [50],
+      "decoded": {
+        "Ok": {
+          "kind": "transcript",
+          "text": "Second in speech, but arrived first.",
+          "source_conversation_id": "source-test-conv",
+          "source_id": "utterance-sample-2",
+          "source_utterance_id": 2,
+          "source_spoken_at": "2026-10-18T00:00:03.000Z",
+          "source_start_millis": 3000,
+          "source_end_millis": 5000
+        }
+      }
+    },
+    {
+      "received_at": "2026-10-18T00:00:02Z",
+      "raw": [51],
+      "decoded": {
+        "Ok": {
+          "kind": "transcript",
+          "text": "Third in speech, overlapping with fourth.",
+          "source_conversation_id": "source-test-conv",
+          "source_id": "utterance-sample-3",
+          "source_utterance_id": 3,
+          "source_spoken_at": "2026-10-18T00:00:06.000Z",
+          "source_start_millis": 6000,
+          "source_end_millis": 9000
+        }
+      }
+    },
+    {
+      "received_at": "2026-10-18T00:00:03Z",
+      "raw": [52],
+      "decoded": {
+        "Ok": {
+          "kind": "transcript",
+          "text": "Overlapping speech segment.",
+          "source_conversation_id": "source-test-conv",
+          "source_id": "utterance-sample-4",
+          "source_utterance_id": 4,
+          "source_spoken_at": "2026-10-18T00:00:08.000Z",
+          "source_start_millis": 8000,
+          "source_end_millis": 11000
+        }
+      }
+    },
+    {
+      "received_at": "2026-10-18T00:00:04Z",
+      "raw": [51],
+      "decoded": {
+        "Ok": {
+          "kind": "transcript",
+          "text": "Third in speech, overlapping with fourth.",
+          "source_conversation_id": "source-test-conv",
+          "source_id": "utterance-sample-3",
+          "source_utterance_id": 3,
+          "source_spoken_at": "2026-10-18T00:00:06.000Z",
+          "source_start_millis": 6000,
+          "source_end_millis": 9000
+        }
+      }
+    }
+  ]
+}

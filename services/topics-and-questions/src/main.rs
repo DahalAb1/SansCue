@@ -1,6 +1,10 @@
 use sqlx::postgres::PgPoolOptions;
-use std::{net::SocketAddr, time::Duration};
-use topics_and_questions::{App, Delivery, router};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+use topics_and_questions::{
+    App, CadencePolicy, Delivery, QuestionGenerator, TopicWindowGenerator,
+    claude::{BedrockAuth, ClaudeGenerator},
+    router,
+};
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     match run().await {
@@ -46,7 +50,61 @@ async fn run() -> Result<(), &'static str> {
         return Err("invalid HTTP_PORT");
     };
     let addr = SocketAddr::new(host, port);
-    let delivery = Delivery::new(pool.clone(), &sessions, &sessions_token)?;
+    let cadence_policy = CadencePolicy {
+        min_interval_between_questions: duration_setting(
+            "TOPICS_MIN_QUESTION_INTERVAL_SECONDS",
+            20,
+        )?,
+        min_words_per_window: usize_setting("TOPICS_MIN_WINDOW_WORDS", 8)?,
+        max_window_duration: duration_setting("TOPICS_MAX_WINDOW_SECONDS", 180)?,
+        silence_boundary_threshold: duration_setting("TOPICS_SILENCE_BOUNDARY_SECONDS", 5)?,
+    };
+    let gate = TopicWindowGenerator::new(cadence_policy, "topic-window-stub-v1");
+    let bedrock_auth = match (
+        optional_setting("AWS_BEARER_TOKEN_BEDROCK")?,
+        optional_setting("TOPICS_BEDROCK_CREDENTIALS_FILE")?,
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "set either AWS_BEARER_TOKEN_BEDROCK or TOPICS_BEDROCK_CREDENTIALS_FILE, not both",
+            );
+        }
+        (Some(key), None) => Some(BedrockAuth::ApiKey(key)),
+        (None, Some(file)) => Some(BedrockAuth::CredentialsFile(file.into())),
+        (None, None) => None,
+    };
+    let generator: Arc<dyn QuestionGenerator> = match (
+        bedrock_auth,
+        optional_setting("ANTHROPIC_API_KEY")?,
+    ) {
+        (Some(_), Some(_)) => {
+            return Err("configure either Bedrock or ANTHROPIC_API_KEY, not both");
+        }
+        (Some(auth), None) => Arc::new(ClaudeGenerator::bedrock(
+            gate,
+            auth,
+            optional_setting("AWS_REGION")?
+                .as_deref()
+                .unwrap_or("us-east-1"),
+            optional_setting("TOPICS_MODEL")?.as_deref(),
+            None,
+        )?),
+        (None, Some(key)) => Arc::new(ClaudeGenerator::anthropic(
+            gate,
+            &key,
+            optional_setting("ANTHROPIC_BASE_URL")?.as_deref(),
+            optional_setting("TOPICS_MODEL")?.as_deref(),
+        )?),
+        (None, None) => {
+            eprintln!(
+                "topics-and-questions: no model credential is set; using the deterministic placeholder generator"
+            );
+            Arc::new(gate)
+        }
+    };
+    let delivery = Delivery::new(pool.clone(), &sessions, &sessions_token)?
+        .with_generator(generator)
+        .with_cadence_policy(cadence_policy);
     let worker = tokio::spawn(delivery.run());
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -56,6 +114,7 @@ async fn run() -> Result<(), &'static str> {
         router(App {
             pool: pool.clone(),
             bee_token: bee.into(),
+            sessions_token: optional_setting("TOPICS_SESSIONS_SERVICE_TOKEN")?.map(Into::into),
         }),
     )
     .await
@@ -63,4 +122,41 @@ async fn run() -> Result<(), &'static str> {
     worker.abort();
     pool.close().await;
     result
+}
+
+fn optional_setting(name: &str) -> Result<Option<String>, &'static str> {
+    match std::env::var(name) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err("invalid Topics model setting"),
+    }
+}
+
+fn duration_setting(name: &str, default: u64) -> Result<Duration, &'static str> {
+    let seconds = match std::env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|_| "invalid Topics cadence setting")?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(_) => return Err("invalid Topics cadence setting"),
+    };
+    if seconds == 0 {
+        return Err("invalid Topics cadence setting");
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn usize_setting(name: &str, default: usize) -> Result<usize, &'static str> {
+    let value = match std::env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .map_err(|_| "invalid Topics cadence setting")?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(_) => return Err("invalid Topics cadence setting"),
+    };
+    if value == 0 {
+        return Err("invalid Topics cadence setting");
+    }
+    Ok(value)
 }

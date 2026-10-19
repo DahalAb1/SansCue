@@ -6,7 +6,7 @@ use axum::{
 };
 use bee_connection::{
     consumer::{CommandStore, Consumer},
-    domain::Binding,
+    domain::{Binding, Capabilities},
     store::CommandOutcome,
 };
 use serde_json::{Value, json};
@@ -20,7 +20,11 @@ struct MockStore {
 }
 
 impl CommandStore for MockStore {
-    async fn ensure_command_conversation(&self, _: Uuid) -> Result<(), &'static str> {
+    async fn ensure_command_conversation(
+        &self,
+        _: Uuid,
+        _: Capabilities,
+    ) -> Result<(), &'static str> {
         Ok(())
     }
     async fn apply_command(

@@ -24,9 +24,9 @@ speaker permission and room lifecycle. Neither service queries the other's DB.
 The current worker is device-independent; it is not a Bee transport. Exactly
 one worker instance is supported because poll rows are not leased. Keep its
 internal URL and service token on trusted private transport/network only; do not
-expose the sessions private listener or token publicly. The repo's local Compose
-file does not yet provision this service/credential. No public endpoint accepts
-service credentials.
+expose the sessions private listener or token publicly. The local Compose file
+provisions this worker and its credentials but does not start a live Bee
+transport. No public endpoint accepts service credentials.
 
 ## Canonical conversation event v1
 
@@ -45,3 +45,19 @@ Without identity evidence, identical text is two observations, not a duplicate.
 The recording format and fixture are SansCue synthetic data, not a Bee wire
 protocol. Real source identity scope, ordering/reset semantics, reconnect,
 history and recovery guarantees still require device/API verification.
+
+## Observed Bee CLI live envelope
+
+An Apple Watch transport probe using Bee CLI 0.8.0 produced newline-delimited
+`new-utterance` JSON with an external `conversation_uuid` and utterance `id`,
+`sample_id`, `start`, `end`, `text`, and RFC 3339 `spoken_at`. The live parser
+allowlists only those fields and keeps source speech time separate from local
+receive time. Numeric utterance IDs are not treated as contiguous sequence, and
+arrival ordinal remains ingestion order only. Unknown fields, including any
+future unrelated account or location metadata, are discarded at this boundary.
+
+The checked-in live fixture is fabricated and contains no private transcript,
+source identity, or location. `sample_id` is the provisional source event
+identity; its retry stability and completed-transcript reconciliation still
+require the remaining live-device scenarios. This parser contract does not by
+itself start the CLI, bind a room, or establish end-to-end acceptance.

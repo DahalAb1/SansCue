@@ -36,9 +36,22 @@ async fn run() -> Result<(), &'static str> {
             &topics_token,
             store.clone(),
         )?;
+        let status_reporter = consumer.clone();
+        let live = async {
+            match bee_connection::live_worker::configured_cli_path() {
+                Some(path) => {
+                    bee_connection::live_worker::LiveCliWorker::new(path, store.clone())?
+                        .with_status_reporter(status_reporter.clone())
+                        .run()
+                        .await
+                }
+                None => std::future::pending::<Result<(), &'static str>>().await,
+            }
+        };
         tokio::select! {
             result=consumer.run()=>result,
             result=topics.run()=>result,
+            result=live=>result,
             _=tokio::signal::ctrl_c()=>{store.close().await;Ok(())}
         }?;
         return Ok(());

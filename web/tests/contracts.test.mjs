@@ -11,7 +11,7 @@ const memory = await server.ssrLoadModule('/src/app/pageMemory.ts');
 const live = await server.ssrLoadModule('/src/app/live.ts');
 await server.close();
 
-const { SessionsApi, ApiError, errorMessage, paths, parseRoomState, preferState, deniesRoomRead } = apiModule;
+const { SessionsApi, ApiError, errorMessage, paths, parseRoomState, preferState, deniesRoomRead, parseTranscript, generatorLabel } = apiModule;
 const { parseRoute, tabsFor, selectedSection, sharePath } = navigation;
 const { keepJoin, memoryJoin, keepInvite, memoryInvite, keepDraft, memoryDraft, draftKey, keepPublishedQuestionDraft, memoryPublishedQuestionDraft, clearPublishedQuestionDraft } = memory;
 const { parseRoomEvent, reconnectDelay } = live;
@@ -36,7 +36,7 @@ function state(role = 'audience') {
     active_question: null,
     my_response: null,
     dashboard: null,
-    bee: null,
+    bee: role === 'audience' ? null : { binding_id: null, status: 'unbound', has_gaps: false, connectivity_revision: 0 },
     ...(role === 'speaker' ? { join_link_enabled: true } : {}),
   };
 }
@@ -66,8 +66,8 @@ test('frontend routes accept opaque path-segment tokens and role sections', () =
   assert.equal(parseRoute('/join/').kind, 'missing');
   assert.equal(parseRoute('/join/%2e%2e').kind, 'missing');
   assert.deepEqual(tabsFor('audience'), ['response', 'qa']);
-  assert.deepEqual(tabsFor('ta'), ['dashboard', 'questions', 'qa']);
-  assert.deepEqual(tabsFor('speaker'), ['dashboard', 'questions', 'qa', 'access']);
+  assert.deepEqual(tabsFor('ta'), ['dashboard', 'questions', 'transcript', 'qa']);
+  assert.deepEqual(tabsFor('speaker'), ['dashboard', 'questions', 'transcript', 'qa', 'access']);
   assert.equal(selectedSection('audience', 'access').selected, 'response');
   assert.equal(selectedSection('audience', 'access').redirected, true);
   assert.equal(selectedSection('ta', 'access').selected, 'dashboard');
@@ -133,6 +133,8 @@ test('room feature paths match the sessions publication, feedback and written Q&
   assert.equal(paths.rotateJoin(roomId), '/rooms/' + roomId + '/join-link/rotate');
   assert.equal(paths.revokeJoin(roomId), '/rooms/' + roomId + '/join-link/revoke');
   assert.equal(paths.end(roomId), '/rooms/' + roomId + '/end');
+  assert.equal(paths.bindBee(roomId), '/rooms/' + roomId + '/bee/bind');
+  assert.equal(paths.unbindBee(roomId), '/rooms/' + roomId + '/bee/unbind');
   assert.equal(paths.qa(roomId), '/rooms/' + roomId + '/qa');
   assert.equal(paths.publishQuestion(roomId, memberId), '/rooms/' + roomId + '/questions/' + memberId + '/publish');
   assert.equal(paths.questionVersion(roomId, memberId), '/rooms/' + roomId + '/questions/' + memberId + '/versions');
@@ -154,6 +156,7 @@ test('room feature paths match the sessions publication, feedback and written Q&
     paths.bootstrap, paths.login, paths.rooms, paths.state(roomId), paths.join(token), paths.redeem(token),
     paths.invitations(roomId), paths.memberships(roomId), paths.revokeInvitation(roomId, memberId),
     paths.revokeMembership(roomId, memberId), paths.rotateJoin(roomId), paths.revokeJoin(roomId), paths.end(roomId),
+    paths.bindBee(roomId), paths.unbindBee(roomId),
     paths.qa(roomId), paths.publishQuestion(roomId, memberId), paths.questionVersion(roomId, memberId), paths.respond(roomId, memberId),
   ].join('\n');
   assert.match(listed, /\/questions/);
@@ -189,6 +192,12 @@ test('room state is accepted only for the requested room and a server role', () 
   assert.equal(parseRoomState({ ...state(), membership: { id: memberId, role: 'operator' } }, roomId), null);
   assert.equal(parseRoomState(state(), '00000000-0000-4000-8000-000000000099'), null);
   assert.equal(parseRoomState({ ...state(), revision: 1.5 }, roomId), null);
+  assert.equal(parseRoomState({ ...state('speaker'), bee: null }, roomId), null);
+  assert.equal(parseRoomState({ ...state('speaker'), bee: { binding_id: null, status: 'other', has_gaps: false, connectivity_revision: 0 } }, roomId), null);
+  assert.equal(parseRoomState({ ...state('speaker'), bee: { binding_id: 'not-a-uuid', status: 'bound', has_gaps: false, connectivity_revision: 1 } }, roomId), null);
+  assert.equal(parseRoomState({ ...state('speaker'), bee: { binding_id: '00000000-0000-0000-0000-000000000000', status: 'bound', has_gaps: false, connectivity_revision: 1 } }, roomId), null);
+  assert.equal(parseRoomState({ ...state('speaker'), bee: { binding_id: memberId, status: 'bound', has_gaps: false, connectivity_revision: 1 } }, roomId)?.bee?.status, 'bound');
+  assert.equal(parseRoomState({ ...state('audience'), bee: state('speaker').bee }, roomId), null);
   const older = state();
   older.revision = 2;
   const newer = state();
@@ -291,6 +300,8 @@ test('error responses cannot echo secrets into UI and retries preserve keys', as
   assert.match(errorMessage(new ApiError(404, 'not_found')), /invalid, expired or revoked/);
   assert.match(errorMessage(new ApiError(409, 'room_ended')), /ended/);
   assert.match(errorMessage(new ApiError(409, 'idempotency_conflict')), /did not match the original request/);
+  assert.match(errorMessage(new ApiError(409, 'bee_already_bound')), /Unbind the current/);
+  assert.match(errorMessage(new ApiError(409, 'bee_source_already_bound')), /another room/);
   assert.equal(errorMessage(new ApiError(409, 'idempotency_conflict')).includes(secret), false);
   assert.match(errorMessage(new TypeError('http://127.0.0.1/join/' + token)), /request key is retained/);
   assert.equal(errorMessage(new TypeError('http://127.0.0.1/join/' + token)).includes(token), false);
@@ -368,4 +379,15 @@ test('client source does not persist secrets or log them', () => {
   const sources = files('src').filter(path => path.endsWith('.ts') || path.endsWith('.tsx'));
   assert.ok(sources.length >= 6);
   for (const path of sources) assert.doesNotMatch(readFileSync(path, 'utf8'), banned, path);
+});
+
+test('transcript lines and generator labels are parsed defensively', () => {
+  assert.equal(paths.transcript(roomId), '/rooms/' + roomId + '/transcript');
+  assert.deepEqual(parseTranscript({ lines: [{ text: 'Hello.', spoken_at: '2026-10-18T20:00:00Z' }] }), [{ text: 'Hello.', spoken_at: '2026-10-18T20:00:00Z' }]);
+  assert.equal(parseTranscript({ lines: [{ text: 7, spoken_at: 'x' }] }), null);
+  assert.equal(parseTranscript({}), null);
+  assert.equal(generatorLabel('topic-window-stub-v1'), 'Placeholder generator, not AI');
+  assert.equal(generatorLabel('us.anthropic.claude-haiku-4-5-20251001-v1:0/topic-check-v1'), 'Drafted by Claude Haiku 4.5');
+  assert.equal(generatorLabel('claude-opus-5-5/topic-check-v1'), 'Drafted by Claude Opus 5.5');
+  assert.match(errorMessage(new ApiError(503, 'transcript_unavailable')), /retries automatically/);
 });

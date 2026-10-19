@@ -36,8 +36,8 @@ export function parseRoute(path: string): Route {
 
 export function tabsFor(role: Role): string[] {
   if (role === 'audience') return ['response', 'qa'];
-  if (role === 'speaker') return ['dashboard', 'questions', 'qa', 'access'];
-  return ['dashboard', 'questions', 'qa'];
+  if (role === 'speaker') return ['dashboard', 'questions', 'transcript', 'qa', 'access'];
+  return ['dashboard', 'questions', 'transcript', 'qa'];
 }
 
 export function selectedSection(role: Role, tab?: string): { tabs: string[]; selected: string; redirected: boolean } {
@@ -47,7 +47,7 @@ export function selectedSection(role: Role, tab?: string): { tabs: string[]; sel
 }
 
 export function tabLabel(tab: string): string {
-  return ({ response: 'Response', qa: 'Q&A', dashboard: 'Dashboard', questions: 'Questions', access: 'Room access' } as Record<string, string>)[tab] ?? tab;
+  return ({ response: 'Response', qa: 'Q&A', dashboard: 'Dashboard', questions: 'Questions', transcript: 'Transcript', access: 'Room access' } as Record<string, string>)[tab] ?? tab;
 }
 
 export function sharePath(kind: 'join' | 'invite', value: string | null | undefined): string | null {

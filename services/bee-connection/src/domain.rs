@@ -23,6 +23,14 @@ pub struct ConversationEvent {
     pub received_at: DateTime<Utc>,
     pub source_id: Option<String>,
     pub source_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_utterance_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_spoken_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_start_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_end_millis: Option<u64>,
     pub text: String,
 }
 
@@ -35,6 +43,14 @@ pub struct Transcript {
     pub source_id: Option<String>,
     /// Only set when the source actually supplies this value.
     pub source_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_utterance_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_spoken_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_start_millis: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_end_millis: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +66,11 @@ pub enum Signal {
     /// This is not evidence of a Bee protocol capability by itself.
     RecoveryCompleted {
         through_sequence: Option<u64>,
+    },
+    /// Observation of external conversation lifecycle (e.g. from Bee CLI stream or API).
+    Lifecycle {
+        external_id: Option<u64>,
+        state: String,
     },
 }
 

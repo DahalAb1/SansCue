@@ -1,7 +1,7 @@
 //! Device-independent sessions command consumer. It handles only canonical
 //! SansCue bind/unbind commands; transport-specific adapters remain separate.
 use crate::{
-    domain::Binding,
+    domain::{Binding, Capabilities},
     store::{CommandOutcome, Store},
 };
 use serde_json::{Value, json};
@@ -9,7 +9,11 @@ use uuid::Uuid;
 
 #[allow(async_fn_in_trait)]
 pub trait CommandStore: Clone + Send + Sync {
-    async fn ensure_command_conversation(&self, conversation: Uuid) -> Result<(), &'static str>;
+    async fn ensure_command_conversation(
+        &self,
+        conversation: Uuid,
+        capabilities: Capabilities,
+    ) -> Result<(), &'static str>;
     async fn apply_command(
         &self,
         command: Uuid,
@@ -20,8 +24,12 @@ pub trait CommandStore: Clone + Send + Sync {
 }
 
 impl CommandStore for Store {
-    async fn ensure_command_conversation(&self, conversation: Uuid) -> Result<(), &'static str> {
-        Store::ensure_command_conversation(self, conversation).await
+    async fn ensure_command_conversation(
+        &self,
+        conversation: Uuid,
+        capabilities: Capabilities,
+    ) -> Result<(), &'static str> {
+        Store::ensure_command_conversation(self, conversation, capabilities).await
     }
     async fn apply_command(
         &self,
@@ -95,7 +103,13 @@ impl<S: CommandStore> Consumer<S> {
         for command in commands {
             let (id, revision, action, binding) = parse_command(command)?;
             self.store
-                .ensure_command_conversation(binding.conversation_id)
+                .ensure_command_conversation(
+                    binding.conversation_id,
+                    Capabilities {
+                        stable_ids: binding.source_conversation_id.is_some(),
+                        contiguous_sequence: false,
+                    },
+                )
                 .await?;
             let outcome = self
                 .store
@@ -107,35 +121,39 @@ impl<S: CommandStore> Consumer<S> {
                 continue;
             }
             let summary = if action == "bind" {
-                json!({"binding_id":binding.conversation_id,"status":"bound","has_gaps":false,"connectivity_revision":revision})
+                json!({"binding_id":binding.conversation_id,"status":"bound","has_gaps":false,"connectivity_revision":revision,"source_conversation_id":binding.source_conversation_id})
             } else {
                 json!({"binding_id":null,"status":"unbound","has_gaps":false,"connectivity_revision":revision})
             };
-            let status = self
-                .client
-                .post(format!(
-                    "{}/internal/v1/bee/rooms/{}/status",
-                    self.base, binding.room_id
-                ))
-                .bearer_auth(&self.token)
-                .json(&summary)
-                .send()
-                .await
-                .map_err(|_| "sessions status delivery failed")?;
-            if !status.status().is_success() {
-                let code = status.status().as_u16();
-                let body = status.json::<Value>().await.unwrap_or(Value::Null);
-                if is_superseded_status(code, &body) {
-                    self.acknowledge(id).await?;
-                    completed += 1;
-                    continue;
-                }
-                return Err("sessions status delivery rejected");
-            }
+            self.publish_status(binding.room_id, &summary).await?;
             self.acknowledge(id).await?;
             completed += 1;
         }
         Ok(completed)
+    }
+
+    /// Reports a room's Bee binding summary. A status superseded by a newer
+    /// binding revision is not an error: sessions already holds newer state.
+    pub async fn publish_status(&self, room_id: Uuid, summary: &Value) -> Result<(), &'static str> {
+        let status = self
+            .client
+            .post(format!(
+                "{}/internal/v1/bee/rooms/{}/status",
+                self.base, room_id
+            ))
+            .bearer_auth(&self.token)
+            .json(summary)
+            .send()
+            .await
+            .map_err(|_| "sessions status delivery failed")?;
+        if !status.status().is_success() {
+            let code = status.status().as_u16();
+            let body = status.json::<Value>().await.unwrap_or(Value::Null);
+            if !is_superseded_status(code, &body) {
+                return Err("sessions status delivery rejected");
+            }
+        }
+        Ok(())
     }
 
     async fn acknowledge(&self, command: Uuid) -> Result<(), &'static str> {
@@ -195,9 +213,11 @@ fn parse_command(command: &Value) -> Result<(Uuid, i64, &'static str, Binding), 
         conversation_id: parse("conversation_id")?,
         room_id: parse("room_id")?,
         session_id: parse("session_id")?,
-        source_conversation_id: payload["source_conversation_id"]
-            .as_str()
-            .map(str::to_owned),
+        source_conversation_id: payload["source_conversation_id"].as_str().map(|source| {
+            Uuid::parse_str(source)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|_| source.to_owned())
+        }),
     };
     Ok((id, revision, action, binding))
 }

@@ -45,7 +45,8 @@ speaker-session UUID associated with the freshly created room.
 ## What this does not establish
 
 This is synthetic replay against local native PostgreSQL, not actual Bee stream
-or API behavior. It exercises the `stub-v1` candidate path, not model quality.
+or API behavior. It exercises the deterministic `topic-window-stub-v1` candidate path with no
+model key, not model quality.
 It does not exercise Docker images/Compose/proxy, AWS, production reliability,
 capacity, performance, backup/restore, or database outage recovery. Track those
 as distinct gates in [environment verification](../../docs/environment-verification.md).

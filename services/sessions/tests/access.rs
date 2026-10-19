@@ -1347,17 +1347,18 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
     )
     .await;
     let room = created["state"]["room"]["id"].as_str().unwrap();
-    let conversation = Uuid::new_v4();
+    let source_conversation = Uuid::new_v4();
     let (status, bound) = call(
         &app,
         &browser,
         "POST",
         &format!("/rooms/{room}/bee/bind"),
-        json!({"conversation_id":conversation,"source_conversation_id":null}),
+        json!({"source_conversation_id":source_conversation}),
     )
     .await;
     assert_eq!(status, 200);
     assert_eq!(bound["status"], "binding");
+    let conversation = Uuid::parse_str(bound["conversation_id"].as_str().unwrap()).unwrap();
     let state = call(
         &app,
         &browser,
@@ -1368,6 +1369,25 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
     .await
     .1;
     assert_eq!(state["bee"]["status"], "binding");
+    let (_, other_room) = call(
+        &app,
+        &browser,
+        "POST",
+        "/rooms",
+        json!({"title":"Other Bee room"}),
+    )
+    .await;
+    let other_room = other_room["state"]["room"]["id"].as_str().unwrap();
+    let (duplicate_source_status, duplicate_source) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{other_room}/bee/bind"),
+        json!({"source_conversation_id":source_conversation}),
+    )
+    .await;
+    assert_eq!(duplicate_source_status, 409);
+    assert_eq!(duplicate_source["code"], "bee_source_already_bound");
     let mut request = Request::builder()
         .uri("/internal/v1/bee/commands")
         .header("authorization", "Bearer synthetic-bee")
@@ -1385,6 +1405,10 @@ async fn bee_binding_is_speaker_authoritative_and_private_commands_are_retryable
                 .unwrap()
         )
         .is_ok()
+    );
+    assert_eq!(
+        list["commands"][0]["payload"]["source_conversation_id"],
+        source_conversation.to_string()
     );
     let command = list["commands"][0]["command_id"].as_str().unwrap();
     let revision = bound["revision"].as_i64().unwrap();
@@ -1589,7 +1613,7 @@ async fn superseded_binding_status_has_machine_readable_stale_outcome() {
         json!({}),
     )
     .await;
-    let stale=private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":conversation,"status":"bound","connectivity_revision":bind["revision"]})).await;
+    let stale=private_json(&private,"POST",&format!("/internal/v1/bee/rooms/{room}/status"),json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":bind["revision"]})).await;
     assert_eq!(stale.0, 409);
     assert_eq!(stale.1["code"], "bee_binding_stale");
     assert_eq!(
@@ -1597,7 +1621,7 @@ async fn superseded_binding_status_has_machine_readable_stale_outcome() {
             &private,
             "POST",
             &format!("/internal/v1/bee/rooms/{room}/status"),
-            json!({"binding_id":null,"status":"unbound","connectivity_revision":unbind["revision"]})
+            json!({"binding_id":null,"status":"unbound","has_gaps":false,"connectivity_revision":unbind["revision"]})
         )
         .await
         .0,
@@ -2165,5 +2189,163 @@ async fn published_questions_feedback_and_written_questions_are_role_partitioned
     .await
     .unwrap();
     assert_eq!(active_count, 1);
+    finish(pool, admin, schema).await;
+}
+
+#[tokio::test]
+async fn listening_bee_binding_records_the_adopted_conversation() {
+    let (pool, admin, schema) = db().await;
+    let security = Security {
+        bee_credential: Some("synthetic-bee".into()),
+        ..security()
+    };
+    let app = configured_router(pool.clone(), security.clone());
+    let private = internal_router(Access {
+        pool: pool.clone(),
+        security,
+    });
+    let browser = boot(&app).await;
+    login(&app, &browser).await;
+    let (_, created) = call(&app, &browser, "POST", "/rooms", json!({"title":"Listen"})).await;
+    let room = created["state"]["room"]["id"].as_str().unwrap();
+    let (status, rejected) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"listen":false}),
+    )
+    .await;
+    assert_eq!(status, 400, "{rejected}");
+    let (status, bound) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{room}/bee/bind"),
+        json!({"listen":true}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let conversation = bound["conversation_id"].as_str().unwrap().to_owned();
+    let revision = bound["revision"].as_i64().unwrap();
+    let (_, list) = private_json(&private, "GET", "/internal/v1/bee/commands", json!(null)).await;
+    let command = &list["commands"][0];
+    assert_eq!(command["payload"]["source_conversation_id"], Value::Null);
+
+    // The worker reports the binding, then later the conversation it adopted.
+    let listening = json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":revision,"source_conversation_id":null});
+    let status_path = format!("/internal/v1/bee/rooms/{room}/status");
+    assert_eq!(
+        private_json(&private, "POST", &status_path, listening)
+            .await
+            .0,
+        200
+    );
+    let ack = format!(
+        "/internal/v1/bee/commands/{}/ack",
+        command["command_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        private_json(&private, "POST", &ack, json!(null)).await.0,
+        200
+    );
+    let source = Uuid::new_v4();
+    let adopted = json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":revision,"source_conversation_id":source});
+    assert_eq!(
+        private_json(&private, "POST", &status_path, adopted)
+            .await
+            .0,
+        200
+    );
+
+    let state = call(
+        &app,
+        &browser,
+        "GET",
+        &format!("/rooms/{room}/state"),
+        json!({}),
+    )
+    .await
+    .1;
+    assert_eq!(state["bee"]["status"], "bound");
+    assert_eq!(state["bee"]["source_conversation_id"], source.to_string());
+    let (_, other) = call(&app, &browser, "POST", "/rooms", json!({"title":"Other"})).await;
+    let other = other["state"]["room"]["id"].as_str().unwrap();
+    let (status, duplicate) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{other}/bee/bind"),
+        json!({"source_conversation_id":source}),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(duplicate["code"], "bee_source_already_bound");
+    finish(pool, admin, schema).await;
+}
+
+#[tokio::test]
+async fn live_transcript_is_staff_only_and_read_from_topics() {
+    let (pool, admin, schema) = db().await;
+    // Stand-in for the Topics transcript route.
+    let seen_token = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let record = seen_token.clone();
+    let topics = Router::new().route(
+        "/internal/v1/rooms/{room}/transcript",
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let record = record.clone();
+            async move {
+                *record.lock().unwrap() = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                axum::Json(
+                    json!({"lines":[{"text":"Hello room.","spoken_at":"2026-10-18T20:00:00Z"}]}),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let topics_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, topics).await.unwrap() });
+
+    let app = configured_router(
+        pool.clone(),
+        Security {
+            topics_url: Some(topics_url),
+            topics_read_credential: Some("synthetic-topics-read".into()),
+            ..security()
+        },
+    );
+    let browser = boot(&app).await;
+    login(&app, &browser).await;
+    let (_, created) = call(
+        &app,
+        &browser,
+        "POST",
+        "/rooms",
+        json!({"title":"Transcript"}),
+    )
+    .await;
+    let room = created["state"]["room"]["id"].as_str().unwrap();
+    let path = format!("/rooms/{room}/transcript");
+    let (status, transcript) = call(&app, &browser, "GET", &path, json!({})).await;
+    assert_eq!(status, 200);
+    assert_eq!(transcript["lines"][0]["text"], "Hello room.");
+    assert_eq!(
+        seen_token.lock().unwrap().as_deref(),
+        Some("Bearer synthetic-topics-read")
+    );
+
+    let guest = boot(&app).await;
+    let join = created["join_url"].as_str().unwrap();
+    assert_eq!(call(&app, &guest, "POST", join, json!({})).await.0, 200);
+    assert_eq!(call(&app, &guest, "GET", &path, json!({})).await.0, 403);
+
+    // Without Topics configuration the route reports itself unavailable.
+    let unconfigured = configured_router(pool.clone(), security());
+    let (status, body) = call(&unconfigured, &browser, "GET", &path, json!({})).await;
+    assert_eq!(status, 503);
+    assert_eq!(body["code"], "transcript_unavailable");
     finish(pool, admin, schema).await;
 }
