@@ -259,8 +259,8 @@ flowchart TD
 
 **Success:** Published questions stay stable; saved responses produce correct counts and live dashboard updates.
 
-**Current implementation:** Speaker publication copies evidence into an
-immutable question version; audience responses are idempotent and aggregate
+**Current implementation:** Moderator (TA) publication copies evidence into an
+immutable question version (see the [demo plan](live-feedback-demo-plan.md)); audience responses are idempotent and aggregate
 counts/percentages are returned only to staff. Written Q&A is separate from
 ratings and private to the audience author plus speaker/TAs. The frontend shows
 counts and one-decimal percentages (an em dash for null percentages when there

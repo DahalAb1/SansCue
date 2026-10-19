@@ -1,6 +1,7 @@
 # Live audience feedback and moderated questions: demonstration plan
 
-Status: planned; this document does not claim implementation or verification.
+Status: implemented on this branch except live Bee device and live model
+verification; see [Implementation status](#implementation-status) at the end.
 
 Suggested branch: `feat/live-audience-feedback-and-moderated-questions`
 
@@ -224,3 +225,57 @@ public account onboarding as part of this slice. At handoff, summarize changed
 behavior, checks actually run, how to rehearse the demo, and any remaining live Bee
 or model-access blockers. Distinguish completed features from proposed settings
 and unverified integrations.
+
+## Implementation status
+
+This branch includes `main`'s live Bee adapter and Claude generator, then adds:
+
+- **Speaker chart.** The speaker's Dashboard shows the published question,
+  respondent total, and labelled bars with counts and percentages of
+  respondents. It covers no question, zero responses, reconnecting, ended
+  rooms, and responses given to an earlier wording. Moderator and audience
+  layouts are unchanged apart from moderator controls and reply threads.
+- **Moderator authority.** Publish, draft edit, dismiss, version correction and
+  Q&A replies require the `ta` role in both fresh requests and idempotent
+  replays. Speakers see drafts read-only. Edits and dismissals persist; the
+  queue shows at most three drafts, which expire ten minutes after arrival or
+  the latest edit. Replies are visible only to the author and staff, and their
+  live invalidations target only those members.
+- **Generation.** Delivery-level gates, recent-draft duplicate suppression,
+  prompt hardening and output validation are described in the
+  [design decision](question-generation-design.md), with the scripted-lecture
+  evaluation of the proposed thresholds.
+- **Bee setup.** Listening-mode adoption is removed: the speaker chooses one of
+  the recordings the host worker reports, and other recordings' speech is
+  dropped. The setup tab orders the steps (moderator, audience link,
+  recording, speech check) and distinguishes stream not running, reconnecting,
+  waiting for speech, and receiving transcript. Ending a room unbinds Bee.
+
+Verified locally: Rust format/clippy and all three service suites against
+PostgreSQL 16 (Topics with `--test-threads=1`, because its older test files
+share one schema), web tests and build, the updated synthetic acceptance, and a
+multi-browser walkthrough of the full flow. The walkthrough used a simulated Bee
+CLI, so it checks plumbing only.
+
+Not verified: a real Bee device or Bee CLI session, live model output quality,
+and Docker/Compose startup. No model credential was available.
+
+### Rehearsal
+
+1. Provision the operator (`python3 deploy/provision_operator.py`), start the
+   stack, and run `deploy/run-live-bee-worker.sh` on the presenter's computer
+   with Bee authenticated (see `deploy/README.md`). Optionally configure a
+   model credential in `deploy/.env`; without one, drafts come from the labelled
+   placeholder.
+2. Sign in at `/operator`, create the room, and follow **Room access**: create
+   the moderator invitation and open it in the moderator's browser; show the
+   audience QR code and join from two audience devices.
+3. Start recording on the Bee, speak, choose the recording, then say "SansCue
+   connection check" until the tab shows **Receiving transcript**.
+4. Explain an idea for at least 30 seconds. The moderator reviews the draft and
+   its evidence, edits if needed, and publishes. Audience members respond; the
+   speaker's Dashboard updates live.
+5. An audience member asks a written question; the moderator replies; confirm a
+   second audience member cannot see it. Dismiss a draft and reload.
+6. Stop and restart the Bee worker; the tab shows "Bee listener not running",
+   then recovers. End the room and confirm participation is closed.

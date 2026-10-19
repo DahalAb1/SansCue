@@ -54,8 +54,30 @@ model evaluation remain open.
   Candidates are labelled `<model>/topic-check-v1`.
 - Without a key, `topic-window-stub-v1` remains the runtime generator. It is a
   deterministic placeholder, not an LLM or product-quality question generator.
+- Topics now applies its gates before any generator call: transcript backlog
+  older than 45 seconds, the 90-second cooldown, fewer than 60 words of
+  context, filler, pauses, unfinished sentences, exact repeats, and at most one
+  generator call per room per 15 seconds of speech. Spoken text is wrapped as
+  data and the system prompt forbids following instructions inside it. The
+  last five drafts (30 minutes) are listed to the model as earlier check-ins;
+  a draft that rephrases one, or quotes the same passage, abstains as
+  `repetitive_topic`. Model output must be a single-line clarity check-in of
+  at most 25 words (`unsuitable_question` otherwise).
+- These values are the plan's starting points. A timed scripted lecture
+  (`tests/generation_policy.rs`, deterministic stand-in generator, not a model)
+  produced one draft per explained idea, the first within about 40 seconds of
+  speech; suppressed the repeated explanation; restarted context after a
+  12-second slide change; and called the generator 6 times for 53 utterances.
+  It also showed the trade-off of a 90-second cooldown: the second idea's
+  draft arrived about a minute after that idea began. Re-tune
+  `TOPICS_MIN_QUESTION_INTERVAL_SECONDS`, `TOPICS_MIN_WINDOW_WORDS` and
+  `TOPICS_SILENCE_BOUNDARY_SECONDS` against a rehearsal with real speech.
+- Sessions keeps the moderator's review queue: at most three visible drafts,
+  each expiring ten minutes after arrival or its latest moderator edit
+  (`SESSIONS_MAX_VISIBLE_DRAFTS`, `SESSIONS_DRAFT_TTL_SECONDS`). Dismissed and
+  expired drafts cannot be published from a stale screen.
 - A two-model comparison on consented excerpts has not been run; see the
   [model comparison worksheet](model-evaluation-worksheet.md).
 - Before enabling a model, validate or revise the provisional window/cadence
   policy; compare two providers on the same frozen excerpts; record the exact
-  model and prompt; and keep speaker/TA approval before publishing.
+  model and prompt; and keep moderator (TA) approval before publishing.

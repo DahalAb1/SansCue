@@ -3,7 +3,6 @@ use bee_connection::{
     live::MAX_LIVE_EVENT_BYTES,
     live_worker::{LiveCliWorker, LiveLineOutcome, LiveReadSummary, LiveStore},
     pipeline::Disposition,
-    store::Adoption,
 };
 use serde_json::{Value, json};
 use std::{
@@ -20,8 +19,6 @@ struct MockStore {
     seen: Arc<Mutex<HashMap<String, Uuid>>>,
     numeric_mappings: Arc<Mutex<HashMap<u64, Uuid>>>,
     observations: Arc<Mutex<Vec<Observation>>>,
-    listening: Arc<Mutex<bool>>,
-    adopted: Arc<Mutex<Option<Uuid>>>,
 }
 
 impl MockStore {
@@ -32,15 +29,7 @@ impl MockStore {
             seen: Arc::default(),
             numeric_mappings: Arc::default(),
             observations: Arc::default(),
-            listening: Arc::default(),
-            adopted: Arc::default(),
         }
-    }
-
-    fn listening(source: Uuid, conversation: Uuid) -> Self {
-        let store = Self::new(source, conversation);
-        *store.listening.lock().unwrap() = true;
-        store
     }
 }
 
@@ -52,25 +41,7 @@ impl LiveStore for MockStore {
         &self,
         source_conversation_id: Uuid,
     ) -> Result<Option<Uuid>, &'static str> {
-        let adopted = *self.adopted.lock().unwrap() == Some(source_conversation_id);
-        Ok((source_conversation_id == self.source || adopted).then_some(self.conversation))
-    }
-
-    async fn adopt_listening_source(
-        &self,
-        source_conversation_id: Uuid,
-    ) -> Result<Option<Adoption>, &'static str> {
-        let mut listening = self.listening.lock().unwrap();
-        if !*listening {
-            return Ok(None);
-        }
-        *listening = false;
-        *self.adopted.lock().unwrap() = Some(source_conversation_id);
-        Ok(Some(Adoption {
-            room_id: Uuid::new_v4(),
-            conversation_id: self.conversation,
-            revision: 1,
-        }))
+        Ok((source_conversation_id == self.source).then_some(self.conversation))
     }
 
     async fn conversation_for_numeric_source(
@@ -188,33 +159,66 @@ async fn consumes_bounded_lines_and_routes_only_the_bound_conversation() {
 }
 
 #[tokio::test]
-async fn listening_room_adopts_only_the_first_unbound_conversation() {
+async fn unselected_recordings_are_reported_without_speech_and_never_routed() {
     let valid = event();
-    let first = Uuid::parse_str(valid["conversation_uuid"].as_str().unwrap()).unwrap();
-    let store = MockStore::listening(Uuid::new_v4(), Uuid::new_v4());
+    let bound = Uuid::parse_str(valid["conversation_uuid"].as_str().unwrap()).unwrap();
+    let store = MockStore::new(bound, Uuid::new_v4());
     let worker = LiveCliWorker::new("bee", store.clone()).unwrap();
+    let report = worker.live_report(chrono::Utc::now());
+    assert_eq!(report["transport"], "reconnecting");
+    assert_eq!(report["recordings"], json!([]));
 
-    let mut later = valid.clone();
-    later["utterance"]["sample_id"] = json!("44444444-4444-4444-8444-444444444444");
-    let mut other = valid.clone();
-    other["conversation_uuid"] = json!("33333333-3333-4333-8333-333333333333");
+    // Two personal recordings arrive before the speaker selects one.
+    let first = "33333333-3333-4333-8333-333333333333";
+    let second = "55555555-5555-4555-8555-555555555555";
     let mut input = Vec::new();
-    for line in [&valid, &later, &other] {
-        input.extend_from_slice(&serde_json::to_vec(line).unwrap());
+    for (source, sample) in [
+        (first, "44444444-4444-4444-8444-444444444441"),
+        (first, "44444444-4444-4444-8444-444444444442"),
+        (second, "44444444-4444-4444-8444-444444444443"),
+    ] {
+        let mut line = valid.clone();
+        line["conversation_uuid"] = json!(source);
+        line["utterance"]["sample_id"] = json!(sample);
+        line["utterance"]["text"] = json!("A private conversation the room must never see.");
+        input.extend_from_slice(&serde_json::to_vec(&line).unwrap());
         input.push(b'\n');
     }
-
+    input.extend_from_slice(&serde_json::to_vec(&valid).unwrap());
+    input.push(b'\n');
     assert_eq!(
         consume(&worker, input).await,
         LiveReadSummary {
-            accepted: 2,
+            accepted: 1,
             duplicates: 0,
-            unbound: 1,
+            unbound: 3,
             rejected: 0,
             ignored: 0,
         }
     );
-    assert_eq!(*store.adopted.lock().unwrap(), Some(first));
+    // Only the explicitly bound recording reached the store.
+    assert_eq!(store.observations.lock().unwrap().len(), 1);
+
+    let report = worker.live_report(chrono::Utc::now());
+    let recordings = report["recordings"].as_array().unwrap();
+    assert_eq!(recordings.len(), 2);
+    let counts: HashMap<String, u64> = recordings
+        .iter()
+        .map(|r| {
+            (
+                r["source_conversation_id"].as_str().unwrap().to_owned(),
+                r["utterances"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(counts[first], 2);
+    assert_eq!(counts[second], 1);
+    assert!(!counts.contains_key(&bound.to_string()));
+    assert!(!report.to_string().contains("private conversation"));
+
+    // Recordings that fall silent stop being offered.
+    let later = chrono::Utc::now() + chrono::TimeDelta::minutes(16);
+    assert_eq!(worker.live_report(later)["recordings"], json!([]));
 }
 
 #[test]

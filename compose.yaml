@@ -39,6 +39,9 @@ services:
       SESSIONS_IDEMPOTENCY_HMAC_KEY: "${SESSIONS_IDEMPOTENCY_HMAC_KEY:-}"
       SESSIONS_BEE_SERVICE_TOKEN: "${SESSIONS_BEE_SERVICE_TOKEN:?Set SESSIONS_BEE_SERVICE_TOKEN in deploy/.env}"
       SESSIONS_TOPICS_SERVICE_TOKEN: "${SESSIONS_TOPICS_SERVICE_TOKEN:?Set SESSIONS_TOPICS_SERVICE_TOKEN in deploy/.env}"
+      # Moderator review queue: draft expiry and how many drafts are shown at once.
+      SESSIONS_DRAFT_TTL_SECONDS: "${SESSIONS_DRAFT_TTL_SECONDS:-600}"
+      SESSIONS_MAX_VISIBLE_DRAFTS: "${SESSIONS_MAX_VISIBLE_DRAFTS:-3}"
       RUST_LOG: "info"
     depends_on:
       sessions-db:
@@ -64,10 +67,13 @@ services:
       HTTP_HOST: "0.0.0.0"
       HTTP_PORT: "3002"
       TOPICS_SESSIONS_SERVICE_TOKEN: "${TOPICS_SESSIONS_SERVICE_TOKEN:-}"
-      TOPICS_MIN_QUESTION_INTERVAL_SECONDS: "20"
-      TOPICS_MIN_WINDOW_WORDS: "8"
+      # Demo starting points, not settled values; override in deploy/.env after rehearsal.
+      TOPICS_MIN_QUESTION_INTERVAL_SECONDS: "${TOPICS_MIN_QUESTION_INTERVAL_SECONDS:-90}"
+      TOPICS_MIN_WINDOW_WORDS: "${TOPICS_MIN_WINDOW_WORDS:-60}"
       TOPICS_MAX_WINDOW_SECONDS: "180"
-      TOPICS_SILENCE_BOUNDARY_SECONDS: "5"
+      TOPICS_SILENCE_BOUNDARY_SECONDS: "${TOPICS_SILENCE_BOUNDARY_SECONDS:-5}"
+      TOPICS_MAX_TRANSCRIPT_AGE_SECONDS: "45"
+      TOPICS_MIN_ATTEMPT_INTERVAL_SECONDS: "${TOPICS_MIN_ATTEMPT_INTERVAL_SECONDS:-15}"
       # Optional Claude question generation; all blank keeps the placeholder.
       # Configure one of: Anthropic API key, Bedrock API key, or Bedrock credentials file.
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"

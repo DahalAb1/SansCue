@@ -10,6 +10,7 @@ const navigation = await server.ssrLoadModule('/src/app/navigation.ts');
 const memory = await server.ssrLoadModule('/src/app/pageMemory.ts');
 const live = await server.ssrLoadModule('/src/app/live.ts');
 const feedback = await server.ssrLoadModule('/src/app/feedback.ts');
+const connection = await server.ssrLoadModule('/src/app/connection.ts');
 await server.close();
 
 const { SessionsApi, ApiError, errorMessage, paths, parseRoomState, preferState, deniesRoomRead, parseTranscript, generatorLabel } = apiModule;
@@ -454,6 +455,27 @@ test('private Q&A threads parse replies attributed to the moderator', () => {
   assert.equal(parseWrittenQuestions({ items: [{ ...thread, replies: [{ ...thread.replies[0], from: 'speaker' }] }] }), null);
   assert.equal(parseWrittenQuestions({ items: [{ ...thread, message_id: 'x' }] }), null);
   assert.equal(parseWrittenQuestions({}), null);
+});
+
+test('Bee connection states never treat a running stream as proof of delivery', () => {
+  const { connectionStatus, parseBeeConnection, ago } = connection;
+  assert.equal(paths.beeConnection(roomId), '/rooms/' + roomId + '/bee-connection');
+  const now = Date.parse('2026-10-19T12:00:00Z');
+  const bound = { binding_id: memberId, status: 'bound', has_gaps: false, connectivity_revision: 2, source_conversation_id: roomId };
+  const line = at => ({ text: 'SansCue connection check.', spoken_at: at });
+  assert.equal(connectionStatus({ ...bound, status: 'unbound' }, 'connected', undefined, now).label, 'No recording connected');
+  assert.equal(connectionStatus({ ...bound, status: 'binding' }, 'connected', undefined, now).tone, 'waiting');
+  assert.equal(connectionStatus(bound, 'not_running', line('2026-10-19T11:59:59Z'), now).label, 'Bee listener not running');
+  assert.equal(connectionStatus(bound, 'reconnecting', null, now).tone, 'warning');
+  assert.equal(connectionStatus(bound, 'connected', null, now).label, 'Connected — waiting for speech');
+  assert.deepEqual(connectionStatus(bound, 'connected', line('2026-10-19T11:59:50Z'), now), { tone: 'live', label: 'Receiving transcript', detail: 'Last speech 10 s ago.' });
+  assert.equal(connectionStatus(bound, 'connected', line('2026-10-19T11:55:00Z'), now).label, 'Connected — no recent speech');
+  assert.equal(ago('2026-10-19T11:57:00Z', now), '3 min ago');
+  const report = { transport: { state: 'connected', reported_at: '2026-10-19T12:00:00Z' }, recordings: [{ source_conversation_id: roomId, first_seen_at: '2026-10-19T11:58:00Z', last_seen_at: '2026-10-19T11:59:58Z', utterances: 4, bound_here: false }] };
+  assert.deepEqual(parseBeeConnection(report), report);
+  assert.equal(parseBeeConnection({ ...report, transport: { state: 'listening', reported_at: null } }), null);
+  assert.equal(parseBeeConnection({ ...report, recordings: [{ ...report.recordings[0], text: undefined, utterances: -1 }] }), null);
+  assert.equal(parseBeeConnection({ transport: { state: 'not_running', reported_at: null }, recordings: [] }).transport.state, 'not_running');
 });
 
 test('transcript lines and generator labels are parsed defensively', () => {

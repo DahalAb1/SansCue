@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import QRCode from 'qrcode';
 import { ApiError, api, deniesRoomRead, errorMessage, generatorLabel, isUuid, parseRoomState, parseTranscript, parseWrittenQuestions, paths } from './api';
-import type { BeeState, State, Invitation, Membership, Page, LinkResult, QuestionCandidate, TranscriptLine, WrittenQuestion } from './api';
+import type { State, Invitation, Membership, Page, LinkResult, QuestionCandidate, TranscriptLine, WrittenQuestion } from './api';
 import { followLink, roleLabel, selectedSection, sharePath, tabLabel } from './navigation';
 import { clearPublishedQuestionDraft, draftKey, keepDraft, keepInvite, keepJoin, keepPublishedQuestionDraft, keepReviewDraft, memoryDraft, memoryInvite, memoryJoin, memoryPublishedQuestionDraft, memoryReviewDraft } from './pageMemory';
 import { parseRoomEvent, reconnectDelay } from './live';
 import { chartRows, draftExpiry, earlierWordingNote, formatPercent, respondentSummary, responseOptions } from './feedback';
+import { ago, connectionStatus, parseBeeConnection } from './connection';
+import type { BeeConnection } from './connection';
+
 type LiveStatus = 'connecting' | 'connected' | 'disconnected' | 'ended';
 
 function when(value: string): string {
@@ -348,10 +351,133 @@ function QaPanel({ state, ended, revision }: { state: State; ended: boolean; rev
 
 type IssuedInvite = { id: string; expires: string; link: string | null };
 
-function beeLabel(bee: BeeState): string {
-  if (bee.status === 'bound' && !bee.source_conversation_id) return 'listening for a Bee recording';
-  if (bee.status === 'bound') return 'live';
-  return bee.status;
+const SETUP_POLL_MS = 3000;
+
+/** Polls a staff read while mounted; keeps the last good value across transient errors. */
+function usePolled<T>(path: string | null, parse: (value: unknown) => T | null): { value: T | undefined; error: string } {
+  const [value, setValue] = useState<T>();
+  const [error, setError] = useState('');
+  useEffect(() => {
+    setValue(undefined);
+    if (!path) return;
+    let current = true;
+    const load = () => api.read<unknown>(path)
+      .then(body => {
+        if (!current) return;
+        const parsed = parse(body);
+        if (parsed === null) setError('The service response was not understood.');
+        else { setValue(parsed); setError(''); }
+      })
+      .catch(reason => { if (current) setError(errorMessage(reason)); });
+    void load();
+    const timer = window.setInterval(() => void load(), SETUP_POLL_MS);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [path]);
+  return { value, error };
+}
+
+function transportLabel(connection: BeeConnection | undefined): string {
+  if (!connection) return 'checking…';
+  if (connection.transport.state === 'connected') return 'Bee stream running';
+  if (connection.transport.state === 'reconnecting') return 'restarting the Bee stream';
+  return 'not running';
+}
+
+function BeeSetup({ state, busy, run, refresh, notify, receiving }: { state: State; busy: boolean; run: (task: () => Promise<void>) => Promise<void>; refresh: () => Promise<boolean>; notify: (message: string) => void; receiving: (live: boolean) => void }) {
+  const roomId = state.room.id;
+  const ended = state.room.status === 'ended';
+  const bee = state.bee;
+  const now = useNow(5000);
+  const [manual, setManual] = useState('');
+  const { value: connection, error: connectionError } = usePolled(ended ? null : paths.beeConnection(roomId), parseBeeConnection);
+  const bound = bee?.status === 'bound' || bee?.status === 'binding';
+  const { value: lines, error: transcriptError } = usePolled(bound ? paths.transcript(roomId) : null, parseTranscript);
+  const last = lines === undefined ? undefined : lines.length === 0 ? null : lines[lines.length - 1];
+  const status = connectionStatus(bee, connection?.transport.state, last, now);
+  useEffect(() => receiving(status.tone === 'live'), [status.tone]);
+  // Pending commands settle asynchronously; an ended room no longer has live
+  // updates to announce the result, so poll until the binding settles.
+  const pending = bee?.status === 'binding' || bee?.status === 'unbinding';
+  useEffect(() => {
+    if (!pending) return;
+    const timer = window.setInterval(() => void refresh(), SETUP_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [pending]);
+  async function bind(source: string, message: string) {
+    await run(async () => {
+      await api.mutate(paths.bindBee(roomId), { source_conversation_id: source });
+      await refresh();
+      notify(message);
+    });
+  }
+  return <section aria-labelledby="bee-title">
+    <h3 id="bee-title">3. Connect your Bee recording</h3>
+    {!ended && <p class="service-note" role="status">Bee listener on the presenter’s computer: <strong>{transportLabel(connection)}</strong>{connectionError && ` · ${connectionError}`}</p>}
+    {!bee ? <p role="status">Bee binding status is unavailable.</p> : ended && bee.status === 'unbound' ? <p role="status">
+      This room has ended. No recording is connected and new speech is no longer sent to this room.
+    </p> : bee.status === 'unbound' ? <>
+      <p>Start recording on your Bee and say a few words, then choose that recording here. Only the recording you choose is sent to this room; speech from any other recording is ignored and not stored.</p>
+      {connection && connection.recordings.length > 0 ? <ul class="access-list" aria-label="Live Bee recordings">{connection.recordings.map(recording => <li key={recording.source_conversation_id}>
+        <div>
+          <strong>Recording started {new Date(recording.first_seen_at).toLocaleTimeString()}</strong>
+          <p>{recording.utterances} utterance{recording.utterances === 1 ? '' : 's'} heard · last speech {ago(recording.last_seen_at, now)}</p>
+          <code>{recording.source_conversation_id}</code>
+        </div>
+        <button type="button" class="primary" disabled={busy || ended} onClick={() => {
+          if (!window.confirm(`Send this recording’s transcript to “${state.room.title}”? No other room will receive it.`)) return;
+          void bind(recording.source_conversation_id, 'Recording connected. Say a short phrase to check delivery.');
+        }}>Use this recording</button>
+      </li>)}</ul> : <p role="status">{connection?.transport.state === 'connected'
+        ? 'No unconnected recording heard yet. Start recording on the Bee and speak; it appears here within a few seconds.'
+        : 'Recordings appear here once the Bee listener is running on the presenter’s computer.'}</p>}
+      <details>
+        <summary>Enter a Bee conversation ID instead</summary>
+        <label>Bee conversation UUID
+          <input autoComplete="off" placeholder="00000000-0000-0000-0000-000000000000" value={manual} onInput={event => setManual(event.currentTarget.value)} />
+        </label>
+        <p>Copy <code>conversation_uuid</code> from <code>bee stream --json</code> on the presenter’s computer.</p>
+        <button type="button" disabled={busy || ended || !isUuid(manual.trim())} onClick={() => void bind(manual.trim(), 'Bee conversation connection requested.').then(() => setManual(''))}>Connect this conversation</button>
+      </details>
+    </> : <>
+      <div class={'connection connection--' + status.tone} role="status">
+        <strong>{status.label}</strong>
+        <p>{status.detail}</p>
+      </div>
+      {bee.has_gaps && <p class="notice">Transcript gaps detected. Drafts skip incomplete stretches; published questions and replies are unaffected.</p>}
+      {transcriptError && <p role="status">{transcriptError}</p>}
+      {last && <figure class="evidence">
+        <blockquote>{last.text}</blockquote>
+        <figcaption>Latest speech received · {new Date(last.spoken_at).toLocaleTimeString()}</figcaption>
+      </figure>}
+      {bee.source_conversation_id && <p class="service-note">Recording <code>{bee.source_conversation_id}</code></p>}
+      <button type="button" disabled={busy || bee.status === 'unbinding'} onClick={() => {
+        if (!window.confirm('Stop sending this recording to the room?')) return;
+        void run(async () => {
+          await api.mutate(paths.unbindBee(roomId));
+          await refresh();
+          notify('Recording disconnected from this room.');
+        });
+      }}>Disconnect recording</button>
+    </>}
+    <p class="service-note">Ending the room stops sending this recording to the room. It does not stop your Bee from recording or delete what it captured.</p>
+  </section>;
+}
+
+function SetupChecklist({ state, members, joinLink, receiving }: { state: State; members?: Page<Membership>; joinLink: string | null; receiving: boolean }) {
+  const moderators = members?.items.filter(item => item.role === 'ta' && item.status === 'active').length;
+  const audience = members?.items.filter(item => item.role === 'audience' && item.status === 'active').length;
+  const steps = [
+    { done: (moderators ?? 0) > 0, label: 'Invite your moderator', detail: moderators === undefined ? 'Checking…' : moderators > 0 ? `${moderators} moderator${moderators === 1 ? '' : 's'} joined` : 'Not joined yet' },
+    { done: state.join_link_enabled === true && Boolean(joinLink), label: 'Share the audience link or QR code', detail: audience === undefined ? '' : `${audience} audience member${audience === 1 ? '' : 's'} joined` },
+    { done: state.bee?.status === 'bound', label: 'Connect your Bee recording', detail: state.bee?.status === 'bound' ? 'Connected' : state.bee?.status === 'binding' ? 'Connecting…' : 'Not connected' },
+    { done: receiving, label: 'Check incoming speech', detail: receiving ? 'Speech is arriving' : 'Say a short phrase and watch for it below' },
+  ];
+  return <ol class="setup-steps" aria-label="Room setup">
+    {steps.map(step => <li key={step.label} class={step.done ? 'done' : undefined}>
+      <span class="setup-mark" aria-hidden="true">{step.done ? '✓' : ''}</span>
+      <span><strong>{step.label}</strong>{step.detail && <small> · {step.detail}</small>}<span class="visually-hidden">{step.done ? ' (done)' : ' (to do)'}</span></span>
+    </li>)}
+  </ol>;
 }
 
 function joinStatus(state: State): string {
@@ -368,7 +494,7 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
   const [members, setMembers] = useState<Page<Membership>>();
   const [joinLink, setJoinLink] = useState<string | null>(memoryJoin(roomId));
   const [issued, setIssued] = useState<IssuedInvite | undefined>(memoryInvite(roomId));
-  const [beeConversation, setBeeConversation] = useState('');
+  const [receiving, setReceiving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -428,74 +554,8 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
     return safe;
   }
 
-  return <section aria-labelledby="access-title" aria-busy={busy}>
-    <h2 id="access-title">Room access</h2>
-    {error && <p role="alert" class="error">{error}</p>}
-    {listError && <p role="alert" class="error">{listError}</p>}
-    {notice && <p role="status">{notice}</p>}
-    <button type="button" disabled={busy} onClick={() => void run(load)}>Refresh access lists</button>
-    <h3>Bee live transcript</h3>
-    {!state.bee ? <p role="status">Bee binding status is unavailable.</p> : <>
-      <p>Status: <strong>{beeLabel(state.bee)}</strong>{state.bee.has_gaps ? ' · transcript gaps detected' : ''}</p>
-      {state.bee.status === 'unbound' ? <>
-        <p>Click Start listening, then start recording on your Bee or Apple Watch. SansCue connects the next new Bee conversation to this room.</p>
-        <button type="button" disabled={busy || ended} onClick={() => void run(async () => {
-          await api.mutate(paths.bindBee(roomId), { listen: true });
-          await refresh();
-          setNotice('Listening for your next Bee recording.');
-        })}>Start listening</button>
-        <details>
-          <summary>Connect a specific Bee conversation</summary>
-          <label>Bee conversation UUID
-            <input
-              autoComplete="off"
-              placeholder="00000000-0000-0000-0000-000000000000"
-              value={beeConversation}
-              onInput={event => setBeeConversation(event.currentTarget.value)}
-            />
-          </label>
-          <p>Use this when several rooms listen at once. Copy <code>conversation_uuid</code> from <code>bee stream --json</code>.</p>
-          <button type="button" disabled={busy || ended || !isUuid(beeConversation.trim())} onClick={() => void run(async () => {
-            await api.mutate(paths.bindBee(roomId), { source_conversation_id: beeConversation.trim() });
-            setBeeConversation('');
-            await refresh();
-            setNotice('Bee conversation binding requested.');
-          })}>Bind Bee conversation</button>
-        </details>
-      </> : <button type="button" disabled={busy || state.bee.status === 'unbinding'} onClick={() => {
-        if (!window.confirm('Stop routing this Bee conversation to the room?')) return;
-        void run(async () => {
-          await api.mutate(paths.unbindBee(roomId));
-          await refresh();
-          setNotice('Bee conversation unbinding requested.');
-        });
-      }}>{state.bee.status === 'bound' && !state.bee.source_conversation_id ? 'Stop listening' : 'Unbind Bee conversation'}</button>}
-    </>}
-    <h3>Audience link</h3>
-    <p>{joinStatus(state)} Existing members keep their access.</p>
-    {!ended && joinLink && state.join_link_enabled === true && <ShareLink value={joinLink} kind="join" />}
-    {!ended && state.join_link_enabled === true && !joinLink && <p>The current URL cannot be retrieved. Rotate to issue a new one; the old URL will stop working.</p>}
-    <div class="actions">
-      <button type="button" disabled={busy || ended} onClick={() => {
-        if (!window.confirm('Issue a new audience link? The previous link will stop working.')) return;
-        void run(async () => {
-          const result = await api.mutate<LinkResult>(paths.rotateJoin(roomId));
-          const safe = rememberJoin(result.join_url ?? null);
-          setNotice(result.link_unavailable || !safe ? 'Rotation was recovered, but its link is unavailable. Rotate again to get a new link.' : 'New audience link issued.');
-          await refresh();
-        });
-      }}>Rotate audience link</button>
-      <button type="button" disabled={busy || ended || state.join_link_enabled !== true} onClick={() => {
-        if (!window.confirm('Disable new audience joins? Existing memberships stay active.')) return;
-        void run(async () => {
-          await api.mutate(paths.revokeJoin(roomId));
-          rememberJoin(null);
-          await refresh();
-          setNotice('Audience link revoked.');
-        });
-      }}>Revoke audience link</button>
-    </div>
-    <h3>Moderator invitations</h3>
+  const moderatorSection = <>
+    <h3>1. Invite your moderator</h3>
     <p>Invite the person who will review drafts, publish questions and reply to the audience. Speakers cannot publish questions.</p>
     <button type="button" disabled={busy || ended} onClick={() => void run(async () => {
       const result = await api.mutate<LinkResult & { invitation_id?: string; expires_at?: string }>(paths.invitations(roomId), {}, 201);
@@ -532,6 +592,41 @@ function Access({ state, refresh, loseAccess }: { state: State; refresh: () => P
         setInvitations({ ...next, items: [...invitations.items, ...next.items] });
       })}>More invitations</button>}
     </>}
+  </>;
+
+  return <section aria-labelledby="access-title" aria-busy={busy}>
+    <h2 id="access-title">Room setup and access</h2>
+    {error && <p role="alert" class="error">{error}</p>}
+    {listError && <p role="alert" class="error">{listError}</p>}
+    {notice && <p role="status">{notice}</p>}
+    {!ended && <SetupChecklist state={state} members={members} joinLink={joinLink} receiving={receiving} />}
+    <button type="button" disabled={busy} onClick={() => void run(load)}>Refresh access lists</button>
+    {moderatorSection}
+    <h3>2. Share the audience link</h3>
+    <p>{joinStatus(state)} Existing members keep their access.</p>
+    {!ended && joinLink && state.join_link_enabled === true && <ShareLink value={joinLink} kind="join" />}
+    {!ended && state.join_link_enabled === true && !joinLink && <p>The current URL cannot be retrieved. Rotate to issue a new one; the old URL will stop working.</p>}
+    <div class="actions">
+      <button type="button" disabled={busy || ended} onClick={() => {
+        if (!window.confirm('Issue a new audience link? The previous link will stop working.')) return;
+        void run(async () => {
+          const result = await api.mutate<LinkResult>(paths.rotateJoin(roomId));
+          const safe = rememberJoin(result.join_url ?? null);
+          setNotice(result.link_unavailable || !safe ? 'Rotation was recovered, but its link is unavailable. Rotate again to get a new link.' : 'New audience link issued.');
+          await refresh();
+        });
+      }}>Rotate audience link</button>
+      <button type="button" disabled={busy || ended || state.join_link_enabled !== true} onClick={() => {
+        if (!window.confirm('Disable new audience joins? Existing memberships stay active.')) return;
+        void run(async () => {
+          await api.mutate(paths.revokeJoin(roomId));
+          rememberJoin(null);
+          await refresh();
+          setNotice('Audience link revoked.');
+        });
+      }}>Revoke audience link</button>
+    </div>
+    <BeeSetup state={state} busy={busy} run={run} refresh={refresh} notify={setNotice} receiving={setReceiving} />
     <h3>Memberships</h3>
     <p>Room-local aliases, not personal identities. Last activity is not a presence guarantee.</p>
     {!members ? <p role="status">{listError ? 'Membership list not loaded.' : 'Loading memberships…'}</p> : <>

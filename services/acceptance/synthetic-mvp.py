@@ -68,7 +68,9 @@ def service_environments(base, credential, bee_token, topics_token, epoch, key):
                         "SESSIONS_INTERNAL_URL": INTERNAL,
                         "SESSIONS_TOPICS_SERVICE_TOKEN": topics_token,
                         # The fixture's passages are two or three words long.
-                        "TOPICS_MIN_WINDOW_WORDS": "1"}
+                        "TOPICS_MIN_WINDOW_WORDS": "1",
+                        # The fixture carries fixed historical receive times.
+                        "TOPICS_MAX_TRANSCRIPT_AGE_SECONDS": "3153600000"}
     topics_env.pop("ANTHROPIC_API_KEY", None)
     worker_env = base | {"BEE_DATABASE_URL": base["BEE_DATABASE_URL"],
                          "SESSIONS_INTERNAL_URL": INTERNAL,
@@ -204,6 +206,11 @@ def main():
         assert joined["state"]["membership"]["role"] == "audience"
         other_joined = mutate(other_audience, other_csrf, "POST", join, {})
         assert other_joined["state"]["membership"]["role"] == "audience"
+        invitation = mutate(speaker, speaker_csrf, "POST", f"/rooms/{room}/invitations", {}, (201,))
+        moderator, moderator_csrf = client_boot()
+        redeemed = mutate(moderator, moderator_csrf, "POST",
+                          "/invitations/" + invitation["invite_url"].removeprefix("/invite/") + "/redeem", {})
+        assert redeemed["state"]["membership"]["role"] == "ta"
 
         conversation = str(uuid.uuid4())
         bind = mutate(speaker, speaker_csrf, "POST", f"/rooms/{room}/bee/bind",
@@ -262,14 +269,23 @@ def main():
 
         # Candidate/evidence are staff-only; audience sees neither before publication.
         assert request(audience, "GET", f"/rooms/{room}/state")["question_candidates"] is None
-        request(audience, "POST", f"/rooms/{room}/questions/{candidate['candidate_id']}/publish", {}, {
-            "X-CSRF-Token": audience_csrf, "Idempotency-Key": str(uuid.uuid4()),
-        }, (403,))
-        published = mutate(speaker, speaker_csrf, "POST",
-                           f"/rooms/{room}/questions/{candidate['candidate_id']}/publish", {})
+        publish_path = f"/rooms/{room}/questions/{candidate['candidate_id']}/publish"
+        for client, csrf in ((audience, audience_csrf), (speaker, speaker_csrf)):
+            request(client, "POST", publish_path, {}, {
+                "X-CSRF-Token": csrf, "Idempotency-Key": str(uuid.uuid4()),
+            }, (403,))
+        # Only the moderator edits and publishes; the edit survives a fresh read.
+        edited = "How clear is the synthetic opening?"
+        mutate(moderator, moderator_csrf, "POST",
+               f"/rooms/{room}/questions/{candidate['candidate_id']}/draft", {"text": edited})
+        reviewed = request(moderator, "GET", f"/rooms/{room}/state")["question_candidates"]
+        assert any(c["candidate_id"] == candidate["candidate_id"] and c["text"] == edited and c["edited"]
+                   for c in reviewed)
+        published = mutate(moderator, moderator_csrf, "POST", publish_path, {})
         question_id = published["question_id"]
         audience_state = request(audience, "GET", f"/rooms/{room}/state")
         assert audience_state["active_question"]["id"] == question_id
+        assert audience_state["active_question"]["text"] == edited
         assert "evidence" not in audience_state["active_question"]
 
         response_path = f"/rooms/{room}/questions/{question_id}/response"
@@ -286,11 +302,30 @@ def main():
         assert other_qa["items"] == [], "another audience member must not see private written Q&A"
         qa = request(speaker, "GET", f"/rooms/{room}/qa")
         assert any(item["body"] == "Synthetic audience question" for item in qa["items"])
+        reply = "Synthetic moderator reply"
+        reply_path = f"/rooms/{room}/qa/{audience_qa['items'][0]['message_id']}/replies"
+        request(speaker, "POST", reply_path, {"body": reply}, {
+            "X-CSRF-Token": speaker_csrf, "Idempotency-Key": str(uuid.uuid4()),
+        }, (403,))
+        mutate(moderator, moderator_csrf, "POST", reply_path, {"body": reply})
+        thread = request(audience, "GET", f"/rooms/{room}/qa")["items"][0]
+        assert [r["body"] for r in thread["replies"]] == [reply] and thread["replies"][0]["from"] == "moderator"
+        assert reply not in json.dumps(request(other_audience, "GET", f"/rooms/{room}/qa")), \
+            "a moderator reply must reach only its question's author and staff"
         final = request(speaker, "GET", f"/rooms/{room}/state")
         assert final["dashboard"]["respondents"] == 1
         assert final["dashboard"]["counts"]["clear"] == 1
         assert final["dashboard"]["percentages"]["clear"] == 100.0
         assert request(audience, "GET", f"/rooms/{room}/state")["dashboard"] is None
+        # Synthetic replay is not a live Bee transport, and the setup view says so.
+        connection = request(speaker, "GET", f"/rooms/{room}/bee-connection")
+        assert connection["transport"]["state"] == "not_running" and connection["recordings"] == []
+        mutate(speaker, speaker_csrf, "POST", f"/rooms/{room}/end", {})
+        wait_until(lambda: request(speaker, "GET", f"/rooms/{room}/state")["bee"]["status"] == "unbound",
+                   "ending the room to stop transcript routing")
+        request(moderator, "POST", publish_path, {}, {
+            "X-CSRF-Token": moderator_csrf, "Idempotency-Key": str(uuid.uuid4()),
+        }, (409,))
     finally:
         for proc in reversed(PROCS):
             if proc.poll() is None:
@@ -303,7 +338,7 @@ def main():
                 proc.wait()
         if any(proc.poll() is None for proc in PROCS):
             raise RuntimeError("cleanup failed: a directly started service process is still running")
-    print("PASS: synthetic replay -> idempotent event/candidate delivery -> staff-only preview -> publication -> audience rating/Q&A -> staff counts and audience privacy")
+    print("PASS: synthetic replay -> idempotent event/candidate delivery -> staff-only preview -> moderator edit and publication -> audience rating/Q&A -> private moderator reply -> staff counts and audience privacy -> room end unbinds Bee")
 
 
 if __name__ == "__main__":

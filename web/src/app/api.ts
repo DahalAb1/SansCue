@@ -90,6 +90,7 @@ export const paths = {
   revokeJoin: (id: string) => '/rooms/' + segment(id) + '/join-link/revoke',
   end: (id: string) => '/rooms/' + segment(id) + '/end',
   bindBee: (id: string) => '/rooms/' + segment(id) + '/bee/bind',
+  beeConnection: (id: string) => '/rooms/' + segment(id) + '/bee-connection',
   unbindBee: (id: string) => '/rooms/' + segment(id) + '/bee/unbind',
   qa: (id: string) => '/rooms/' + segment(id) + '/qa',
   transcript: (id: string) => '/rooms/' + segment(id) + '/transcript',
