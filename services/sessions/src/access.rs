@@ -205,6 +205,7 @@ pub fn router(access: Access) -> Router {
         .route("/rooms/{room}/end", post(mutate))
         .route("/rooms/{room}/bee/bind", post(mutate))
         .route("/rooms/{room}/bee/unbind", post(mutate))
+        .route("/rooms/{room}/bee-connection", get(read))
         .fallback(|| async { missing() })
         .with_state(access)
 }
@@ -573,10 +574,7 @@ fn check_shape(path: &str, body: &Value) -> Result<()> {
         };
     }
     if path.ends_with("/bee/bind") {
-        // `{"listen": true}` waits for the next live Bee conversation instead of naming one.
-        if object.len() == 1 && body.get("listen") == Some(&Value::Bool(true)) {
-            return Ok(());
-        }
+        // A live recording is always named; the room never claims whichever arrives next.
         let allowed = ["conversation_id", "source_conversation_id"];
         let supplied_internal = body.get("conversation_id").is_some_and(Value::is_string);
         let supplied_source = body
@@ -1068,8 +1066,7 @@ async fn bind_bee(
                 .ok_or_else(invalid)
         })
         .transpose()?;
-    let listen = body.get("listen") == Some(&Value::Bool(true));
-    if body.get("conversation_id").is_none() && source.is_none() && !listen {
+    if body.get("conversation_id").is_none() && source.is_none() {
         return Err(invalid());
     }
     if let Some(old) =
@@ -1667,6 +1664,16 @@ async fn end_room(tx: &mut Transaction<'_, Postgres>, room_id: Uuid) -> Result<V
         .execute(&mut **tx)
         .await?;
         change(tx, room_id, false).await?;
+        // Stop routing transcript into the ended room. This does not stop the
+        // Bee device recording or delete anything already captured.
+        let binding: Option<String> =
+            sqlx::query_scalar("SELECT status FROM bee_room_bindings WHERE room_id=$1 FOR UPDATE")
+                .bind(room_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+        if binding.is_some_and(|status| matches!(status.as_str(), "binding" | "bound")) {
+            unbind_bee(tx, room_id).await?;
+        }
     }
     let revision: i64 = room(tx, room_id).await?.get("sequence");
     Ok(json!({
@@ -1825,6 +1832,9 @@ async fn read(
             StatusCode::OK,
             room_transcript(&access.security, room_id).await?,
         ));
+    } else if p[2] == "bee-connection" {
+        require_speaker(&member)?;
+        bee_connection(&mut tx, room_id).await?
     } else if p[2] == "memberships" || p[2] == "invitations" {
         require_speaker(&member)?;
         let (limit, after) = list_window(uri.query())?;
@@ -2009,6 +2019,7 @@ pub fn internal_router(access: Access) -> Router {
             post(bee_command_ack),
         )
         .route("/internal/v1/bee/rooms/{room}/status", post(bee_status))
+        .route("/internal/v1/bee/live", post(bee_live_report))
         .route("/internal/v1/topics/candidates", post(topics_candidate))
         .fallback(|| async { missing() })
         .with_state(access)
@@ -2372,20 +2383,100 @@ async fn bee_status(
             json!({"accepted":true,"duplicate":true}),
         ));
     }
-    if valid_bind
-        && let Some(source) = status["source_conversation_id"]
-            .as_str()
-            .and_then(|source| Uuid::parse_str(source).ok())
-            .filter(|source| !source.is_nil())
-    {
-        // A listening binding learns its Bee conversation when the worker adopts one.
-        sqlx::query("UPDATE bee_room_bindings SET source_conversation_id=$2,updated_at=now() WHERE room_id=$1 AND source_conversation_id IS NULL AND NOT EXISTS (SELECT 1 FROM bee_room_bindings other WHERE other.room_id<>$1 AND other.status<>'unbound' AND lower(other.source_conversation_id)=lower($2))")
-            .bind(room).bind(source.to_string()).execute(&mut *tx).await?;
-    }
     sqlx::query("INSERT INTO bee_room_status(room_id,status) VALUES($1,$2) ON CONFLICT(room_id) DO UPDATE SET status=EXCLUDED.status,updated_at=now()").bind(room).bind(status).execute(&mut *tx).await?;
     change(&mut tx, room, false).await?;
     tx.commit().await?;
     Ok(reply(StatusCode::OK, json!({"accepted":true})))
+}
+
+const MAX_REPORTED_RECORDINGS: usize = 10;
+
+/// Accepts the live worker's heartbeat. Only recording identifiers, times and
+/// utterance counts are kept; any other field is rejected rather than stored.
+async fn bee_live_report(
+    State(access): State<Access>,
+    headers: HeaderMap,
+    Json(report): Json<Value>,
+) -> Result<Response> {
+    require_bee(&headers, &access)?;
+    let object = report.as_object().ok_or_else(invalid)?;
+    let transport = report["transport"].as_str().ok_or_else(invalid)?;
+    let recordings = report["recordings"].as_array().ok_or_else(invalid)?;
+    if object.len() != 2
+        || !matches!(transport, "connected" | "reconnecting")
+        || recordings.len() > MAX_REPORTED_RECORDINGS
+    {
+        return Err(invalid());
+    }
+    let time = |value: &Value| {
+        value
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.with_timezone(&Utc))
+            .ok_or_else(invalid)
+    };
+    let mut normalized = Vec::with_capacity(recordings.len());
+    for recording in recordings {
+        if recording.as_object().is_none_or(|o| o.len() != 4) {
+            return Err(invalid());
+        }
+        let source = parse_evidence_uuid(&recording["source_conversation_id"])?;
+        let utterances = recording["utterances"]
+            .as_u64()
+            .filter(|n| *n <= 1_000_000_000)
+            .ok_or_else(invalid)?;
+        let (first, last) = (
+            time(&recording["first_seen_at"])?,
+            time(&recording["last_seen_at"])?,
+        );
+        if source.is_nil() || last < first {
+            return Err(invalid());
+        }
+        normalized.push(json!({"source_conversation_id":source,"first_seen_at":first,"last_seen_at":last,"utterances":utterances}));
+    }
+    sqlx::query("INSERT INTO bee_live_report(id,transport,recordings,reported_at) VALUES(true,$1,$2,now()) ON CONFLICT(id) DO UPDATE SET transport=EXCLUDED.transport,recordings=EXCLUDED.recordings,reported_at=now()")
+        .bind(transport).bind(Value::Array(normalized)).execute(&access.pool).await?;
+    Ok(reply(StatusCode::OK, json!({"accepted":true})))
+}
+
+/// The speaker's view of live Bee delivery for room setup. A heartbeat older
+/// than this means the host worker stopped; its recordings are then withheld.
+const LIVE_REPORT_FRESH_SECONDS: f64 = 20.0;
+
+async fn bee_connection(tx: &mut Transaction<'_, Postgres>, room_id: Uuid) -> Result<Value> {
+    let report = sqlx::query("SELECT transport,recordings,reported_at,reported_at>now()-make_interval(secs=>$1) AS fresh FROM bee_live_report WHERE id")
+        .bind(LIVE_REPORT_FRESH_SECONDS).fetch_optional(&mut **tx).await?;
+    let Some(report) = report else {
+        return Ok(json!({"transport":{"state":"not_running","reported_at":null},"recordings":[]}));
+    };
+    let reported_at: DateTime<Utc> = report.get("reported_at");
+    if !report.get::<bool, _>("fresh") {
+        return Ok(
+            json!({"transport":{"state":"not_running","reported_at":reported_at},"recordings":[]}),
+        );
+    }
+    let claimed: Vec<(String, Uuid)> = sqlx::query_as("SELECT lower(source_conversation_id),room_id FROM bee_room_bindings WHERE status<>'unbound' AND source_conversation_id IS NOT NULL")
+        .fetch_all(&mut **tx).await?;
+    let recordings = report
+        .get::<Value, _>("recordings")
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|mut recording| {
+            let source = recording["source_conversation_id"].as_str()?.to_lowercase();
+            match claimed.iter().find(|(claimed, _)| *claimed == source) {
+                Some((_, room)) if *room != room_id => None,
+                found => {
+                    recording["bound_here"] = json!(found.is_some());
+                    Some(recording)
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"transport":{"state":report.get::<String,_>("transport"),"reported_at":reported_at},"recordings":recordings}),
+    )
 }
 
 async fn internal_ready(State(access): State<Access>, headers: HeaderMap) -> Result<Response> {

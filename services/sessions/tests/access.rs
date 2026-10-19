@@ -2273,37 +2273,167 @@ async fn speaker_selects_a_reported_recording_and_ending_the_room_unbinds_it() {
     });
     let browser = boot(&app).await;
     login(&app, &browser).await;
-    let (_, created) = call(&app, &browser, "POST", "/rooms", json!({"title":"Listen"})).await;
-    let room = created["state"]["room"]["id"].as_str().unwrap();
-    let (status, rejected) = call(
-        &app,
-        &browser,
-        "POST",
-        &format!("/rooms/{room}/bee/bind"),
-        json!({"listen":false}),
-    )
-    .await;
-    assert_eq!(status, 400, "{rejected}");
+    let (_, created) = call(&app, &browser, "POST", "/rooms", json!({"title":"Talk"})).await;
+    let room = created["state"]["room"]["id"].as_str().unwrap().to_owned();
+    let room_id = Uuid::parse_str(&room).unwrap();
+    let root = format!("/rooms/{room}");
+    let moderator = invite_moderator(&app, &browser, &root).await;
+    let audience = boot(&app).await;
+    assert_eq!(
+        call(
+            &app,
+            &audience,
+            "POST",
+            created["join_url"].as_str().unwrap(),
+            json!({})
+        )
+        .await
+        .0,
+        200
+    );
+
+    // A room can no longer claim whichever recording happens to arrive next.
+    for body in [json!({"listen":true}), json!({"listen":false}), json!({})] {
+        assert_eq!(
+            call(&app, &browser, "POST", &format!("{root}/bee/bind"), body)
+                .await
+                .0,
+            400
+        );
+    }
+
+    let connection = format!("{root}/bee-connection");
+    let (status, idle) = call(&app, &browser, "GET", &connection, json!({})).await;
+    assert_eq!(status, 200);
+    assert_eq!(idle["transport"]["state"], "not_running");
+    assert_eq!(idle["recordings"], json!([]));
+    for denied in [&moderator, &audience] {
+        assert_eq!(
+            call(&app, denied, "GET", &connection, json!({})).await.0,
+            403
+        );
+    }
+
+    let talk = Uuid::new_v4();
+    let personal = Uuid::new_v4();
+    let recording = |id: Uuid, utterances: u64| json!({"source_conversation_id":id,"first_seen_at":"2026-10-19T12:00:00Z","last_seen_at":"2026-10-19T12:01:00Z","utterances":utterances});
+    let report =
+        json!({"transport":"connected","recordings":[recording(talk, 4), recording(personal, 9)]});
+    let forged = private
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/v1/bee/live")
+                .header("authorization", "Bearer not-the-bee-token")
+                .header("content-type", "application/json")
+                .body(Body::from(report.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forged.status().as_u16(), 401);
+    let mut with_text = recording(talk, 4);
+    with_text["text"] = json!("private speech");
+    for bad in [
+        json!({"transport":"connected","recordings":[with_text]}),
+        json!({"transport":"listening","recordings":[]}),
+        json!({"transport":"connected","recordings":[],"extra":true}),
+        json!({"transport":"connected","recordings":(0..11).map(|_| recording(Uuid::new_v4(), 1)).collect::<Vec<_>>()}),
+    ] {
+        assert_eq!(
+            private_json(&private, "POST", "/internal/v1/bee/live", bad)
+                .await
+                .0,
+            400
+        );
+    }
+    assert_eq!(
+        private_json(&private, "POST", "/internal/v1/bee/live", report.clone())
+            .await
+            .0,
+        200
+    );
+    let live = call(&app, &browser, "GET", &connection, json!({})).await.1;
+    assert_eq!(live["transport"]["state"], "connected");
+    let listed: Vec<&str> = live["recordings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["source_conversation_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, [talk.to_string(), personal.to_string()]);
+
+    // The speaker confirms the talk recording; another room then cannot take or see it.
     let (status, bound) = call(
         &app,
         &browser,
         "POST",
-        &format!("/rooms/{room}/bee/bind"),
-        json!({"listen":true}),
+        &format!("{root}/bee/bind"),
+        json!({"source_conversation_id":talk}),
     )
     .await;
     assert_eq!(status, 200);
-    let conversation = bound["conversation_id"].as_str().unwrap().to_owned();
-    let revision = bound["revision"].as_i64().unwrap();
     let (_, list) = private_json(&private, "GET", "/internal/v1/bee/commands", json!(null)).await;
-    let command = &list["commands"][0];
-    assert_eq!(command["payload"]["source_conversation_id"], Value::Null);
-
-    // The worker reports the binding, then later the conversation it adopted.
-    let listening = json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":revision,"source_conversation_id":null});
-    let status_path = format!("/internal/v1/bee/rooms/{room}/status");
+    let command = list["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["room_id"] == room)
+        .unwrap()
+        .clone();
     assert_eq!(
-        private_json(&private, "POST", &status_path, listening)
+        command["payload"]["source_conversation_id"],
+        talk.to_string()
+    );
+    let (_, other) = call(&app, &browser, "POST", "/rooms", json!({"title":"Other"})).await;
+    let other = other["state"]["room"]["id"].as_str().unwrap().to_owned();
+    let (status, duplicate) = call(
+        &app,
+        &browser,
+        "POST",
+        &format!("/rooms/{other}/bee/bind"),
+        json!({"source_conversation_id":talk}),
+    )
+    .await;
+    assert_eq!(
+        (status, duplicate["code"].as_str()),
+        (409, Some("bee_source_already_bound"))
+    );
+    let elsewhere = call(
+        &app,
+        &browser,
+        "GET",
+        &format!("/rooms/{other}/bee-connection"),
+        json!({}),
+    )
+    .await
+    .1;
+    let elsewhere: Vec<&str> = elsewhere["recordings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["source_conversation_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(elsewhere, [personal.to_string()]);
+    let here = call(&app, &browser, "GET", &connection, json!({})).await.1;
+    assert_eq!(here["recordings"][0]["bound_here"], true);
+    assert_eq!(here["recordings"][1]["bound_here"], false);
+
+    // A stopped host worker is reported as not running, and its stale list is withheld.
+    sqlx::query("UPDATE bee_live_report SET reported_at=now()-interval '1 minute'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let stale = call(&app, &browser, "GET", &connection, json!({})).await.1;
+    assert_eq!(stale["transport"]["state"], "not_running");
+    assert_eq!(stale["recordings"], json!([]));
+
+    // Apply the bind, then end the room: further transcript routing is withdrawn.
+    let status_path = format!("/internal/v1/bee/rooms/{room}/status");
+    let summary = json!({"binding_id":bound["conversation_id"],"status":"bound","has_gaps":false,"connectivity_revision":bound["revision"],"source_conversation_id":talk});
+    assert_eq!(
+        private_json(&private, "POST", &status_path, summary)
             .await
             .0,
         200
@@ -2316,38 +2446,32 @@ async fn speaker_selects_a_reported_recording_and_ending_the_room_unbinds_it() {
         private_json(&private, "POST", &ack, json!(null)).await.0,
         200
     );
-    let source = Uuid::new_v4();
-    let adopted = json!({"binding_id":conversation,"status":"bound","has_gaps":false,"connectivity_revision":revision,"source_conversation_id":source});
+    let state = call(&app, &browser, "GET", &format!("{root}/state"), json!({}))
+        .await
+        .1;
+    assert_eq!(state["bee"]["status"], "bound");
+    assert_eq!(state["bee"]["source_conversation_id"], talk.to_string());
     assert_eq!(
-        private_json(&private, "POST", &status_path, adopted)
+        call(&app, &browser, "POST", &format!("{root}/end"), json!({}))
             .await
             .0,
         200
     );
-
-    let state = call(
-        &app,
-        &browser,
-        "GET",
-        &format!("/rooms/{room}/state"),
-        json!({}),
-    )
-    .await
-    .1;
-    assert_eq!(state["bee"]["status"], "bound");
-    assert_eq!(state["bee"]["source_conversation_id"], source.to_string());
-    let (_, other) = call(&app, &browser, "POST", "/rooms", json!({"title":"Other"})).await;
-    let other = other["state"]["room"]["id"].as_str().unwrap();
-    let (status, duplicate) = call(
-        &app,
-        &browser,
-        "POST",
-        &format!("/rooms/{other}/bee/bind"),
-        json!({"source_conversation_id":source}),
-    )
-    .await;
-    assert_eq!(status, 409);
-    assert_eq!(duplicate["code"], "bee_source_already_bound");
+    let binding: String =
+        sqlx::query_scalar("SELECT status FROM bee_room_bindings WHERE room_id=$1")
+            .bind(room_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(binding, "unbinding");
+    let (_, list) = private_json(&private, "GET", "/internal/v1/bee/commands", json!(null)).await;
+    assert!(
+        list["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["room_id"] == room && c["type"] == "unbind")
+    );
     finish(pool, admin, schema).await;
 }
 
