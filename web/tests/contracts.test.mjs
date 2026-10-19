@@ -402,6 +402,60 @@ test('speaker chart rows use respondent shares and stay empty without responses'
   assert.equal(chartRows({ ...mixed, percentages: { ...mixed.percentages, clear: 140 } })[0].width, 100);
 });
 
+test('moderator review paths, draft memory and wording notes', () => {
+  const { draftExpiry, earlierWordingNote } = feedback;
+  assert.equal(paths.saveDraft(roomId, memberId), '/rooms/' + roomId + '/questions/' + memberId + '/draft');
+  assert.equal(paths.dismissDraft(roomId, memberId), '/rooms/' + roomId + '/questions/' + memberId + '/dismiss');
+  assert.equal(paths.reply(roomId, memberId), '/rooms/' + roomId + '/qa/' + memberId + '/replies');
+  assert.equal(navigation.roleLabel('ta'), 'Moderator (TA)');
+  const { keepReviewDraft, memoryReviewDraft } = memory;
+  const key = draftKey(roomId, memberId, 'review-draft\n' + memberId);
+  keepReviewDraft(key, 'How clear is X?', 'How clear is X now?');
+  assert.equal(memoryReviewDraft(key, 'How clear is X?'), 'How clear is X now?');
+  // Another moderator saved new wording: the stale local edit is not resurrected.
+  assert.equal(memoryReviewDraft(key, 'Saved elsewhere'), 'Saved elsewhere');
+  keepReviewDraft(key, 'How clear is X?', 'How clear is X?');
+  assert.equal(memoryReviewDraft(key, 'How clear is X?'), 'How clear is X?');
+  const now = Date.parse('2026-10-19T12:00:00Z');
+  assert.deepEqual(draftExpiry('2026-10-19T12:04:01Z', now), { expired: false, label: 'Expires in 5 min' });
+  assert.deepEqual(draftExpiry('2026-10-19T11:59:59Z', now), { expired: true, label: 'Expired' });
+  assert.deepEqual(draftExpiry(undefined, now), { expired: false, label: '' });
+  const dashboard = { respondents: 4, counts: { clear: 4, partly_clear: 0, need_help: 0 }, percentages: { clear: 100, partly_clear: 0, need_help: 0 }, earlier_version_respondents: 3 };
+  assert.equal(earlierWordingNote(dashboard, 2), '3 of 4 responses were given before the wording changed to version 2.');
+  assert.equal(earlierWordingNote({ ...dashboard, earlier_version_respondents: 0 }, 2), null);
+  assert.equal(earlierWordingNote(dashboard, 1), null);
+  assert.match(errorMessage(new ApiError(410, 'draft_expired')), /expired/);
+  assert.match(errorMessage(new ApiError(409, 'draft_dismissed')), /dismissed/);
+});
+
+test('review queue state accepts moderator fields and rejects malformed ones', () => {
+  const candidate = {
+    candidate_id: memberId, event_id: memberId, text: 'How clear is the edited idea?', original_text: 'How clear is the idea?',
+    edited: true, edited_at: '2026-10-19T12:00:00Z', generator_version: 'stub-v1', published: false,
+    created_at: '2026-10-19T11:59:00Z', expires_at: '2026-10-19T12:10:00Z',
+    evidence: { conversation_id: roomId, ingest_ordinal: 1, received_at: '2026-10-19T11:59:00Z', excerpt: 'the idea' },
+  };
+  assert.equal(parseRoomState({ ...state('ta'), question_candidates: [candidate] }, roomId)?.question_candidates[0].edited, true);
+  assert.equal(parseRoomState({ ...state('ta'), question_candidates: [{ ...candidate, edited: 'yes' }] }, roomId), null);
+  assert.equal(parseRoomState({ ...state('ta'), question_candidates: [{ ...candidate, expires_at: 'later' }] }, roomId), null);
+  const dashboard = { respondents: 1, counts: { clear: 1, partly_clear: 0, need_help: 0 }, percentages: { clear: 100, partly_clear: 0, need_help: 0 } };
+  assert.equal(parseRoomState({ ...state('speaker'), dashboard: { ...dashboard, earlier_version_respondents: -1 } }, roomId), null);
+  assert.equal(parseRoomState({ ...state('speaker'), dashboard: { ...dashboard, earlier_version_respondents: 1 } }, roomId)?.dashboard.earlier_version_respondents, 1);
+  assert.equal(parseRoomState({ ...state('audience'), my_response_version: 0 }, roomId), null);
+  assert.equal(parseRoomState({ ...state('audience'), my_response_version: 2 }, roomId)?.my_response_version, 2);
+});
+
+test('private Q&A threads parse replies attributed to the moderator', () => {
+  const { parseWrittenQuestions } = apiModule;
+  const thread = { message_id: memberId, question_id: null, body: 'Can you repeat that?', created_at: '2026-10-19T12:00:00Z', replies: [{ reply_id: roomId, body: 'Yes, next slide.', created_at: '2026-10-19T12:01:00Z', from: 'moderator' }] };
+  assert.deepEqual(parseWrittenQuestions({ items: [thread] }), [thread]);
+  assert.deepEqual(parseWrittenQuestions({ items: [{ ...thread, author_label: 'Participant 2' }] })[0].author_label, 'Participant 2');
+  assert.deepEqual(parseWrittenQuestions({ items: [{ ...thread, replies: undefined }] })[0].replies, []);
+  assert.equal(parseWrittenQuestions({ items: [{ ...thread, replies: [{ ...thread.replies[0], from: 'speaker' }] }] }), null);
+  assert.equal(parseWrittenQuestions({ items: [{ ...thread, message_id: 'x' }] }), null);
+  assert.equal(parseWrittenQuestions({}), null);
+});
+
 test('transcript lines and generator labels are parsed defensively', () => {
   assert.equal(paths.transcript(roomId), '/rooms/' + roomId + '/transcript');
   assert.deepEqual(parseTranscript({ lines: [{ text: 'Hello.', spoken_at: '2026-10-18T20:00:00Z' }] }), [{ text: 'Hello.', spoken_at: '2026-10-18T20:00:00Z' }]);

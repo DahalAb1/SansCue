@@ -28,6 +28,22 @@ export function chartRows(dashboard: Dashboard): ChartRow[] {
   });
 }
 
+/** A draft without a known expiry stays reviewable; the server still enforces it. */
+export function draftExpiry(expiresAt: string | undefined, now: number): { expired: boolean; label: string } {
+  const at = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+  if (Number.isNaN(at)) return { expired: false, label: '' };
+  const remaining = at - now;
+  if (remaining <= 0) return { expired: true, label: 'Expired' };
+  const minutes = Math.ceil(remaining / 60_000);
+  return { expired: false, label: `Expires in ${minutes} min` };
+}
+
+export function earlierWordingNote(dashboard: Dashboard, version: number): string | null {
+  const earlier = dashboard.earlier_version_respondents ?? 0;
+  if (earlier <= 0 || version <= 1) return null;
+  return `${earlier} of ${dashboard.respondents} response${dashboard.respondents === 1 ? ' was' : 's were'} given before the wording changed to version ${version}.`;
+}
+
 export function respondentSummary(dashboard: Dashboard): string {
   if (dashboard.respondents === 0) return 'No responses yet';
   return `${dashboard.respondents} audience response${dashboard.respondents === 1 ? '' : 's'}`;
