@@ -60,6 +60,33 @@
 **/*.jks
 **/*.keystore
 
+# Recursive source allowlists can reinclude descendants of an excluded directory.
+# Deny the full subtree as well as its directory entry, after all allowlists.
+**/.env/**
+**/.env.*/**
+**/.aws/**
+**/.ssh/**
+**/.gnupg/**
+**/.netrc/**
+**/.npmrc/**
+**/.pypirc/**
+**/node_modules/**
+**/dist/**
+**/target/**
+**/build/**
+**/coverage/**
+**/.git/**
+**/*.log/**
+**/local-data/**
+**/secrets/**
+**/credentials/**
+**/*.pem/**
+**/*.key/**
+**/*.p12/**
+**/*.pfx/**
+**/*.jks/**
+**/*.keystore/**
+
 # Never admit descendants of ANY allowed path, even source-like descendants.
 # Keep one terminal exclusion per allowlist entry; the fixture check enforces this.
 Cargo.toml/**

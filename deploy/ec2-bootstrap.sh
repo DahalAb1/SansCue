@@ -3,7 +3,7 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y docker.io docker-compose-v2 python3 curl ca-certificates
+apt-get install -y docker.io docker-compose-v2 docker-buildx python3 curl ca-certificates
 systemctl enable --now docker
 usermod -aG docker ubuntu
 install -d -o ubuntu -g ubuntu -m 755 /opt/sanscue

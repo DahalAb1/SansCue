@@ -30,8 +30,14 @@ BLOCKED_NAMES = [
     "identity.jks", "identity.keystore", "unknown-credentials.json",
     "private-backup.dump", "nested/unknown-credentials.json",
     ".aws/config", ".ssh/config", ".gnupg/config",
+    ".aws/private.rs", ".ssh/private.ts", ".gnupg/private.sql",
     "secrets/private.ts", "credentials/private.rs", "local-data/backup.sql",
+    "secrets/nested/private.rs", "credentials/nested/private.ts",
     "node_modules/package/index.ts", "dist/bundle.ts",
+]
+SENSITIVE_DESCENDANTS = [
+    ".env/private.ts", ".env.local/private.rs", ".npmrc/private.ts",
+    "identity.pem/private.rs", "identity.key/private.ts", "private.log/private.sql",
 ]
 
 
@@ -59,16 +65,18 @@ def main():
         context = base / "context"
         context.mkdir()
         # Never copy application directories or inspect actual credentials.
-        blocked = [prefix + name for prefix in
-                   ("", "web/", "web/src/", "services/", "services/sessions/",
+        prefixes = ("", "web/", "web/src/", "services/", "services/sessions/",
                     "services/sessions/src/", "services/sessions/migrations/",
                     "services/bee-connection/", "services/bee-connection/src/",
                    "services/bee-connection/migrations/", "services/topics-and-questions/",
                    "services/topics-and-questions/src/", "services/topics-and-questions/migrations/",
-                   "deploy/") for name in BLOCKED_NAMES]
+                   "deploy/")
+        blocked = [prefix + name for prefix in prefixes for name in BLOCKED_NAMES]
+        sensitive = [prefix + name for prefix in prefixes for name in SENSITIVE_DESCENDANTS]
         descendants = descendant_fixtures()
         for label, allowed, denied in (("normal", ALLOWED, blocked),
-                                        ("directory-shaped", [], descendants)):
+                                        ("directory-shaped", [], descendants),
+                                        ("sensitive-shaped", [], sensitive)):
             case = context / label
             case.mkdir()
             shutil.copyfile(ROOT / ".dockerignore", case / ".dockerignore")
