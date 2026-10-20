@@ -1,0 +1,58 @@
+{
+	admin off
+	# Browsers omit SNI for bare IP URLs; select the configured public endpoint.
+	default_sni {$SANSCUE_DOMAIN}
+	servers {
+		max_header_size 16KiB
+		timeouts {
+			read_header 10s
+			read_body 30s
+			idle 2m
+		}
+	}
+}
+
+{$SANSCUE_DOMAIN} {
+	# Explicit public ACME issuer also works for a bare public IPv4 address.
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+		}
+	}
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	# Access logs are deliberately disabled: invite URLs contain credentials.
+	route {
+		@sessions path /api/sessions /api/sessions/*
+		handle @sessions {
+			uri strip_prefix /api/sessions
+			reverse_proxy sessions:3000 {
+				# Overwrite any visitor-supplied value; backend is private.
+				header_up X-Sanscue-Client-IP {remote_host}
+			}
+		}
+		@api path /api /api/*
+		handle @api {
+			respond "Not found" 404
+		}
+		handle {
+			root * /srv
+			try_files {path} /index.html
+			file_server
+		}
+	}
+}
+
+# Container-local static health probe; never published on the host.
+http://127.0.0.1:8081 {
+	root * /srv
+	rewrite /healthz /index.html
+	file_server
+}

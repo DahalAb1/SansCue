@@ -1,25 +1,25 @@
 # Development Context
 
-Updated October 9, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
+Updated October 20, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
 
 ## Current implementation status
 
-Current `dev` contains room/access and durable updates; Bee-owned event storage,
-internal binding commands and transactional delivery; Topics-owned transcript
-projection/job/candidate storage; and Sessions-owned question publication,
-audience ratings, written Q&A, and dashboard counts. `stub-v1` is a deterministic
-development placeholder, not a model result. The
-[synthetic acceptance procedure](../services/acceptance/README.md) starts all
-three services locally and drives the fixture through the audience flow using
-three isolated PostgreSQL databases. Whether it has run successfully on a given
-host/commit must be stated from observed results, not inferred from its
-availability.
+Rooms/access, durable updates, Bee CLI ingestion and room binding, staff
+transcripts, optional Anthropic/Bedrock generation, moderator publication,
+audience ratings, private Q&A and speaker charts are implemented. Generation
+uses an explicit placeholder when no provider is configured.
 
-Real Bee hardware/live API, AWS deployment, model quality, Docker/Compose
-startup/routing/outage/persistence/backup, and production capacity/performance
-are unverified external gates. PostgreSQL-backed verification is not Docker
-verification. See the [environment verification record](environment-verification.md)
-for Docker-only checks and the [MVP plan](mvp-plan.md) for the acceptance scope.
+Sanskriti's PRs #2 and #3 record local Compose/Apple Watch delivery and staff
+transcript visibility. PR #2 reports live drafts and synthetic acceptance; PR #3
+reports Bedrock connectivity blocked by the daily token limit before any live
+AI draft. See [environment verification](environment-verification.md) for exact
+reported scope and revisions. The hosted EC2 deployment subsequently passed HTTPS,
+access checks, database outage recovery, same-IP stop/start recovery and same-host
+database dump/restore checks. Bedrock Nova Micro passed actual generation on three
+synthetic excerpts and the hosted transcript-to-draft-to-publication/rating flow.
+Live Bee transport into EC2, full device recovery, model comparison, capacity,
+off-instance disaster recovery and application rollback remain separate gates.
+Deployment uses the [EC2 runbook](../deploy/PRODUCTION.md).
 
 ## Implementation agreement
 
@@ -217,10 +217,10 @@ Within a feature, separate HTTP handling, business rules, types/errors, and SQL 
 
 ## Development sequence and open decisions
 
-- Steps 6, 7's device-independent boundary, the `stub-v1` candidate preview, and a minimum Step 10 loop (speaker publication, audience ratings, written Q&A, staff counts) are implemented on `dev`. See the per-service READMEs and [synthetic acceptance procedure](../services/acceptance/README.md). Do not describe live Bee as implemented: device transport/auth, real Bee payload identity/order, and real gap recovery remain unverified.
-- The question generator is deterministic `stub-v1`, not a model. Model/provider selection and quality evaluation remain open. Do not present preview output as AI-generated or as accepted question quality.
+- Steps 2–8 and 10 have implementation; recorded verification covers specific revisions and scenarios, not blanket acceptance. Preserve the live evidence linked above and rehearse current moderator and explicit recording-selection behavior before release.
+- Optional real generation is implemented. Successful live Bedrock drafting and model quality/latency/cost comparison remain unrecorded. Label placeholder output accurately.
 - The current response controls are clear / partly clear / need help. Product decisions still open include timers, Q&A moderation/visibility policy beyond the implemented author-plus-staff scope, TA permissions beyond Questions, and dashboard attention design.
-- The hardware-independent end-to-end procedure uses three distinct native PostgreSQL databases. Its availability is not evidence it ran; report the exact commit and result only after execution. Docker/Compose, AWS account/domain readiness and deployment, production capacity/performance, backup/restore, and real-device/live-API verification are separate gates.
+- The hardware-independent end-to-end procedure uses three distinct native PostgreSQL databases. Its availability is not evidence it ran; report the exact commit and result only after execution. Local Compose/live-device observations exist; full Docker recovery, AWS account/domain readiness and deployment, production capacity/performance, backup/restore, and remaining live-device scenarios are separate gates.
 - Service transport beyond the current authenticated HTTP outboxes, exact AWS capacity, and performance targets remain open. SQS remains a candidate, not an installed requirement.
 
 Update these notes when decisions change. Never add credentials, participant data, private recordings, or machine-specific paths.

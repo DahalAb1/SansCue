@@ -4,6 +4,27 @@ We'll build the conference flow in steps. This is the initial scope, not every p
 
 **Recommended stack:** Preact + TypeScript + Vite + CSS; Rust + Axum + Tokio; PostgreSQL + SQLx; Docker Compose on EC2 with Caddy HTTPS.
 
+## Status — October 20, 2026
+
+- **Step 1:** EC2/public HTTPS, health/readiness, database outage recovery and automatic recovery at the same IP after EC2 stop/start passed. Three database dumps restored with matching data hashes into temporary check databases on the same host. Off-instance disaster recovery and application rollback remain open; see the [EC2 runbook](../deploy/PRODUCTION.md).
+- **Steps 2–6 and 10:** Implemented; synthetic acceptance is reported in PR #2. Hosted Nova acceptance passed for room creation, staff-only drafts, moderator publication, audience rating and dashboard privacy. Hosted reconnect and full device rehearsal remain open.
+- **Step 7:** Live Apple Watch-to-room delivery is recorded in PR #2; speaker and TA transcript visibility is recorded in PR #3. Full identity/order, retry, recovery and binding-change runbook acceptance is not recorded.
+- **Step 8:** Rolling transcript windows, provider generation, evidence validation, and moderator review are implemented. Bedrock Nova Micro is active on EC2; actual model-generated drafts passed the hosted synthetic-transcript flow on October 20. Earlier PR #3's Claude quota failure is historical. Live Bee-to-hosted-AI delivery remains to be rehearsed.
+- **Step 9:** No completed two-model comparison is recorded. A provider integration alone does not select the model against quality, delay and cost targets.
+- **Step 11:** Historical synthetic/service checks exist; release-revision load, full-flow latency, cost and recovery measurements remain open.
+
+See [environment verification](environment-verification.md) for revisions and
+reported versus locally executed checks. Older results remain useful within
+their scope and do not need to be discarded.
+
+**Hackathon deployment decision:** Visitors may create rooms immediately when
+`SESSIONS_DEMO_OPEN_ROOMS=true`; each room's organizer authority belongs to its
+creating browser session. Audience users still join normally. Production API
+limits and private service networking protect the initial public deployment.
+The first endpoint uses EC2's public IPv4 with HTTPS; a custom domain can come
+later. Judging requires continuous availability November 9–20, 2026. Email
+approval is deferred for this demo.
+
 ## Services
 
 | Service | Owns |
@@ -145,16 +166,17 @@ flowchart TD
 
 **Service:** New Bee-connection microservice.
 
-**Implemented development boundary:** A canonical event/replay pipeline, Bee-owned
-storage, room binding commands, and outbox delivery are implemented independently
-of physical hardware. The checked-in synthetic fixture exercises ordering,
-duplicate handling, reconnect/gap evidence, and malformed observations.
+**Implemented and observed:** Canonical replay/storage, authenticated room
+binding and transactional delivery, and an authenticated Bee CLI adapter exist.
+[PR #2](https://github.com/DahalAb1/SansCue/pull/2) records a real Apple Watch
+recording reaching its room and producing drafts on local Compose.
+[PR #3](https://github.com/DahalAb1/SansCue/pull/3) records speaker/TA transcript
+visibility. The parser also incorporates an observed Bee CLI 0.8.0 payload.
 
-**Still unverified:** **REAL BEE DEVICE / LIVE API VERIFICATION** is an external
-gate. No live transport, device authentication, real source identity/order, or
-real recovery behavior is claimed. Synthetic fixture success does not satisfy
-live Bee acceptance. Use the [device verification runbook](bee-device-verification.md)
-to record live observations; it is a prepared procedure, not a passed test.
+**Remaining acceptance:** Complete the identity/order, duplicate delivery,
+disconnect/backfill, binding-change and cleanup scenarios in the
+[device verification runbook](bee-device-verification.md), recording sanitized
+results. The existing live reports do not claim every scenario passed.
 
 ```mermaid
 flowchart TD
@@ -180,28 +202,21 @@ flowchart TD
 
 **Success:** A short question has traceable transcript evidence; slow generation leaves room updates responsive.
 
-**Current boundary:** The deterministic `stub-v1` preview is unpublished and
-staff-only; it is not a model result or Step 8 quality acceptance. A local
-synthetic replay acceptance procedure is documented in
-[`services/acceptance`](../services/acceptance/README.md). It requires three
-isolated PostgreSQL databases and must be run explicitly. Model quality, live
-Bee behavior, and Docker startup are separate unverified gates.
+**Current implementation:** Topics processes speech-ordered rolling windows
+with cadence, abstention and repeat suppression. It can call Claude through
+Anthropic or Amazon Bedrock; without provider configuration it uses the explicit
+`topic-window-stub-v1` placeholder. Generated evidence must match an exact source
+excerpt. Jobs use leases, heartbeats, bounded retries, timeouts and fenced atomic
+completion, followed by an authenticated candidate outbox. Sessions exposes
+unpublished drafts only to staff; a moderator can edit and publish them.
 
-The current generation design requires an exact source excerpt to accompany
-each generated question and validates that excerpt against the originating
-transcript event. See the [design rationale](question-generation-design.md).
-
-**Current development slice:** The device-independent accepted-event outbox is
-connected to a new Topics-and-questions-owned transcript projection, idempotent
-job, and candidate outbox. For development only, `stub-v1` generates exactly
-one deterministic, unpublished preview per accepted event. Sessions checks the
-active conversation and bound speaker session before storing the candidate;
-only speaker/TA snapshots expose it. No model/provider is called, no candidate
-can be published or shown to the audience, and this slice is not Step 8
-acceptance. Generation jobs now use row-locked leases, heartbeats, bounded
-retries, timeout, and fenced completion; candidate, candidate outbox, and
-completed status commit atomically. See the service contract and README; live
-Bee, model quality, and Docker validation remain separate.
+**Recorded evidence and limits:** PR #2 reports live question drafts, without
+identifying the generator. PR #3 records a real Bedrock request blocked by the
+account's daily token limit, with no live AI draft observed. A successful live
+provider draft, quality evaluation and release-revision responsiveness remain
+to be recorded. Synthetic replay remains a separate, model-free check; see
+[acceptance](../services/acceptance/README.md) and the
+[design rationale](question-generation-design.md).
 
 ```mermaid
 flowchart TD
@@ -231,7 +246,8 @@ flowchart TD
 
 Use the [model comparison worksheet](model-evaluation-worksheet.md) to freeze
 the shared excerpts, prompts, targets, and scoring before generating outputs.
-The worksheet is a template only; no provider comparison has been run.
+The worksheet is a template only; no completed provider comparison is recorded.
+Bedrock connectivity was observed in PR #3, but that is not a model comparison.
 
 ```mermaid
 flowchart TD
@@ -299,8 +315,9 @@ rating/Q&A, counts, and audience privacy using three distinct PostgreSQL DB URLs
 It requires neither Docker nor device/model/AWS access. This synthetic flow and
 the service PostgreSQL suites have passed against the source tree integrated as
 `dev` commit `411fba0`; see [environment verification](environment-verification.md)
-for exact scope. Live Bee, model quality, Docker/Compose, AWS, performance, and
-backup/restore remain independent acceptance gates.
+for exact scope. Later live Watch/local Compose evidence is recorded in PRs #2 and #3; see
+[environment verification](environment-verification.md). Full recovery, model
+quality, AWS, performance, and backup/restore remain separate acceptance gates.
 
 **Success:** The agreed workload meets correctness, delay, and cost targets.
 

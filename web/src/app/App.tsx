@@ -7,21 +7,33 @@ import { Room } from './Room';
 import { ServiceChecks } from './ServiceChecks';
 
 function Retention() {
-  return <p class="notice">Local data, including questions, responses and any captured transcripts, is retained until the operator explicitly deletes the dataset and backups. Room end and access revocation are not deletion. Do not use real recordings if indefinite local retention is unacceptable.</p>;
+  return <p class="notice">Questions, responses and any captured transcripts are retained until the operator explicitly deletes the dataset and backups. Room end and access revocation are not deletion. Do not use real recordings if indefinite retention is unacceptable.</p>;
 }
 
 function Operator({ created }: { created: (state: State) => void }) {
   const [credential, setCredential] = useState('');
   const [authenticated, setAuthenticated] = useState(false);
+  const [demoOpen, setDemoOpen] = useState(false);
+  const [accessLoading, setAccessLoading] = useState(true);
   const [title, setTitle] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [roomId, setRoomId] = useState('');
+  useEffect(() => {
+    let active = true;
+    void api.read<{ operator?: boolean; demo_open_rooms?: boolean }>(paths.operatorSession).then(result => {
+      if (active) {
+        setAuthenticated(result.operator === true);
+        setDemoOpen(result.demo_open_rooms === true);
+      }
+    }).catch(() => {}).finally(() => { if (active) setAccessLoading(false); });
+    return () => { active = false; };
+  }, []);
   return <section class="panel">
-    <h1>Host operator</h1>
-    <p>Only the host-configured operator can create rooms. Audience links never grant speaker access.</p>
+    <h1>Create a room</h1>
+    <p>{demoOpen ? 'Hackathon demo: anyone can create a room. This browser manages only the rooms it creates. Keep its cookies and save the room URL to return.' : 'Sign in as the host to create rooms. Audience links never grant speaker access.'}</p>
     {error && <p role="alert" class="error">{error}</p>}
-    {!authenticated ? <form onSubmit={async event => {
+    {accessLoading ? <p role="status">Checking room creation access…</p> : !authenticated && !demoOpen ? <form onSubmit={async event => {
       event.preventDefault();
       if (busy) return;
       setBusy(true);
@@ -42,7 +54,7 @@ function Operator({ created }: { created: (state: State) => void }) {
       <p>The credential is sent only to this origin’s sessions service and is not saved in this browser.</p>
       <button disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
     </form> : <>
-      <p role="status">Operator authenticated for this session.</p>
+      {authenticated && <p role="status">Host authenticated for this session.</p>}
       <Retention />
       <form onSubmit={async event => {
         event.preventDefault();
@@ -67,7 +79,7 @@ function Operator({ created }: { created: (state: State) => void }) {
         <button disabled={busy || title.trim() === ''}>{busy ? 'Creating…' : 'Create room'}</button>
       </form>
       <h2>Return to an existing room</h2>
-      <p>Use its saved room URL, or enter its room ID. Signing in restores the operator’s existing speaker memberships.</p>
+      <p>Use its saved room URL, or enter its room ID. Demo rooms require the browser that created them. The host can restore access after signing in.</p>
       <form onSubmit={event => { event.preventDefault(); navigate('/rooms/' + roomId.trim()); }}>
         <label>Room ID
           <input required pattern="[a-fA-F0-9-]{36}" value={roomId} onInput={event => setRoomId(event.currentTarget.value)} />
@@ -131,7 +143,7 @@ export function App() {
   }, []);
   useEffect(() => {
     const title = route.kind === 'room' ? 'Room'
-      : route.kind === 'operator' ? 'Host operator'
+      : route.kind === 'operator' ? 'Create a room'
         : route.kind === 'health' ? 'Service checks'
           : route.kind === 'join' ? 'Join room'
             : route.kind === 'invite' ? 'Invitation'
@@ -145,7 +157,7 @@ export function App() {
       <a class="brand" href="/" onClick={event => followLink(event, '/')}>
         <span class="brand-mark" aria-hidden="true">s.</span>SansCue
       </a>
-      <span class="environment">Rooms · local MVP</span>
+      <span class="environment">Live audience feedback</span>
     </header>
     <main id="main" tabIndex={-1}>
       {route.kind === 'health' ? <ServiceChecks /> : !ready ? <section class="panel">
@@ -162,8 +174,7 @@ export function App() {
         <p class="eyebrow">Rooms and access</p>
         <h1>A shared room.<br /><span>Your own perspective.</span></h1>
         <p class="intro-copy">Join using the speaker’s QR code or audience link. Invited moderators use their private invitation.</p>
-        <p><a href="/operator" onClick={event => followLink(event, '/operator')}>Host operator sign-in and room creation</a></p>
-        <p class="scope-note">Questions, responses, live updates and Bee integration are coming in later stages.</p>
+        <p><a href="/operator" onClick={event => followLink(event, '/operator')}>Create a room</a></p>
       </section>}
     </main>
     <footer class="site-footer">

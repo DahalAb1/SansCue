@@ -11,6 +11,71 @@ use uuid::Uuid;
 
 const SPEECH: &str = "The learning rate decides how far each gradient step moves the weights.";
 
+#[tokio::test]
+#[ignore = "requires a private AWS credentials file; makes three small billable Nova requests"]
+async fn nova_live_grounded_candidates() {
+    let file = std::env::var("NOVA_TEST_CREDENTIALS_FILE").expect("credentials file required");
+    let generator = ClaudeGenerator::bedrock(
+        TopicWindowGenerator::new(Default::default(), "gate"),
+        BedrockAuth::CredentialsFile(file.into()),
+        "us-east-1",
+        Some("amazon.nova-micro-v1:0"),
+        None,
+    )
+    .unwrap();
+    for speech in [
+        SPEECH,
+        "Photosynthesis converts light energy into chemical energy. Plants use sunlight, water, and carbon dioxide to make glucose and release oxygen.",
+        "A hash table uses a hash function to choose a bucket for each key. Collisions happen when different keys choose the same bucket. Chaining stores those entries together in a list.",
+    ] {
+        let outcome = generator.generate(input(speech)).await.unwrap();
+        let GenerationOutcome::Candidate(question) = outcome else {
+            panic!("expected grounded candidate, got {outcome:?}");
+        };
+        assert_eq!(
+            question.generator_version,
+            "amazon.nova-micro-v1:0/topic-check-v1"
+        );
+        assert!(speech.contains(&question.evidence_excerpt));
+        println!("PASS Nova grounded question: {}", question.text);
+    }
+}
+
+/// Explicit paid smoke check only; ordinary test runs never use live credentials.
+#[tokio::test]
+#[ignore = "requires private Cloudflare token/account files and makes one billable request"]
+async fn cloudflare_live_grounded_candidate() {
+    let token_file = std::env::var("CLOUDFLARE_TEST_TOKEN_FILE").expect("token file path required");
+    let account_file =
+        std::env::var("CLOUDFLARE_TEST_ACCOUNT_FILE").expect("account file path required");
+    let token = std::fs::read_to_string(token_file).expect("read private token file");
+    let token = token
+        .trim()
+        .strip_prefix("CLOUDFLARE_API_TOKEN=")
+        .unwrap_or(token.trim())
+        .trim_matches(['\'', '"']);
+    let account = std::fs::read_to_string(account_file).expect("read account ID file");
+    let generator = ClaudeGenerator::cloudflare(
+        TopicWindowGenerator::new(Default::default(), "gate"),
+        token,
+        account.trim(),
+        None,
+    )
+    .unwrap();
+    let outcome = generator.generate(input(SPEECH)).await.unwrap();
+    let GenerationOutcome::Candidate(question) = outcome else {
+        panic!("expected a grounded candidate, got {outcome:?}");
+    };
+    assert_eq!(
+        question.generator_version,
+        "anthropic/claude-haiku-5.5/topic-check-v1"
+    );
+    println!(
+        "Live Cloudflare Haiku returned a grounded candidate: {}",
+        question.text
+    );
+}
+
 /// Serves one canned Messages API reply and records the request it received.
 async fn mock_api(status: u16, reply: Value) -> (String, Arc<Mutex<Option<(HeaderMap, Value)>>>) {
     let seen = Arc::new(Mutex::new(None));

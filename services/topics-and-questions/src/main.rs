@@ -65,6 +65,8 @@ async fn run() -> Result<(), &'static str> {
         recent_question_window: duration_setting("TOPICS_RECENT_QUESTION_WINDOW_SECONDS", 1800)?,
     };
     let gate = TopicWindowGenerator::new(cadence_policy, "topic-window-stub-v1");
+    let cloudflare_token = optional_setting("CLOUDFLARE_API_TOKEN")?;
+    let anthropic_key = optional_setting("ANTHROPIC_API_KEY")?;
     let bedrock_auth = match (
         optional_setting("AWS_BEARER_TOKEN_BEDROCK")?,
         optional_setting("TOPICS_BEDROCK_CREDENTIALS_FILE")?,
@@ -78,33 +80,52 @@ async fn run() -> Result<(), &'static str> {
         (None, Some(file)) => Some(BedrockAuth::CredentialsFile(file.into())),
         (None, None) => None,
     };
-    let generator: Arc<dyn QuestionGenerator> = match (
-        bedrock_auth,
-        optional_setting("ANTHROPIC_API_KEY")?,
-    ) {
-        (Some(_), Some(_)) => {
-            return Err("configure either Bedrock or ANTHROPIC_API_KEY, not both");
-        }
-        (Some(auth), None) => Arc::new(ClaudeGenerator::bedrock(
+    if [
+        cloudflare_token.is_some(),
+        anthropic_key.is_some(),
+        bedrock_auth.is_some(),
+    ]
+    .into_iter()
+    .filter(|enabled| *enabled)
+    .count()
+        > 1
+    {
+        return Err("configure only one of Cloudflare, Anthropic or Bedrock");
+    }
+    let generator: Arc<dyn QuestionGenerator> = if let Some(token) = cloudflare_token {
+        Arc::new(ClaudeGenerator::cloudflare(
             gate,
-            auth,
-            optional_setting("AWS_REGION")?
-                .as_deref()
-                .unwrap_or("us-east-1"),
+            &token,
+            &optional_setting("CLOUDFLARE_ACCOUNT_ID")?
+                .ok_or("CLOUDFLARE_ACCOUNT_ID is required")?,
             optional_setting("TOPICS_MODEL")?.as_deref(),
-            None,
-        )?),
-        (None, Some(key)) => Arc::new(ClaudeGenerator::anthropic(
-            gate,
-            &key,
-            optional_setting("ANTHROPIC_BASE_URL")?.as_deref(),
-            optional_setting("TOPICS_MODEL")?.as_deref(),
-        )?),
-        (None, None) => {
-            eprintln!(
-                "topics-and-questions: no model credential is set; using the deterministic placeholder generator"
-            );
-            Arc::new(gate)
+        )?)
+    } else {
+        match (bedrock_auth, anthropic_key) {
+            (Some(_), Some(_)) => {
+                return Err("configure either Bedrock or ANTHROPIC_API_KEY, not both");
+            }
+            (Some(auth), None) => Arc::new(ClaudeGenerator::bedrock(
+                gate,
+                auth,
+                optional_setting("AWS_REGION")?
+                    .as_deref()
+                    .unwrap_or("us-east-1"),
+                optional_setting("TOPICS_MODEL")?.as_deref(),
+                None,
+            )?),
+            (None, Some(key)) => Arc::new(ClaudeGenerator::anthropic(
+                gate,
+                &key,
+                optional_setting("ANTHROPIC_BASE_URL")?.as_deref(),
+                optional_setting("TOPICS_MODEL")?.as_deref(),
+            )?),
+            (None, None) => {
+                eprintln!(
+                    "topics-and-questions: no model credential is set; using the deterministic placeholder generator"
+                );
+                Arc::new(gate)
+            }
         }
     };
     let delivery = Delivery::new(pool.clone(), &sessions, &sessions_token)?

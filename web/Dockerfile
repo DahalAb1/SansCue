@@ -7,7 +7,7 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM caddy:2-alpine AS runtime
+FROM caddy:2.11.7-alpine AS runtime
 # Explicit probe dependency; do not rely on utilities in the base image.
 RUN apk add --no-cache curl
 COPY deploy/Caddyfile /etc/caddy/Caddyfile

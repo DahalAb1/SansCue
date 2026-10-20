@@ -48,6 +48,9 @@ impl ReviewPolicy {
 
 #[derive(Clone, Default)]
 pub struct Security {
+    pub demo_open_rooms: bool,
+    pub public_rate_limits: bool,
+    pub trust_client_ip_header: bool,
     pub origin: Option<String>,
     pub insecure_loopback: bool,
     pub operator_hash: Option<Vec<u8>>,
@@ -64,6 +67,14 @@ impl Security {
     pub fn from_env() -> Result<Self, &'static str> {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let s = Self {
+            public_rate_limits: get("SESSIONS_PUBLIC_RATE_LIMITS").as_deref() == Some("true"),
+            trust_client_ip_header: get("SESSIONS_TRUST_CLIENT_IP_HEADER").as_deref()
+                == Some("true"),
+            demo_open_rooms: match get("SESSIONS_DEMO_OPEN_ROOMS").as_deref() {
+                None | Some("false") => false,
+                Some("true") => true,
+                _ => return Err("SESSIONS_DEMO_OPEN_ROOMS must be true or false"),
+            },
             origin: get("SESSIONS_PUBLIC_ORIGIN"),
             insecure_loopback: get("SESSIONS_ALLOW_INSECURE_LOOPBACK").as_deref() == Some("true"),
             operator_hash: decode_key(get("SESSIONS_OPERATOR_TOKEN_SHA256"))?,

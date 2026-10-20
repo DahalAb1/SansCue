@@ -4,23 +4,27 @@ A planned conference web app that uses Bee's spoken context to generate short au
 
 Built for the Bee track of the [Build, Ship, Shape: Amazon Developer Hackathon](https://amazonappdev2026.devpost.com/).
 
-**Status:** The `dev` branch now includes room/access and live updates, a
-device-independent Bee replay/binding/outbox service, deterministic
-transcript-to-candidate preview, and question publication, audience ratings,
-written Q&A, and staff response counts. Candidate generation is the explicit
-`stub-v1` placeholder, not a model integration. The new
-[hardware-independent acceptance procedure](services/acceptance/README.md)
-exercises this flow with a synthetic fixture and three separate PostgreSQL
-databases.
+**Status:** Rooms, access, live updates, Bee CLI ingestion, staff transcripts,
+moderator question publication, audience feedback, private Q&A and speaker
+charts are implemented. The EC2 deployment uses Amazon Bedrock Nova Micro for
+grounded question drafts, with moderator approval before publication. Other
+provider adapters and an explicit placeholder when unconfigured remain available.
 
-The synthetic end-to-end procedure and the relevant service PostgreSQL suites
-passed against the exact source tree now integrated in `dev` as `411fba0`, using
-native PostgreSQL 17.11; this is not Docker verification. See the
-[verification record](docs/environment-verification.md) for exact check scope.
-Live Bee/API, AWS, model quality, Docker/Compose runtime, and production
-resilience/performance remain distinct unverified gates. See the
-[development context](docs/development-context.md) for implementation
-boundaries.
+Sanskriti's [PR #2](https://github.com/DahalAb1/SansCue/pull/2) records local
+Compose/Apple Watch delivery, question drafts and passing synthetic acceptance.
+[PR #3](https://github.com/DahalAb1/SansCue/pull/3) records staff transcript
+visibility and Bedrock connectivity; the account hit its daily token limit
+before a live AI draft appeared. These reports do not establish model quality,
+full recovery, public HTTPS, capacity or backup/restore acceptance. See the
+[verification record](docs/environment-verification.md) and
+[MVP status](docs/mvp-plan.md). EC2 deployment preparation is documented in the
+[production runbook](deploy/PRODUCTION.md).
+
+The hosted deployment at **https://184.193.80.255** subsequently passed public
+HTTPS, outage recovery and EC2 stop/start checks. On October 20, real Nova inference
+passed the hosted flow using a synthetic transcript, moderator publication and
+an audience rating. Live Bee delivery into EC2, model comparison and audience
+load remain separate gates; see the verification record for exact scope.
 
 ## Documents
 

@@ -122,6 +122,23 @@ fn operator(session: &PgRow, security: &Security) -> bool {
         && session.get::<Option<String>, _>("operator_epoch") == security.operator_epoch
 }
 
+fn speaker_access(session: &PgRow, security: &Security, member: &PgRow) -> bool {
+    operator(session, security)
+        || (security.demo_open_rooms
+            && member.get::<Option<Uuid>, _>("demo_owner_session_id") == Some(session.get("id")))
+}
+
+async fn operator_session(State(access): State<Access>, headers: HeaderMap) -> Result<Response> {
+    let mut tx = access.pool.begin().await?;
+    let session = load_session(&mut tx, &headers).await?;
+    let authenticated = operator(&session, &access.security);
+    tx.commit().await?;
+    Ok(reply(
+        StatusCode::OK,
+        json!({"operator":authenticated,"demo_open_rooms":access.security.demo_open_rooms}),
+    ))
+}
+
 fn parts(path: &str) -> Vec<&str> {
     path.trim_matches('/').split('/').collect()
 }
@@ -178,6 +195,7 @@ pub fn router(access: Access) -> Router {
     Router::new()
         .route("/bootstrap", get(bootstrap))
         .route("/operator/login", post(mutate))
+        .route("/operator/session", get(operator_session))
         .route("/rooms", post(mutate))
         .route("/join/{token}", post(mutate))
         .route("/invitations/{token}/redeem", post(mutate))
@@ -297,13 +315,15 @@ async fn lock_membership(
     room_id: Uuid,
     session_id: Uuid,
     is_operator: bool,
+    demo_open_rooms: bool,
 ) -> Result<Option<PgRow>> {
     Ok(sqlx::query(
-        "SELECT * FROM memberships WHERE room_id=$1 AND (session_id=$2 OR (role='speaker' AND $3)) ORDER BY CASE WHEN role='speaker' AND $3 THEN 0 ELSE 1 END, CASE WHEN status='active' THEN 0 ELSE 1 END, created_at LIMIT 1 FOR UPDATE",
+        "SELECT m.*,r.demo_owner_session_id FROM memberships m JOIN rooms r ON r.id=m.room_id WHERE m.room_id=$1 AND (m.session_id=$2 OR (m.role='speaker' AND ($3 OR ($4 AND r.demo_owner_session_id=$2)))) ORDER BY CASE WHEN m.role='speaker' AND ($3 OR ($4 AND r.demo_owner_session_id=$2)) THEN 0 ELSE 1 END, CASE WHEN m.status='active' THEN 0 ELSE 1 END,m.created_at LIMIT 1 FOR UPDATE OF m",
     )
     .bind(room_id)
     .bind(session_id)
     .bind(is_operator)
+    .bind(demo_open_rooms)
     .fetch_optional(&mut **tx)
     .await?)
 }
@@ -315,11 +335,17 @@ async fn membership(
     security: &Security,
 ) -> Result<PgRow> {
     let is_operator = operator(session, security);
-    let row = lock_membership(tx, room_id, session.get("id"), is_operator)
-        .await?
-        .ok_or_else(missing)?;
+    let row = lock_membership(
+        tx,
+        room_id,
+        session.get("id"),
+        is_operator,
+        security.demo_open_rooms,
+    )
+    .await?
+    .ok_or_else(missing)?;
     if row.get::<String, _>("status") != "active"
-        || (row.get::<String, _>("role") == "speaker" && !is_operator)
+        || (row.get::<String, _>("role") == "speaker" && !speaker_access(session, security, &row))
     {
         return Err(missing());
     }
@@ -696,7 +722,7 @@ async fn authorize_replay(
         return Ok(());
     }
     if path == "/rooms" {
-        return if operator(session, security) {
+        return if operator(session, security) || security.demo_open_rooms {
             Ok(())
         } else {
             Err(forbidden())
@@ -707,11 +733,19 @@ async fn authorize_replay(
     };
     room(tx, room_id).await?;
     let is_operator = operator(session, security);
-    let member = lock_membership(tx, room_id, session.get("id"), is_operator).await?;
+    let member = lock_membership(
+        tx,
+        room_id,
+        session.get("id"),
+        is_operator,
+        security.demo_open_rooms,
+    )
+    .await?;
     if path.starts_with("/rooms/") {
         let member = member.ok_or_else(missing)?;
         if member.get::<String, _>("status") != "active"
-            || (member.get::<String, _>("role") == "speaker" && !is_operator)
+            || (member.get::<String, _>("role") == "speaker"
+                && !speaker_access(session, security, &member))
         {
             return Err(missing());
         }
@@ -730,7 +764,8 @@ async fn authorize_replay(
         return Err(missing());
     };
     if member.get::<String, _>("status") != "active"
-        || (member.get::<String, _>("role") == "speaker" && !is_operator)
+        || (member.get::<String, _>("role") == "speaker"
+            && !speaker_access(session, security, &member))
     {
         Err(missing())
     } else {
@@ -802,7 +837,7 @@ async fn resolve(
         return Ok(Context::empty());
     }
     if path == "/rooms" {
-        return if operator(session, security) {
+        return if operator(session, security) || security.demo_open_rooms {
             Ok(Context::empty())
         } else {
             Err(forbidden())
@@ -859,10 +894,18 @@ async fn resolve_join(
         return Err(missing());
     }
     let is_operator = operator(session, security);
-    let member = lock_membership(tx, room_id, session.get("id"), is_operator).await?;
+    let member = lock_membership(
+        tx,
+        room_id,
+        session.get("id"),
+        is_operator,
+        security.demo_open_rooms,
+    )
+    .await?;
     if let Some(ref row) = member
         && (row.get::<String, _>("status") == "revoked"
-            || (row.get::<String, _>("role") == "speaker" && !is_operator))
+            || (row.get::<String, _>("role") == "speaker"
+                && !speaker_access(session, security, row)))
     {
         return Err(missing());
     }
@@ -907,7 +950,14 @@ async fn resolve_redeem(
     }
     let is_operator = operator(session, security);
     let session_id: Uuid = session.get("id");
-    let member = lock_membership(tx, room_id, session_id, is_operator).await?;
+    let member = lock_membership(
+        tx,
+        room_id,
+        session_id,
+        is_operator,
+        security.demo_open_rooms,
+    )
+    .await?;
     if member
         .as_ref()
         .is_some_and(|row| row.get::<String, _>("role") == "speaker")
@@ -959,7 +1009,7 @@ async fn apply(
         });
     }
     if path == "/rooms" {
-        return create_room(tx, body, session_id).await;
+        return create_room(tx, body, session_id, security.demo_open_rooms).await;
     }
     let room_id = ctx.room_id.ok_or_else(missing)?;
     let actor_membership_id = ctx
@@ -1649,6 +1699,7 @@ async fn create_room(
     tx: &mut Transaction<'_, Postgres>,
     body: &Value,
     session_id: Uuid,
+    demo_open_rooms: bool,
 ) -> Result<Outcome> {
     let title = body["title"].as_str().unwrap_or("").trim();
     if title.is_empty() || title.chars().count() > 200 {
@@ -1656,10 +1707,11 @@ async fn create_room(
     }
     let room_id = Uuid::new_v4();
     let issued = token();
-    sqlx::query("INSERT INTO rooms(id,title,join_hash) VALUES($1,$2,$3)")
+    sqlx::query("INSERT INTO rooms(id,title,join_hash,demo_owner_session_id) VALUES($1,$2,$3,$4)")
         .bind(room_id)
         .bind(title)
         .bind(hash(issued.as_bytes()))
+        .bind(demo_open_rooms.then_some(session_id))
         .execute(&mut **tx)
         .await?;
     let member = add_member(tx, room_id, session_id, "speaker").await?;

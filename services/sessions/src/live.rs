@@ -2,7 +2,10 @@
 //! Durable events are read from PostgreSQL so reconnects and process restarts
 //! cannot silently lose a committed change.
 
-use crate::{access::Access, security::hash};
+use crate::{
+    access::Access,
+    security::{Security, hash},
+};
 use axum::{
     Router,
     extract::{OriginalUri, State, WebSocketUpgrade},
@@ -80,14 +83,7 @@ async fn connect(
         None => return reject(StatusCode::BAD_REQUEST),
     };
     let digest = hash(presented.as_bytes());
-    let row = match sqlx::query(
-        "SELECT r.sequence,r.status AS room_status,m.id AS membership_id,m.role,m.status AS member_status,EXISTS(SELECT 1 FROM browser_sessions op WHERE op.token_hash=$2 AND op.operator_epoch=$3 AND op.created_at>now()-interval '24 hours' AND op.last_seen_at>now()-interval '12 hours') AS is_operator FROM rooms r JOIN memberships m ON m.room_id=r.id LEFT JOIN browser_sessions s ON s.id=m.session_id WHERE r.id=$1 AND ((s.token_hash=$2 AND s.created_at>now()-interval '24 hours' AND s.last_seen_at>now()-interval '12 hours') OR (m.role='speaker' AND EXISTS(SELECT 1 FROM browser_sessions op WHERE op.token_hash=$2 AND op.operator_epoch=$3 AND op.created_at>now()-interval '24 hours' AND op.last_seen_at>now()-interval '12 hours'))) ORDER BY CASE WHEN m.role='speaker' AND $3::text IS NOT NULL THEN 0 ELSE 1 END,m.created_at LIMIT 1",
-    )
-    .bind(room_id)
-    .bind(digest)
-    .bind(access.security.operator_epoch.as_deref())
-    .fetch_optional(&access.pool)
-    .await {
+    let row = match authorized_membership(&access.pool, room_id, &digest, &access.security).await {
         Ok(Some(row)) => row,
         Ok(None) => return reject(StatusCode::NOT_FOUND),
         Err(_) => return reject(StatusCode::SERVICE_UNAVAILABLE),
@@ -97,10 +93,6 @@ async fn connect(
     }
     let role: String = row.get("role");
     let membership_id: Uuid = row.get("membership_id");
-    let operator = access.security.operator_enabled() && row.get::<bool, _>("is_operator");
-    if role == "speaker" && !operator {
-        return reject(StatusCode::NOT_FOUND);
-    }
     let current: i64 = row.get("sequence");
     let last_sequence = after.unwrap_or(current);
     if last_sequence < 0 || last_sequence > current {
@@ -109,11 +101,7 @@ async fn connect(
     let staff = role == "speaker" || role == "ta";
     let pool = access.pool;
     let session_hash = hash(presented.as_bytes());
-    let expected_epoch = if operator {
-        access.security.operator_epoch.clone()
-    } else {
-        None
-    };
+    let security = access.security;
     let permits = CONNECTIONS.get_or_init(|| Arc::new(Semaphore::new(MAX_CONNECTIONS)));
     let permit = match permits.clone().try_acquire_owned() {
         Ok(permit) => permit,
@@ -126,7 +114,7 @@ async fn connect(
             LiveConnection {
                 room_id,
                 session_hash,
-                expected_epoch,
+                security,
                 membership_id,
                 role,
                 staff,
@@ -135,6 +123,21 @@ async fn connect(
             },
         )
     })
+}
+
+async fn authorized_membership(
+    pool: &PgPool,
+    room_id: Uuid,
+    digest: &[u8],
+    security: &Security,
+) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
+    let epoch = security
+        .operator_epoch
+        .as_deref()
+        .filter(|_| security.operator_enabled());
+    sqlx::query(
+        "WITH actor AS (SELECT id,COALESCE(operator_epoch=$3,false) AS is_operator FROM browser_sessions WHERE token_hash=$2 AND created_at>now()-interval '24 hours' AND last_seen_at>now()-interval '12 hours') SELECT r.sequence,r.status AS room_status,m.id AS membership_id,m.role,m.status AS member_status FROM rooms r JOIN memberships m ON m.room_id=r.id CROSS JOIN actor a WHERE r.id=$1 AND (m.session_id=a.id OR (m.role='speaker' AND a.is_operator)) AND (m.role<>'speaker' OR a.is_operator OR ($4 AND r.demo_owner_session_id=a.id)) ORDER BY CASE WHEN m.role='speaker' AND a.is_operator THEN 0 ELSE 1 END,m.created_at LIMIT 1"
+    ).bind(room_id).bind(digest).bind(epoch).bind(security.demo_open_rooms).fetch_optional(pool).await
 }
 
 fn parse_after(query: Option<&str>) -> Option<Option<i64>> {
@@ -156,7 +159,7 @@ fn parse_after(query: Option<&str>) -> Option<Option<i64>> {
 struct LiveConnection {
     room_id: Uuid,
     session_hash: Vec<u8>,
-    expected_epoch: Option<String>,
+    security: Security,
     membership_id: Uuid,
     role: String,
     staff: bool,
@@ -172,7 +175,7 @@ async fn stream(
     let LiveConnection {
         room_id,
         session_hash,
-        expected_epoch,
+        security,
         membership_id,
         role,
         staff,
@@ -199,9 +202,7 @@ async fn stream(
                     pong_deadline = Some(last_ping + PONG_TIMEOUT);
                     tracing::debug!(room_id=%room_id, role=%role, "live heartbeat sent");
                 }
-                let auth = sqlx::query(
-                    "SELECT r.status AS room_status,m.id AS membership_id,m.status AS member_status,m.role FROM rooms r JOIN memberships m ON m.room_id=r.id JOIN browser_sessions s ON s.token_hash=$2 AND s.created_at>now()-interval '24 hours' AND s.last_seen_at>now()-interval '12 hours' WHERE r.id=$1 AND (m.session_id=s.id OR (m.role='speaker' AND $3::text IS NOT NULL AND s.operator_epoch=$3)) ORDER BY CASE WHEN m.role='speaker' AND $3::text IS NOT NULL THEN 0 ELSE 1 END,m.created_at LIMIT 1"
-                ).bind(room_id).bind(&session_hash).bind(expected_epoch.as_deref()).fetch_optional(&pool).await;
+                let auth = authorized_membership(&pool, room_id, &session_hash, &security).await;
                 let auth = match auth {
                     Ok(Some(row)) if row.get::<String,_>("member_status") == "active" && row.get::<String,_>("role") == role && row.get::<Uuid,_>("membership_id") == membership_id => row,
                     Ok(_) => { close(&mut socket, 1008, "room access revoked").await; return; }

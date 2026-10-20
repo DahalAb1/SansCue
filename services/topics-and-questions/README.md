@@ -6,6 +6,23 @@ Without a model credential, `topic-window-stub-v1` is the runtime generator. It 
 
 Generation crosses a provider-neutral `QuestionGenerator` boundary. Output must include an exact evidence excerpt from one contributing utterance; cross-utterance concatenations are rejected. Evidence metadata comes from the actual contributing event rather than the window anchor. Conversation UUID, ordinal, and receive/source times are built by the service, not trusted from generator output. See the [question-generation design decision](../../docs/question-generation-design.md).
 
+Cloudflare AI Gateway also supports Claude using `CLOUDFLARE_API_TOKEN`,
+`CLOUDFLARE_ACCOUNT_ID`, and `TOPICS_MODEL=anthropic/claude-haiku-5.5`.
+Configure only one provider. This calls Cloudflare directly from the existing
+service with bearer authentication, structured JSON output, and the same grounding
+and cadence checks. It does not require a Cloudflare Worker. Request logging and
+caching are bypassed at the gateway. Access, billing credits, and live generation
+must be verified separately; a valid API token alone does not establish model access.
+
+For Amazon Bedrock Nova Micro, set `TOPICS_MODEL=amazon.nova-micro-v1:0` and
+`AWS_REGION=us-east-1` with one Bedrock authentication method. The existing
+generator uses Nova's native InvokeModel JSON format and checks its stop reason,
+question shape and exact transcript evidence before creating a draft. Output is
+bounded to 512 tokens. On EC2, use the Nova-only instance role and host credential
+refresher in the [production runbook](../../deploy/PRODUCTION.md), with no personal
+AWS keys copied to the server. Model success on synthetic speech does not establish
+live Bee delivery or a completed quality comparison.
+
 Generation jobs are claimed with PostgreSQL row locks and a UUID lease token. Expired jobs can be reclaimed, and a heartbeat extends long-running leases. Each generation call has a 30-second default deadline; timeout cancels the future, stops and joins its heartbeat before releasing the lease, and records a retryable `generation_timeout`. Candidate, candidate outbox row, and job completion commit atomically only while the lease token still owns the job. Transient generator failures retry with bounded exponential backoff; jobs become permanently failed after five claims or on invalid output, with only a stable error code persisted. Candidate delivery runs independently of generation with its own durable retry state. This is bounded reliability scaffolding, not a provider integration or production throughput claim.
 
 Run the service with `TOPICS_DATABASE_URL` pointing only to its own DB, `TOPICS_BEE_SERVICE_TOKEN` shared with the Bee outbox worker, `SESSIONS_INTERNAL_URL` pointing to Sessions' private listener, and `SESSIONS_TOPICS_SERVICE_TOKEN` shared with Sessions. The service exposes health/readiness and authenticated `POST /internal/v1/transcript-events`; the sessions private endpoint consumes candidates. No public candidate endpoint exists. Sessions validates that the conversation, room, bound speaker session, and open-room state match before storing; it exposes drafts in room snapshots only to speaker/TA memberships. This service has no publication path; only the room's moderator (TA) can publish a draft through Sessions, and unpublished drafts never appear to audience members.
