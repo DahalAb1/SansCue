@@ -34,15 +34,17 @@ def refresh():
                    "SessionToken": value["Token"], "Expiration": value["Expiration"]}
     directory = ROOT / "local-data/bedrock"
     directory.mkdir(parents=True, exist_ok=True)
-    os.chown(directory, 0, 10003)
-    directory.chmod(0o750)
+    # The runtime's UID is fixed; its primary GID is chosen by useradd and
+    # need not equal the UID. Bind mounts are read-only in the container.
+    os.chown(directory, 10003, 0)
+    directory.chmod(0o700)
     fd, name = tempfile.mkstemp(prefix=".credentials-", dir=directory)
     staged = Path(name)
     try:
         with os.fdopen(fd, "w") as output:
             json.dump(credentials, output)
-        os.chown(staged, 0, 10003)
-        staged.chmod(0o640)
+        os.chown(staged, 10003, 0)
+        staged.chmod(0o600)
         staged.replace(directory / "credentials.json")
     finally:
         staged.unlink(missing_ok=True)

@@ -33,10 +33,10 @@ class CredentialRefresh(unittest.TestCase):
                 refresh.refresh()
                 target = root / "local-data/bedrock/credentials.json"
                 initial = target.read_bytes()
-                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o640)
-                self.assertEqual(stat.S_IMODE(target.parent.stat().st_mode), 0o750)
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(target.parent.stat().st_mode), 0o700)
                 self.assertEqual(json.loads(initial)["SessionToken"], "test-token")
-                self.assertEqual(chown.call_args.args[1:], (0,10003))
+                self.assertEqual(chown.call_args.args[1:], (10003,0))
                 value["Expiration"] = "2000-01-01T00:00:00Z"
                 with self.assertRaises(ValueError):refresh.refresh()
                 self.assertEqual(target.read_bytes(), initial)
