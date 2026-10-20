@@ -6,8 +6,9 @@ Built for the Bee track of the [Build, Ship, Shape: Amazon Developer Hackathon](
 
 **Status:** Rooms, access, live updates, Bee CLI ingestion, staff transcripts,
 moderator question publication, audience feedback, private Q&A and speaker
-charts are implemented. Topics supports optional Claude generation through
-Anthropic or Amazon Bedrock, with an explicit placeholder when unconfigured.
+charts are implemented. The EC2 deployment uses Amazon Bedrock Nova Micro for
+grounded question drafts, with moderator approval before publication. Other
+provider adapters and an explicit placeholder when unconfigured remain available.
 
 Sanskriti's [PR #2](https://github.com/DahalAb1/SansCue/pull/2) records local
 Compose/Apple Watch delivery, question drafts and passing synthetic acceptance.
@@ -18,6 +19,12 @@ full recovery, public HTTPS, capacity or backup/restore acceptance. See the
 [verification record](docs/environment-verification.md) and
 [MVP status](docs/mvp-plan.md). EC2 deployment preparation is documented in the
 [production runbook](deploy/PRODUCTION.md).
+
+The hosted deployment at **https://184.193.80.255** subsequently passed public
+HTTPS, outage recovery and EC2 stop/start checks. On October 20, real Nova inference
+passed the hosted flow using a synthetic transcript, moderator publication and
+an audience rating. Live Bee delivery into EC2, model comparison and audience
+load remain separate gates; see the verification record for exact scope.
 
 ## Documents
 

@@ -4,12 +4,12 @@ We'll build the conference flow in steps. This is the initial scope, not every p
 
 **Recommended stack:** Preact + TypeScript + Vite + CSS; Rust + Axum + Tokio; PostgreSQL + SQLx; Docker Compose on EC2 with Caddy HTTPS.
 
-## Status — October 19, 2026
+## Status — October 20, 2026
 
-- **Step 1:** Local Compose operation is reported in Sanskriti's [PR #2](https://github.com/DahalAb1/SansCue/pull/2) and [PR #3](https://github.com/DahalAb1/SansCue/pull/3). EC2/public HTTPS, persistence/recovery, and full backup/restore acceptance remain open. Deployment preparation is in progress; see the [EC2 runbook](../deploy/PRODUCTION.md).
-- **Steps 2–6 and 10:** Implemented; synthetic acceptance is reported in PR #2. Current moderator/publication behavior and hosted reconnect/access must be rehearsed on the release revision.
+- **Step 1:** EC2/public HTTPS, health/readiness, database outage recovery and automatic recovery at the same IP after EC2 stop/start passed. Three database dumps restored with matching data hashes into temporary check databases on the same host. Off-instance disaster recovery and application rollback remain open; see the [EC2 runbook](../deploy/PRODUCTION.md).
+- **Steps 2–6 and 10:** Implemented; synthetic acceptance is reported in PR #2. Hosted Nova acceptance passed for room creation, staff-only drafts, moderator publication, audience rating and dashboard privacy. Hosted reconnect and full device rehearsal remain open.
 - **Step 7:** Live Apple Watch-to-room delivery is recorded in PR #2; speaker and TA transcript visibility is recorded in PR #3. Full identity/order, retry, recovery and binding-change runbook acceptance is not recorded.
-- **Step 8:** Rolling transcript windows, optional Anthropic/Bedrock generation, evidence validation, and moderator review are implemented. PR #2 reports live drafts without establishing their generator. PR #3 reached Bedrock but hit the daily token limit before a live AI draft appeared.
+- **Step 8:** Rolling transcript windows, provider generation, evidence validation, and moderator review are implemented. Bedrock Nova Micro is active on EC2; actual model-generated drafts passed the hosted synthetic-transcript flow on October 20. Earlier PR #3's Claude quota failure is historical. Live Bee-to-hosted-AI delivery remains to be rehearsed.
 - **Step 9:** No completed two-model comparison is recorded. A provider integration alone does not select the model against quality, delay and cost targets.
 - **Step 11:** Historical synthetic/service checks exist; release-revision load, full-flow latency, cost and recovery measurements remain open.
 

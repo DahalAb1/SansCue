@@ -1,9 +1,11 @@
 # EC2 deployment preparation
 
-Status: a separate low-cost EC2 instance has been created; image builds and
-hosted HTTPS acceptance are in progress. Local live/Compose results are recorded in
-[environment verification](../docs/environment-verification.md). Use a staging
-deployment with consented test speech before inviting an external audience.
+Status: the separate SansCue EC2 deployment serves **https://184.193.80.255**.
+Public HTTPS, access checks, database outage recovery and automatic EC2 stop/start
+recovery passed. Bedrock Nova Micro is active; the hosted synthetic-transcript
+flow passed with a real generated draft, moderator publication and audience rating.
+Live Bee transport, audience load and broader disaster recovery remain open.
+Exact evidence is in [environment verification](../docs/environment-verification.md).
 
 ## Deployment layout
 
@@ -103,13 +105,34 @@ See [Cloudflare REST authentication and billing](https://developers.cloudflare.c
 
 Configure at most one provider in EC2's private `deploy/.env`. All blank runs
 the clearly labeled placeholder; a transcript reaching the UI does not prove
-AI generation. For an initial live Bedrock rehearsal, configure a valid Bedrock
-API key only if the AWS organization permits it. The existing file-based
-short-lived credential refresh path requires a host refresher on EC2 and read
-access for Topics' UID 10003; the Mac's local credential file is not available
-on EC2. Do not assume an EC2 IAM role is used automatically: the current
-generator supports only its configured API key or credential-file paths.
-Verify quota, a successful evidenced draft, latency and cost before the demo.
+AI generation. The hackathon's selected provider is **Amazon Bedrock Nova Micro**
+(`TOPICS_MODEL=amazon.nova-micro-v1:0`, `AWS_REGION=us-east-1`). Set
+`TOPICS_BEDROCK_CREDENTIALS_FILE=/run/bedrock/credentials.json` and leave other
+provider credentials blank. Nova uses its native request/response format, with
+a 512-token output bound and the same transcript grounding, cadence, and moderator
+review. A hosted page without incoming speech does not itself make model calls.
+
+Only the SansCue EC2 instance gets the `sanscue-demo-nova-micro` instance role.
+Its permission is `bedrock:InvokeModel` on
+`arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0` only.
+`refresh-ec2-bedrock-credentials.py` reads that role through host IMDSv2 and
+atomically refreshes the private credential file. The included systemd service
+and timer run every three minutes. Install their copies in `/etc/systemd/system/`,
+run `systemctl daemon-reload`, `systemctl enable --now sanscue-bedrock-credentials.timer`,
+and `systemctl start sanscue-bedrock-credentials.service` before activating Topics.
+They use `/opt/sanscue` as the checkout path. No personal AWS keys are copied to EC2.
+Install `sanscue-bedrock-startup.conf` as
+`/etc/systemd/system/sanscue.service.d/bedrock.conf` so startup attempts a
+credential refresh before launching the application; a refresh failure does not
+prevent the core website from starting.
+
+The mount is read-only in Topics. Credential directory/file modes are 700/600
+and owner UID 10003; the container's primary GID is not assumed to equal its UID.
+The generator re-reads credentials per request, so refresh needs no container
+restart. IMDSv2 remains required with hop limit 1. The timer also refreshes
+after 15 seconds at boot; credential errors are retryable. Run a real request to verify
+IAM access, quota, generation, and cost before the demo. The user's reported
+credit balance is not programmatic verification of Bedrock credit eligibility.
 
 ## Connect the trusted Mac Bee worker
 
@@ -250,8 +273,11 @@ opening an IP URL. Use Caddy 2.10.1 or later. These public certificates last
 about six days and Caddy renews them automatically; keep TCP 80/443 reachable
 and the certificate volume persistent. See [Let's Encrypt IP certificate availability](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)
 and [Caddy IP configuration](https://github.com/caddyserver/caddy/issues/7118).
-An automatically assigned EC2 IP changes after stop/start, so update the public
-origin and Caddy endpoint on each boot before starting the stack.
+This deployment reserves Elastic IP `184.193.80.255`, which remained unchanged in
+the executed stop/start rehearsal. A reserved IPv4 address keeps accruing charges
+while the instance is stopped (about $0.12/day at $0.005/hour). An automatically
+assigned IP would change after stop/start; the initializer reads the public IP
+on each boot. Adapt that initializer before introducing a custom domain.
 
 Judging availability requested: **November 9–20, 2026, America/Chicago**.
 Keep the instance on for that whole window; stop outside demos and judging to
@@ -291,5 +317,8 @@ on later boots, and reads EC2's current public IPv4 through IMDSv2 to refresh
 the origin after stop/start. It never prints credentials. Enable/start
 `sanscue.service` only after images are built; it does not perform image builds
 at boot. The deployment-only SSH key and instance metadata stay in ignored
-`local-data/ec2/`, not in Git. No scheduler or automatic start/stop has yet been
-configured; record how the judging window will be maintained before shutdown.
+`local-data/ec2/`, not in Git. One-time EventBridge schedules were created and
+read back enabled: stop October 24 at 00:00, start November 8 at 23:30, and stop
+November 21 at 00:00, all America/Chicago in 2026. They target only SansCue;
+their role permits starting/stopping only this instance. Future execution is
+still subject to verification. Keep the Elastic IP reserved through judging.

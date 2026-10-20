@@ -1,6 +1,6 @@
 # Development Context
 
-Updated October 19, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
+Updated October 20, 2026. Team development guidance. Read alongside the [MVP plan](mvp-plan.md), which holds the implementation steps.
 
 ## Current implementation status
 
@@ -13,9 +13,13 @@ Sanskriti's PRs #2 and #3 record local Compose/Apple Watch delivery and staff
 transcript visibility. PR #2 reports live drafts and synthetic acceptance; PR #3
 reports Bedrock connectivity blocked by the daily token limit before any live
 AI draft. See [environment verification](environment-verification.md) for exact
-reported scope and revisions. Full device recovery, model comparison, hosted
-HTTPS, capacity, and backup/restore remain separate gates. Deployment preparation
-uses the [EC2 runbook](../deploy/PRODUCTION.md).
+reported scope and revisions. The hosted EC2 deployment subsequently passed HTTPS,
+access checks, database outage recovery, same-IP stop/start recovery and same-host
+database dump/restore checks. Bedrock Nova Micro passed actual generation on three
+synthetic excerpts and the hosted transcript-to-draft-to-publication/rating flow.
+Live Bee transport into EC2, full device recovery, model comparison, capacity,
+off-instance disaster recovery and application rollback remain separate gates.
+Deployment uses the [EC2 runbook](../deploy/PRODUCTION.md).
 
 ## Implementation agreement
 

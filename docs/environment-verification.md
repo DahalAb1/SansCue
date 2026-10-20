@@ -1,6 +1,6 @@
 # Environment verification status
 
-Updated October 19, 2026. Results below distinguish teammate-reported live
+Updated October 20, 2026. Results below distinguish teammate-reported live
 runs from checks executed in this checkout. A result applies to its recorded
 revision and scope; it is not automatically acceptance of later changes.
 
@@ -69,9 +69,63 @@ by adaptation alone.
 
 A separate t3.small EC2 instance with a 30 GiB encrypted gp3 disk was created
 in us-east-1 for SansCue. The existing OpenClaw instance was not modified.
-Image builds and hosted acceptance are in progress. Availability requested:
+At that preparation checkpoint, image builds and hosted acceptance were in progress;
+the executed results below supersede that pending status. Availability requested:
 November 9–20, 2026 (America/Chicago), with shutdown permitted outside judging.
 Optional email-login work was set aside locally and is not part of this demo.
+
+## October 19–20 hosted deployment and Nova acceptance
+
+The separate SansCue t3.small host serves **https://184.193.80.255** with a
+reserved Elastic IP, valid public TLS, private service/database ports and a boot
+service. The OpenClaw instance was not modified. All production image builds and
+three real-Docker build-context isolation fixture cases passed. Public HTTP/API
+checks passed for open room creation, browser ownership, audience permissions,
+Secure/HttpOnly cookies, HTTPS redirects, SPA routing, unknown API 404s and a
+429 response to bootstrap flooding despite forged client-IP headers.
+
+All three database dumps restored successfully into separate temporary check
+databases on the same host; data-only dump hashes matched. This is not an
+off-instance or separate-stack disaster recovery rehearsal. The Sessions outage
+test initially queried the wrong listener (private port 3401, returning 404).
+Retesting the public HTTPS endpoints passed: liveness 200/readiness 503 during
+the database outage, readiness 200 after recovery, with Sessions' start time
+unchanged. EC2 stop/start was executed: the same HTTPS IP returned 200 and all
+six core containers became healthy automatically. The three start/stop schedules
+were read back enabled, targeting only SansCue; future scheduled executions have
+not yet occurred. Judging remains November 9–20 in America/Chicago.
+
+On October 20, Cloudflare Haiku inference returned HTTP 402, insufficient AI
+Gateway balance. Its prepared adapter was not activated. The selected provider
+became **Amazon Bedrock Nova Micro**, `amazon.nova-micro-v1:0`, us-east-1.
+Adapter revision `7f41b0c` and EC2 credential helper `1c9b971` were verified.
+Nineteen library/provider regression tests passed, 31 deployment checks passed,
+and Topics Clippy, formatting and whitespace checks passed. Three actual Nova
+generator requests, on learning rate, photosynthesis and hash-table chaining,
+returned clarity questions with evidence grounded in the supplied synthetic text.
+
+The hosted Topics image was built and activated with the existing private
+credential-file path. The instance role permits only `bedrock:InvokeModel` on
+Nova Micro in us-east-1. Host IMDSv2 credentials refresh every three minutes;
+the read-only container mount is readable by UID 10003 and uses 700/600 modes.
+Personal AWS keys were not copied to EC2. Scheduled refresh and container read
+access were checked; a temporary Mac test-credential file was removed afterward.
+
+**Hosted acceptance passed with real Nova inference and synthetic speech:** room
+creation, explicit binding and test-worker acknowledgement, transcript ingress,
+grounded draft delivery, audience draft privacy, speaker/audience publication
+rejection, moderator publication, audience rating and speaker dashboard counts.
+The observed draft was “How clear is the role of the learning rate in gradient
+steps?”; transcript submission through rating completion took **4.26 seconds**
+in this one run. The test room was ended and unbound afterward. Public readiness
+remained 200. This single timing is not a latency percentile or load measurement.
+
+Remaining gates: live Watch/Bee transport into the hosted deployment, device
+recovery cases, broader model-quality comparison, expected audience load,
+off-instance backup retention/restore and application rollback rehearsal.
+The user reported $118.83 remaining AWS credits; credit coverage/application was
+not independently verified. AWS's Free Tier balance API reported $0 Free Tier
+credits on a paid account, which does not verify separate promotional awards.
 
 ## Historical October 10 acceptance gates (`411fba0`)
 
