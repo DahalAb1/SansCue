@@ -11,6 +11,36 @@ use uuid::Uuid;
 
 const SPEECH: &str = "The learning rate decides how far each gradient step moves the weights.";
 
+#[tokio::test]
+#[ignore = "requires a private AWS credentials file; makes three small billable Nova requests"]
+async fn nova_live_grounded_candidates() {
+    let file = std::env::var("NOVA_TEST_CREDENTIALS_FILE").expect("credentials file required");
+    let generator = ClaudeGenerator::bedrock(
+        TopicWindowGenerator::new(Default::default(), "gate"),
+        BedrockAuth::CredentialsFile(file.into()),
+        "us-east-1",
+        Some("amazon.nova-micro-v1:0"),
+        None,
+    )
+    .unwrap();
+    for speech in [
+        SPEECH,
+        "Photosynthesis converts light energy into chemical energy. Plants use sunlight, water, and carbon dioxide to make glucose and release oxygen.",
+        "A hash table uses a hash function to choose a bucket for each key. Collisions happen when different keys choose the same bucket. Chaining stores those entries together in a list.",
+    ] {
+        let outcome = generator.generate(input(speech)).await.unwrap();
+        let GenerationOutcome::Candidate(question) = outcome else {
+            panic!("expected grounded candidate, got {outcome:?}");
+        };
+        assert_eq!(
+            question.generator_version,
+            "amazon.nova-micro-v1:0/topic-check-v1"
+        );
+        assert!(speech.contains(&question.evidence_excerpt));
+        println!("PASS Nova grounded question: {}", question.text);
+    }
+}
+
 /// Explicit paid smoke check only; ordinary test runs never use live credentials.
 #[tokio::test]
 #[ignore = "requires private Cloudflare token/account files and makes one billable request"]

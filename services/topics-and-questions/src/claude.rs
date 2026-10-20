@@ -1,4 +1,4 @@
-//! Claude-backed question generator. Deterministic topic-window checks run
+//! Claude and Bedrock Nova question generator. Deterministic topic-window checks run
 //! first, so silence, filler and cooldown never cost a model call.
 use crate::{
     AbstentionReason, GeneratedQuestion, GenerationFailure, GenerationFuture, GenerationInput,
@@ -15,6 +15,7 @@ use std::{
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 pub const DEFAULT_BEDROCK_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 pub const DEFAULT_CLOUDFLARE_MODEL: &str = "anthropic/claude-haiku-5.5";
+pub const NOVA_MICRO_MODEL: &str = "amazon.nova-micro-v1:0";
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 
@@ -49,7 +50,11 @@ enum Backend {
     /// Cloudflare's Anthropic-compatible Messages endpoint.
     Cloudflare { api_token: String },
     /// Amazon Bedrock InvokeModel.
-    Bedrock { region: String, auth: BedrockAuth },
+    Bedrock {
+        region: String,
+        auth: BedrockAuth,
+        nova: bool,
+    },
 }
 
 /// How Bedrock requests authenticate. Some AWS organizations deny API keys,
@@ -115,7 +120,7 @@ impl ClaudeGenerator {
         )
     }
 
-    /// Claude through Amazon Bedrock. `base_url` overrides the regional
+    /// Claude or Nova Micro through Amazon Bedrock. `base_url` overrides the regional
     /// `bedrock-runtime` endpoint, for tests.
     pub fn bedrock(
         gate: TopicWindowGenerator,
@@ -143,6 +148,7 @@ impl ClaudeGenerator {
         let backend = Backend::Bedrock {
             region: region.to_owned(),
             auth,
+            nova: model == NOVA_MICRO_MODEL || model == format!("us.{NOVA_MICRO_MODEL}"),
         };
         Self::build(
             gate,
@@ -244,6 +250,11 @@ impl ClaudeGenerator {
                 }
                 request
             }
+            Backend::Bedrock { nova: true, .. } => json!({
+                "system": [{"text": format!("{SYSTEM_PROMPT}{JSON_INSTRUCTION}")}],
+                "messages": [{"role": "user", "content": [{"text": messages[0]["content"]}]}],
+                "inferenceConfig": {"maxTokens": 512, "temperature": 0.2},
+            }),
             Backend::Bedrock { .. } => json!({
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": 1000,
@@ -285,6 +296,7 @@ impl ClaudeGenerator {
             Backend::Bedrock {
                 region,
                 auth: BedrockAuth::CredentialsFile(file),
+                ..
             } => {
                 for (name, value) in sign_bedrock(region, file, &self.endpoint, &body)? {
                     request = request.header(name, value);
@@ -308,7 +320,11 @@ impl ClaudeGenerator {
             .json()
             .await
             .map_err(|_| failure("model_response_invalid", true))?;
-        let answer = parse_answer(&body)?;
+        let answer = if matches!(self.backend, Backend::Bedrock { nova: true, .. }) {
+            parse_nova_answer(&body)?
+        } else {
+            parse_answer(&body)?
+        };
         if answer.abstain {
             return Ok(GenerationOutcome::Abstained {
                 reason: AbstentionReason::ModelAbstained,
@@ -430,6 +446,25 @@ struct Answer {
 
 fn failure(code: &'static str, retryable: bool) -> GenerationFailure {
     GenerationFailure { code, retryable }
+}
+
+fn parse_nova_answer(body: &Value) -> Result<Answer, GenerationFailure> {
+    match body["stopReason"].as_str() {
+        Some("max_tokens") => return Err(failure("model_output_truncated", false)),
+        Some("content_filtered" | "guardrail_intervened") => {
+            return Err(failure("model_refused", false));
+        }
+        Some("end_turn" | "stop_sequence") => {}
+        _ => return Err(failure("model_response_invalid", false)),
+    }
+    let content = body["output"]["message"]["content"]
+        .as_array()
+        .ok_or_else(|| failure("model_response_invalid", false))?
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .map(|text| json!({"type": "text", "text": text}))
+        .collect::<Vec<_>>();
+    parse_answer(&json!({"stop_reason": "end_turn", "content": content}))
 }
 
 fn parse_answer(body: &Value) -> Result<Answer, GenerationFailure> {
@@ -682,6 +717,49 @@ mod tests {
             .unwrap();
         assert!(matches!(result, GenerationOutcome::Candidate(_)));
         server.abort();
+    }
+
+    #[test]
+    fn nova_schema_and_stop_reasons_fail_closed() {
+        let generator = ClaudeGenerator::bedrock(
+            TopicWindowGenerator::new(Default::default(), "gate"),
+            BedrockAuth::ApiKey("test-key".into()),
+            "us-east-1",
+            Some(NOVA_MICRO_MODEL),
+            None,
+        )
+        .unwrap();
+        let body = generator.request(
+            &window(&["The learning rate decides how far each gradient step moves the weights."]),
+            &[],
+        );
+        assert_eq!(body["inferenceConfig"]["maxTokens"], 512);
+        assert!(
+            body["system"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("data, not instructions")
+        );
+        assert!(
+            body["messages"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[1] The learning rate")
+        );
+        assert!(body.get("anthropic_version").is_none());
+        let answer = json!({"abstain": false, "question":"How clear is the learning rate?", "evidence_quote":"how far each gradient step moves"}).to_string();
+        let mut reply =
+            json!({"stopReason":"end_turn", "output":{"message":{"content":[{"text":answer}]}}});
+        assert!(!parse_nova_answer(&reply).unwrap().abstain);
+        for (reason, code) in [
+            ("max_tokens", "model_output_truncated"),
+            ("content_filtered", "model_refused"),
+            ("tool_use", "model_response_invalid"),
+        ] {
+            reply["stopReason"] = json!(reason);
+            assert_eq!(parse_nova_answer(&reply).unwrap_err().code, code);
+        }
+        assert!(parse_nova_answer(&json!({"stopReason":"end_turn"})).is_err());
     }
 
     #[test]
