@@ -1,32 +1,76 @@
-# Topics and questions: candidate preview pipeline
+# Topics and questions
 
-This is an independent Rust service with its own PostgreSQL database. It accepts only the canonical SansCue transcript envelope from the Bee worker on the private service network, stores it idempotently, and projects it into one generation job. Rolling windows, cadence, and abstention decide whether that job produces a development candidate. Its own transactional candidate outbox retries delivery to Sessions. No service reads another service's database.
+This Rust service turns room transcript context into private check-in drafts.
+It owns its PostgreSQL database and does not read another service's tables.
+For generation policy, defaults, and publication behavior, see
+[question generation](../../docs/question-generation-design.md).
 
-Without a model credential, `topic-window-stub-v1` is the runtime generator. It remains a deterministic, explicit placeholder: `What is the key implication of: <excerpt>?`. It is not an AI/model result and is not evidence that a proposed question is useful. With `ANTHROPIC_API_KEY` or a Bedrock credential configured, Claude drafts the question after the same deterministic gates pass (see the design decision below). The service builds a rolling speech-ordered window, splits on silence (measured from the end of the previous utterance when start/end offsets are known), applies a question cooldown, and abstains for filler, pauses, unfinished sentences, repetition, already-answered markers, weak grounding, or insufficient context. Before any generator call it also skips transcript received more than `TOPICS_MAX_TRANSCRIPT_AGE_SECONDS` ago and throttles calls per room to one per `TOPICS_MIN_ATTEMPT_INTERVAL_SECONDS` of speech. Recent drafts for the room are passed to the model and a draft that rephrases one, or quotes the same passage, abstains as `repetitive_topic`. Model output must be a single-line clarity check-in of at most 25 words. Defaults are starting points for evaluation, not settled values: 90-second cooldown, 60 words of context, 180-second maximum window, 5-second silence boundary, 45-second transcript age, 15-second attempt interval, and the last 5 drafts within 30 minutes. The matching `TOPICS_*` settings accept positive integer overrides. `tests/generation_policy.rs` replays a timed scripted lecture against these defaults with a deterministic stand-in generator; it checks the policy, not model quality.
+## Data flow
 
-Generation crosses a provider-neutral `QuestionGenerator` boundary. Output must include an exact evidence excerpt from one contributing utterance; cross-utterance concatenations are rejected. Evidence metadata comes from the actual contributing event rather than the window anchor. Conversation UUID, ordinal, and receive/source times are built by the service, not trusted from generator output. See the [question-generation design decision](../../docs/question-generation-design.md).
+The Bee worker sends canonical transcript events to authenticated
+`POST /internal/v1/transcript-events` on the private service listener. Topics
+stores events idempotently and creates generation jobs. A job assembles recent
+speech, applies context and cadence checks, and requests a draft or abstention.
+The model's evidence quote must match one contributing utterance. Topics adds
+the source identifiers and saves an accepted candidate for delivery to Sessions.
 
-Cloudflare AI Gateway also supports Claude using `CLOUDFLARE_API_TOKEN`,
-`CLOUDFLARE_ACCOUNT_ID`, and `TOPICS_MODEL=anthropic/claude-haiku-5.5`.
-Configure only one provider. This calls Cloudflare directly from the existing
-service with bearer authentication, structured JSON output, and the same grounding
-and cadence checks. It does not require a Cloudflare Worker. Request logging and
-caching are bypassed at the gateway. Access, billing credits, and live generation
-must be verified separately; a valid API token alone does not establish model access.
+Sessions verifies the room and recording association before accepting a
+candidate. Only staff can see drafts; only a moderator can publish. Topics has
+no public candidate or publication endpoint.
 
-For Amazon Bedrock Nova Micro, set `TOPICS_MODEL=amazon.nova-micro-v1:0` and
-`AWS_REGION=us-east-1` with one Bedrock authentication method. The existing
-generator uses Nova's native InvokeModel JSON format and checks its stop reason,
-question shape and exact transcript evidence before creating a draft. Output is
-bounded to 512 tokens. On EC2, use the Nova-only instance role and host credential
-refresher in the [production runbook](../../deploy/PRODUCTION.md), with no personal
-AWS keys copied to the server. Model success on synthetic speech does not establish
-live Bee delivery or a completed quality comparison.
+## Configuration
 
-Generation jobs are claimed with PostgreSQL row locks and a UUID lease token. Expired jobs can be reclaimed, and a heartbeat extends long-running leases. Each generation call has a 30-second default deadline; timeout cancels the future, stops and joins its heartbeat before releasing the lease, and records a retryable `generation_timeout`. Candidate, candidate outbox row, and job completion commit atomically only while the lease token still owns the job. Transient generator failures retry with bounded exponential backoff; jobs become permanently failed after five claims or on invalid output, with only a stable error code persisted. Candidate delivery runs independently of generation with its own durable retry state. This is bounded reliability scaffolding, not a provider integration or production throughput claim.
+Supply environment variables to the process; Rust does not load `.env` files.
+The [local runtime guide](../../deploy/README.md) describes Compose setup.
 
-Run the service with `TOPICS_DATABASE_URL` pointing only to its own DB, `TOPICS_BEE_SERVICE_TOKEN` shared with the Bee outbox worker, `SESSIONS_INTERNAL_URL` pointing to Sessions' private listener, and `SESSIONS_TOPICS_SERVICE_TOKEN` shared with Sessions. The service exposes health/readiness and authenticated `POST /internal/v1/transcript-events`; the sessions private endpoint consumes candidates. No public candidate endpoint exists. Sessions validates that the conversation, room, bound speaker session, and open-room state match before storing; it exposes drafts in room snapshots only to speaker/TA memberships. This service has no publication path; only the room's moderator (TA) can publish a draft through Sessions, and unpublished drafts never appear to audience members.
+| Variable | Purpose |
+| --- | --- |
+| `TOPICS_DATABASE_URL` | Private URL for this service's database |
+| `TOPICS_BEE_SERVICE_TOKEN` | Shared authentication with the Bee worker |
+| `SESSIONS_INTERNAL_URL` | Sessions' private listener |
+| `SESSIONS_TOPICS_SERVICE_TOKEN` | Authentication for candidate delivery |
+| `TOPICS_SESSIONS_SERVICE_TOKEN` | Authentication for staff transcript requests from Sessions |
+| `HTTP_HOST`, `HTTP_PORT` | Listener; defaults to `127.0.0.1:3002` |
 
-The Bee worker persists the accepted canonical event and its delivery outbox row in the same Bee DB transaction. Repeated delivery is safe: Topics verifies the stable event ID against a projection hash and creates one job; Sessions verifies/deduplicates the candidate, then records the room event in its own transaction. Transient outbox delivery failures retry while allowing unrelated rows to progress. Explicit invalid/conflicting transcript events and permanently stale candidate callbacks are recorded as terminal rejections with machine-readable codes; they are not retried indefinitely. An identical candidate callback replayed after its original acceptance remains an accepted duplicate even if the room was subsequently ended or unbound.
+Keep credentials private and expose this listener only to trusted services.
+Cadence overrides are positive integers named in
+[main.rs](src/main.rs); Compose exposes the overrides described in its runtime guide.
 
-The cross-service candidate boundary has been exercised through synthetic replay. A Bee CLI live adapter now exists, but **REAL BEE DEVICE / WATCH-TO-ROOM VERIFICATION** remains an external gate until the recorded runbook scenarios pass. Docker startup and the current branch's PostgreSQL acceptance must also be verified separately.
+## Model access
+
+The hosted deployment uses **Amazon Bedrock Nova Micro**. Set
+`TOPICS_MODEL=amazon.nova-micro-v1:0` and `AWS_REGION=us-east-1`, with exactly one
+Bedrock authentication method:
+
+- `AWS_BEARER_TOKEN_BEDROCK`: an authorized Bedrock API key supplied privately.
+- `TOPICS_BEDROCK_CREDENTIALS_FILE`: a private credentials file refreshed by the
+  host. The [EC2 runbook](../../deploy/PRODUCTION.md#model-credentials) documents
+  the instance role, refresh timer, and container permissions.
+
+Leave other provider credentials blank. Nova's structured response is bounded
+to 512 output tokens and passes question-shape and transcript-evidence checks.
+An optional direct Anthropic path uses `ANTHROPIC_API_KEY` and `TOPICS_MODEL`;
+configure only one provider at a time. With no provider credentials,
+`topic-window-stub-v1` is an explicit deterministic placeholder, not AI output.
+
+## Delivery and failure handling
+
+Generation jobs use PostgreSQL row locks, ownership tokens, and expiring leases.
+A heartbeat extends active work. The default generation deadline is 30 seconds;
+timeouts cancel the call and record a retryable error. Transient failures use
+bounded exponential backoff; jobs fail permanently after five claims or invalid
+output. Only stable error codes are persisted.
+
+The candidate, its pending delivery, and job completion are committed together
+while the worker still owns the lease. A separate delivery loop retries Sessions
+callbacks. Receivers verify event identity and payload consistency to avoid
+repeated effects. Invalid or stale work receives terminal rejection; a duplicate
+of an already accepted callback stays accepted even if the room has since ended.
+
+## Verification
+
+[Tests](tests/) cover generation policy, provider output validation, job leases,
+and persistent delivery. The [synthetic acceptance guide](../acceptance/README.md)
+checks the three services together without model access. Actual Nova calls have
+also passed with synthetic speech; the full live Bee-to-hosted-AI rehearsal
+remains unrecorded. See the [verification record](../../docs/environment-verification.md).
