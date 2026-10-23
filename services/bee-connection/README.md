@@ -6,7 +6,9 @@ authenticated sessions command outbox, applies binding commands through the Bee
 store, and forwards accepted canonical events from the Bee-owned transactional
 outbox to Topics. An opt-in adapter can also supervise an authenticated Bee CLI
 `new-utterance` stream on the same host. See the [v1 contract](contracts/README.md).
-Watch-to-CLI delivery is observed; full Watch-to-room acceptance remains open.
+Local Watch-to-room delivery is reported in PRs #2/#3. Full device-runbook
+acceptance and live transport into EC2 remain open; see the
+[verification record](../../docs/environment-verification.md).
 
 ## Synthetic replay
 

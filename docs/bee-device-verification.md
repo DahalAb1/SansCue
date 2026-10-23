@@ -1,18 +1,22 @@
 # Bee device / live API verification runbook
 
+This guide checks that actual spoken context reaches the intended SansCue room
+and supports its speaker, audience, and moderator interaction. A connected
+listener alone does not establish that the room is receiving useful context.
+
 **Status: partial live evidence recorded.** [PR #2](https://github.com/DahalAb1/SansCue/pull/2)
 reports Apple Watch recording pickup, room transcript delivery and drafts on
 local Compose. [PR #3](https://github.com/DahalAb1/SansCue/pull/3) reports live
 transcript visibility for speaker and TA. These reports do not fill every
-scenario below. Complete the remaining scenario records before full Step 7
+scenario below. Complete the remaining scenario records before full device
 acceptance; preserve the reported live passes. Synthetic replay remains separate.
 
 ## Preconditions and safety
 
 - Use a dedicated test room and a non-production SansCue deployment/database.
-- Have authorized access to the physical Bee source and the actual transport
-  (CLI, MCP, or Agent Skill) that will be used for the demo. Record versions;
-  do not assume a protocol from the synthetic fixture.
+- Have authorized access to the Bee device or Apple Watch and the authenticated
+  Bee CLI used by the current worker. Record versions; do not assume a protocol
+  from the synthetic fixture.
 - Confirm permission to capture the selected speech. Use consented test speech
   or a controlled recording; redact participant names and sensitive content in
   notes. Never put API keys, bearer tokens, or unredacted transcripts in this
@@ -54,10 +58,13 @@ pass.
    second test conversation or room. Verify delayed/stale binding commands do
    not associate later events with the previous room. Verify unbound events do
    not create room-visible candidates.
-6. **End-to-end delivery.** For accepted events, verify the Bee outbox delivery
-   is acknowledged only after Topics accepts it, repeat delivery is
-   idempotent, and a resulting candidate remains unpublished until moderator publication and
-   staff-only. This checks integration plumbing, not model quality.
+6. **Audience interaction.** Verify that accepted speech reaches Topics and
+   repeated delivery does not create duplicate effects. Confirm a generated
+   draft stays staff-only until a moderator publishes it. Respond as an
+   audience member and check the speaker's feedback. Submit a private question,
+   send a moderator reply, and verify another audience member cannot read it.
+   Record whether the draft used a real model or the development placeholder;
+   delivery alone does not establish question quality.
 7. **Stop and cleanup.** Stop the stream, end the test room, revoke temporary
    access, and remove private test captures according to the agreed retention
    policy. Confirm no credentials were written to logs or Git.
@@ -82,7 +89,7 @@ Cleanup completed:
 Operator:
 ```
 
-## Step 7 acceptance decision
+## Acceptance decision
 
 Accept only when connection/authentication, room binding, source identity and
 ordering semantics, retry/deduplication, disconnect/recovery, and delivery have

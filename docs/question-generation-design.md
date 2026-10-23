@@ -1,83 +1,98 @@
-# Question generation design decision
+# How check-ins are generated
 
-## Decision
+Generated check-ins are one way SansCue makes participation easier. Someone
+who would not raise a hand or write a question can still indicate whether the
+current topic is clear. Together, these responses give the speaker information
+to consider while the discussion is happening.
 
-Prefer **evidence-first, human-reviewed question generation** over free-form
-generation from an entire transcript. A candidate must carry an exact source
-quote from the originating transcript event; the Topics service verifies that
-the quote is a contiguous substring before it can be persisted or delivered.
-The question text and evidence quote are distinct fields: the quote is
-provenance, not a claim that the transcript already answers the question.
+Bee's transcript supplies the conversational context. AI prepares a short
+clarity question with supporting evidence; a moderator decides what the
+audience sees. Private written questions provide a separate path for needs
+that a quick response cannot express.
 
-The next model-backed stage should select a question-worthy claim or unresolved
-point from a coherent topic window, then phrase one concise, self-contained
-follow-up grounded in that anchor. It should suppress weakly grounded,
-already-answered, repetitive, or low-value suggestions and allow abstention.
-The current feature branch implements provisional rolling windows, silence
-boundaries, cadence, and deterministic abstention. These defaults are
-development policy, not accepted question quality; representative targets and
-model evaluation remain open.
+## From transcript to draft
 
-## Why this approach
+1. The presenter selects the room's Bee recording. The Bee worker sends its
+   accepted transcript events to the Topics service.
+2. Topics assembles a recent window in speech order. It checks context length,
+   freshness, pauses, repetition, and the interval since earlier drafts before
+   requesting generation.
+3. The model returns a question and supporting quote, or declines to generate.
+   The hosted configuration uses Amazon Bedrock Nova Micro.
+4. Topics validates the output and matches the quote to one contributing
+   utterance. It supplies the recording and event identifiers itself.
+5. The draft reaches Sessions, where only room staff can inspect it. A moderator
+   can name its topic, edit, dismiss, or publish it.
 
-- A full-transcript prompt makes it difficult to see which passage motivated a
-  candidate and encourages unsupported details. An exact quote makes the
-  proposed anchor inspectable.
-- The service, not the model, builds conversation ID, event ordinal, timestamp,
-  and excerpt metadata. The generator cannot invent event provenance.
-- Quote validation is a cheap deterministic guardrail. It does **not** prove
-  semantic entailment; the speaker/TA review and the model evaluation must still
-  check relevance, correctness, clarity, redundancy, and usefulness.
-- Generating against a selected anchor gives evaluation a stable basis for
-  checking groundedness and answerability. Research on meeting-transcript
-  dialogs similarly uses human verification and evidence attribution; question
-  generation evaluations also separate answerability, non-redundancy, and
-  coverage. See [the meeting-transcript study](https://arxiv.org/abs/2405.01121)
-  and [AURA-QG](https://aclanthology.org/2025.ijcnlp-long.159/).
+The source quote lets the reviewer inspect what prompted the question. A
+matching quote does not prove the question is relevant or correctly interprets
+the explanation. The presenter has read-only access to drafts; publication is
+restricted to the moderator role, called `ta` in the code.
 
-## Implemented boundary and remaining work
+## Generation and review defaults
 
-- `GeneratedQuestion` now includes an evidence excerpt. Before a candidate is
-  accepted, Topics checks that the question is non-empty, bounded, phrased as a
-  question, and that its bounded evidence excerpt is an exact substring of
-  this event's transcript text.
-- Candidate evidence uses that validated excerpt. Sessions and the web client
-  accept bounded, non-empty generator-version labels rather than hardcoding
-  `stub-v1`, so a later evaluated provider can identify its generator version.
-- With `ANTHROPIC_API_KEY` set, Topics uses `claude-opus-5-5` (override with
-  `TOPICS_MODEL`) after the deterministic topic-window gate passes. The model
-  receives the window as numbered transcript lines and returns structured JSON:
-  abstain, or one Clear / Partly clear / Need help check-in plus an evidence
-  quote. The quote is matched back to the transcript's exact spelling; an
-  unmatched quote abstains as `weakly_grounded`. Speech older than 45 seconds
-  abstains as `stale_transcript`, so a backlog never produces late questions.
-  Candidates are labelled `<model>/topic-check-v1`.
-- Without a key, `topic-window-stub-v1` remains the runtime generator. It is a
-  deterministic placeholder, not an LLM or product-quality question generator.
-- Topics now applies its gates before any generator call: transcript backlog
-  older than 45 seconds, the 90-second cooldown, fewer than 60 words of
-  context, filler, pauses, unfinished sentences, exact repeats, and at most one
-  generator call per room per 15 seconds of speech. Spoken text is wrapped as
-  data and the system prompt forbids following instructions inside it. The
-  last five drafts (30 minutes) are listed to the model as earlier check-ins;
-  a draft that rephrases one, or quotes the same passage, abstains as
-  `repetitive_topic`. Model output must be a single-line clarity check-in of
-  at most 25 words (`unsuitable_question` otherwise).
-- These values are the plan's starting points. A timed scripted lecture
-  (`tests/generation_policy.rs`, deterministic stand-in generator, not a model)
-  produced one draft per explained idea, the first within about 40 seconds of
-  speech; suppressed the repeated explanation; restarted context after a
-  12-second slide change; and called the generator 6 times for 53 utterances.
-  It also showed the trade-off of a 90-second cooldown: the second idea's
-  draft arrived about a minute after that idea began. Re-tune
-  `TOPICS_MIN_QUESTION_INTERVAL_SECONDS`, `TOPICS_MIN_WINDOW_WORDS` and
-  `TOPICS_SILENCE_BOUNDARY_SECONDS` against a rehearsal with real speech.
-- Sessions keeps the moderator's review queue: at most three visible drafts,
-  each expiring ten minutes after arrival or its latest moderator edit
-  (`SESSIONS_MAX_VISIBLE_DRAFTS`, `SESSIONS_DRAFT_TTL_SECONDS`). Dismissed and
-  expired drafts cannot be published from a stale screen.
-- A two-model comparison on consented excerpts has not been run; see the
-  [model comparison worksheet](model-evaluation-worksheet.md).
-- Before enabling a model, validate or revise the provisional window/cadence
-  policy; compare two providers on the same frozen excerpts; record the exact
-  model and prompt; and keep moderator (TA) approval before publishing.
+| Control | Default |
+| --- | --- |
+| Minimum context | 60 words |
+| Maximum window duration | 180 seconds |
+| Silence boundary | 5 seconds |
+| Maximum transcript age | 45 seconds |
+| Minimum interval between drafts | 90 seconds |
+| Minimum interval between attempts | 15 seconds of speech |
+| Recent draft context | Last 5 drafts within 30 minutes |
+| Generated question | One line, at most 25 words |
+| Nova output limit | 512 tokens |
+| Visible review queue | At most 3 drafts |
+| Draft expiry | 10 minutes after arrival or latest saved edit |
+
+These are starting settings for rehearsal. They do not promise a question at
+fixed intervals. See the [Topics runtime guide](../services/topics-and-questions/README.md)
+for configuration and the [local runtime guide](../deploy/README.md) for the
+settings passed through Compose. Without model credentials, a labeled,
+deterministic placeholder exercises the pipeline without AI inference.
+
+## Publication and audience responses
+
+Only one check-in is active at a time. Publishing another preserves the earlier
+question's history. With a topic and no custom wording, publication asks
+“How clear is {topic}?” Corrections create a new wording version; saved answers
+retain their recorded version. Dismissed or expired drafts cannot be published.
+
+Audience members answer Clear, Partly clear, or Need help. The presenter chart
+uses each room membership's latest answer per normalized topic:
+
+```text
+confusion score = round(100 × (Need help + 0.5 × Partly clear) / respondents)
+```
+
+A topic with no responses has no score. The score summarizes self-reported
+clarity among respondents. It helps a speaker decide what to revisit; it does
+not establish the whole room's knowledge or make that decision for them.
+
+## Context and private questions
+
+Audience members can submit their own written questions. When a check-in is
+active, the question stores a reference to it. This connects the submission to
+that check-in, but does not automatically attach a transcript passage. The
+thread is visible to its author and authorized room staff.
+
+Moderators can send private replies; speakers can inspect the threads and
+respond aloud. Check-in generation is automatic, while publication and written
+replies require a moderator. Flagging and deleting audience questions are not
+implemented. Dismissing a generated draft is a separate action.
+
+## Reliability and remaining evaluation
+
+Generation jobs use time-limited ownership, timeouts, and bounded retries.
+Candidate creation and its pending delivery are saved together; repeated
+messages are checked to avoid duplicate effects. Model failures therefore need
+not stop existing audience feedback.
+
+[Recorded checks](environment-verification.md) include actual Nova inference
+with synthetic speech. Before making quality, latency, or scale claims, test
+representative live explanations and measure relevance, repetition, delay,
+moderator edits, and request cost. No comparative model benchmark is claimed.
+
+Implementation: [generation policy](../services/topics-and-questions/src/lib.rs),
+[model adapter](../services/topics-and-questions/src/claude.rs),
+[publication and permissions](../services/sessions/src/access.rs).

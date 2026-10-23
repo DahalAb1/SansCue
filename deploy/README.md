@@ -16,11 +16,17 @@ Dockerfiles use repository-root build contexts. Root `.dockerignore` defaults to
 
 ## AI question generation
 
-Topics drafts check-in questions with Claude when `ANTHROPIC_API_KEY` is set in
-`deploy/.env`; `TOPICS_MODEL` optionally overrides the default
-`claude-opus-5-5`. Transcript windows are then sent to the Anthropic API. With
-the key blank, the deterministic placeholder generator runs and nothing leaves
-the machine. Recreate `topics-and-questions` after changing either value.
+Topics generates check-in drafts when model credentials are configured. To use
+Bedrock Nova Micro locally, set `TOPICS_MODEL=amazon.nova-micro-v1:0`,
+`AWS_REGION=us-east-1`, and a private `AWS_BEARER_TOKEN_BEDROCK` in `deploy/.env`.
+Leave other provider credentials blank. This requires model access and incurs
+provider charges. Selected transcript windows are sent to Bedrock.
+
+The optional direct Anthropic path uses `ANTHROPIC_API_KEY` and `TOPICS_MODEL`.
+Configure only one provider. With all provider credentials blank, a labeled,
+deterministic placeholder runs without a model call. Recreate
+`topics-and-questions` after changing settings. For the production instance-role
+configuration, use [the EC2 runbook](PRODUCTION.md#model-credentials).
 
 Draft frequency uses demo starting points that you can override in
 `deploy/.env` after a rehearsal: `TOPICS_MIN_QUESTION_INTERVAL_SECONDS` (90),
@@ -47,7 +53,15 @@ PostgreSQL creates the database and role on first initialization only. Its `POST
 
 ## Operator provisioning
 
-Operator access is optional for stack startup but **required to create rooms**. Compose passes `SESSIONS_OPERATOR_TOKEN_SHA256`, `SESSIONS_OPERATOR_EPOCH`, and `SESSIONS_IDEMPOTENCY_HMAC_KEY` from `deploy/.env` to sessions at container runtime only (never build args, image layers, or Git). With any of the three blank or absent, sessions starts healthy but operator login and room creation stay disabled (fail closed). There are no defaults. A malformed hash or key (not exactly 64 hex characters) makes sessions exit at startup.
+Operator access is optional for startup and is required for room creation in
+the default closed local configuration. The separate
+`SESSIONS_DEMO_OPEN_ROOMS=true` mode allows browser-owned room creation without
+operator login, as explained in the [production runbook](PRODUCTION.md#open-hackathon-access-and-abuse-limits).
+Compose passes `SESSIONS_OPERATOR_TOKEN_SHA256`, `SESSIONS_OPERATOR_EPOCH`, and
+`SESSIONS_IDEMPOTENCY_HMAC_KEY` at runtime only. Missing values disable operator
+login; room creation also stays disabled unless open-demo mode is enabled.
+There are no operator credential defaults. A malformed hash or key (not exactly
+64 hex characters) makes Sessions exit at startup.
 
 - `SESSIONS_OPERATOR_TOKEN_SHA256`: SHA-256 hex of a random 256-bit operator credential. Only the hash goes in `deploy/.env`.
 - `SESSIONS_OPERATOR_EPOCH`: separate, non-secret label (letters, digits, `. _ -`). Changing it ends existing operator sessions.
@@ -77,7 +91,13 @@ python3 -B -m unittest discover -s deploy -p 'test_*.py'
 - Topics-and-questions: `topics-and-questions:3002`, also published on loopback-only `127.0.0.1:3402` for the trusted host live-Bee worker.
 - PostgreSQL: three independent DBs at `sessions-db:5432`, `bee-db:5432`, and `topics-db:5432`. Sessions publishes `127.0.0.1:5432`; Bee publishes loopback-only `127.0.0.1:55433` for the trusted host worker.
 
-The Bee worker handles room-binding commands and retries accepted canonical transcript events through its transactional outbox. Its deterministic replay harness remains a separate local command; Compose does not start or claim a real Bee device transport. Topics uses provisional rolling windows, cadence, and abstention with the deterministic `topic-window-stub-v1` placeholder, then retries candidate delivery to Sessions. A preview is unpublished and visible only to room speakers/TAs; it is not model-generated and never appears to audience members. Live Bee device/API verification remains separate.
+The Bee worker handles room associations and retries accepted transcript events
+through its transactional outbox. Replay is a separate local command; default
+Compose startup does not start the host's real Bee CLI transport. Topics uses
+rolling windows and cadence with the configured model, or the explicit
+`topic-window-stub-v1` placeholder when unconfigured. Drafts remain staff-only
+until a moderator publishes. Live device behavior and model output require
+their own evidence; see [verification](../docs/environment-verification.md).
 
 ## Live Bee host check
 
@@ -171,8 +191,8 @@ Keep backups private in ignored `local-data/`; they may contain future user data
 
 The commands below cover the Sessions database only. Bee and Topics own
 separate databases/volumes, so a complete product backup must also dump and
-restore `bee-db` and `topics-db` independently. Those additional service
-database backup/restore procedures have not yet been acceptance-tested.
+restore `bee-db` and `topics-db` independently. All three databases have recorded same-host restore checks in the production
+environment; the local procedure here covers Sessions only.
 
 Back up the running Sessions database:
 
@@ -204,4 +224,9 @@ To check persistence without creating product tables, record existing migration 
 
 ## Verification status
 
-Operator Compose pass-through and documentation are covered by static checks (`python3 -B deploy/check-operator-config.py`), and the provisioning utility by stdlib unit tests, only; Docker/Compose behavior with and without operator values is unverified. Authored against the Stage 0 foundation contract. The authoring host has no Docker/Compose or Caddy executable; this isolated branch has no application source. Image builds, Compose config validation, `up --wait`, HTTP checks, persistence, and backup/restore execution therefore require integration and a Docker-enabled development machine. Static checks are not Stage 1 acceptance.
+Local Compose and Apple Watch runs were reported in PRs #2 and #3. Later hosted
+checks covered image builds, HTTPS, access controls, outage recovery, and
+same-host database restore. See the [verification record](../docs/environment-verification.md)
+for revisions and scope. Re-run the relevant checks when changing configuration;
+these historical results do not establish every local procedure or a full
+live-device-to-hosted-AI rehearsal.

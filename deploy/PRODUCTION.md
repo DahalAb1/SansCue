@@ -1,4 +1,4 @@
-# EC2 deployment preparation
+# EC2 production runbook
 
 Status: the separate SansCue EC2 deployment serves **https://184.193.80.255**.
 Public HTTPS, access checks, database outage recovery and automatic EC2 stop/start
@@ -91,18 +91,6 @@ database operation before changing service configuration. PostgreSQL's
 
 ## Model credentials
 
-For Claude Haiku through Cloudflare, use `CLOUDFLARE_API_TOKEN` and
-`CLOUDFLARE_ACCOUNT_ID`, with `TOPICS_MODEL=anthropic/claude-haiku-5.5` in the
-private runtime file. Leave Anthropic and Bedrock credentials blank. The token
-must have Workers AI Read access to that account. EC2 calls Cloudflare's
-`/accounts/{account_id}/ai/v1/messages` endpoint using bearer authentication;
-no Worker or hosting migration is required. Gateway request logging and caching
-are bypassed for transcript requests. Structured responses still pass the same
-grounding checks and moderator review. Third-party Haiku inference uses AI Gateway
-credits; the student Workers subscription waiver does not establish that these
-credits are available. Verify a real request before changing the hosted service.
-See [Cloudflare REST authentication and billing](https://developers.cloudflare.com/ai-gateway/usage/rest-api/).
-
 Configure at most one provider in EC2's private `deploy/.env`. All blank runs
 the clearly labeled placeholder; a transcript reaching the UI does not prove
 AI generation. The hackathon's selected provider is **Amazon Bedrock Nova Micro**
@@ -131,8 +119,7 @@ and owner UID 10003; the container's primary GID is not assumed to equal its UID
 The generator re-reads credentials per request, so refresh needs no container
 restart. IMDSv2 remains required with hop limit 1. The timer also refreshes
 after 15 seconds at boot; credential errors are retryable. Run a real request to verify
-IAM access, quota, generation, and cost before the demo. The user's reported
-credit balance is not programmatic verification of Bedrock credit eligibility.
+IAM access, quota, generation, and cost before the demo. Confirm applicable credits in the AWS account before relying on them.
 
 ## Connect the trusted Mac Bee worker
 
@@ -233,7 +220,8 @@ the previous built images. Check out/build a reviewed revision during a planned
 window; record readiness and a smoke-test result after startup. Old binaries
 may not support new migrations: application rollback is permitted only after
 schema compatibility is checked, otherwise recover the matching backups into
-a separate stack. The first restore and rollback rehearsal remain release gates.
+a separate stack. Same-host dump/restore has a recorded pass; off-instance
+recovery and application rollback rehearsal remain release gates.
 
 ## Open hackathon access and abuse limits
 
@@ -275,17 +263,17 @@ and the certificate volume persistent. See [Let's Encrypt IP certificate availab
 and [Caddy IP configuration](https://github.com/caddyserver/caddy/issues/7118).
 This deployment reserves Elastic IP `184.193.80.255`, which remained unchanged in
 the executed stop/start rehearsal. A reserved IPv4 address keeps accruing charges
-while the instance is stopped (about $0.12/day at $0.005/hour). An automatically
-assigned IP would change after stop/start; the initializer reads the public IP
-on each boot. Adapt that initializer before introducing a custom domain.
+while the instance is stopped. An automatically assigned IP would change after
+stop/start; the initializer reads the public IP on each boot. Adapt that
+initializer before introducing a custom domain.
 
-Judging availability requested: **November 9–20, 2026, America/Chicago**.
-Keep the instance on for that whole window; stop outside demos and judging to
-save compute cost. A t3.small in us-east-1 currently costs $0.0208/hour, plus
-$0.005/hour for public IPv4 and approximately $2.40/month for 30 GiB gp3. Twelve
-continuous days are about $8.40 before tax, model usage, backups and setup.
-The existing t3.large OpenClaw server is a separate budget item; no capacity or
-cost reduction on it is assumed. Instance sizing remains subject to rehearsal.
+Keep the deployment available for judging, **November 9–20, 2026**, including
+the closing time of noon Pacific on November 20. These dates come from the
+[official rules](https://amazonappdev2026.devpost.com/rules). Verify the configured
+start/stop schedule and leave time for certificate renewal and a live rehearsal.
+Compute, storage, reserved IPv4, backups, and model calls can incur charges;
+check the account's current pricing and credits. The coding-agent host is a
+separate deployment. Instance sizing remains subject to rehearsal.
 
 ## Checks for configuration changes
 
